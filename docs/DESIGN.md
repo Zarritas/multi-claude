@@ -92,7 +92,7 @@ ClaudeBrowserApp
 5. `SessionsScreen` con scan real, sin acciones.
 6. Wiring de Enter / n / launcher.
 7. Manejo de huérfanos (estilos + bloqueo de actions).
-8. Pruebas end-to-end manuales con `uv run mc`.
+8. Pruebas end-to-end manuales con `uv run multi-claude`.
 
 ## Lo que queda fuera (v2+)
 

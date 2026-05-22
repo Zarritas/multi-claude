@@ -83,47 +83,77 @@ Todas son extensiones razonables para una v2.
 
 ## Instalación
 
-Lo más rápido — instalación global aislada desde GitHub, queda en PATH como `mc`:
+### Requisitos previos
+
+- **Python 3.10+** (la mayoría de distros modernas lo traen).
+- **`claude`** (Claude Code CLI) en `PATH`. Sin él, `multi-claude` arranca pero no podrá reanudar sesiones — la propia TUI te lo dirá.
+- *(Opcional)* **`tmux`** o **`zellij`** para que Claude se abra en un split sin perder la TUI. Sin multiplexer, la TUI se suspende y vuelve cuando cierras Claude.
+
+### Paso 1 — Instalar un gestor de herramientas Python (si no tienes ninguno)
+
+Cualquiera de los dos funciona; **uv** es el más rápido.
 
 ```bash
-pipx install git+https://github.com/Zarritas/multi-claude.git
-# o, si prefieres uv:
+# uv (recomendado)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# o pipx
+sudo apt install pipx && pipx ensurepath      # Debian/Ubuntu
+brew install pipx && pipx ensurepath          # macOS
+```
+
+Cierra y abre la terminal para que `~/.local/bin` entre en `PATH`.
+
+### Paso 2 — Instalar multi-claude
+
+Una sola línea, sin clonar nada:
+
+```bash
 uv tool install git+https://github.com/Zarritas/multi-claude.git
-```
-
-Y ya:
-
-```bash
-mc
-```
-
-Para actualizar a la última versión:
-
-```bash
-pipx upgrade multi-claude     # o: uv tool upgrade multi-claude
-```
-
-Para desinstalar:
-
-```bash
-pipx uninstall multi-claude   # o: uv tool uninstall multi-claude
-```
-
-### Requisitos
-
-- Python 3.10+
-- `claude` (Claude Code CLI) en `PATH`
-- Opcional: `tmux` o `zellij` para abrir Claude en un split sin perder la TUI
-
-### Instalación desde una copia local
-
-Si has clonado el repo y quieres instalar tu versión:
-
-```bash
-pipx install .
 # o
-uv tool install .
+pipx install git+https://github.com/Zarritas/multi-claude.git
 ```
+
+### Paso 3 — Lanzarlo
+
+```bash
+multi-claude
+```
+
+Deberías ver la lista de tus proyectos de Claude. Pulsa `Enter` para entrar en uno, `Enter` otra vez para reanudar una sesión.
+
+### Actualizar a la última versión
+
+```bash
+uv tool upgrade multi-claude
+# o
+pipx upgrade multi-claude
+```
+
+### Desinstalar
+
+```bash
+uv tool uninstall multi-claude
+# o
+pipx uninstall multi-claude
+```
+
+### Instalación desde una copia local del repo
+
+Si has clonado el repo y quieres instalar tu versión modificada:
+
+```bash
+git clone https://github.com/Zarritas/multi-claude.git
+cd multi-claude
+uv tool install .       # o: pipx install .
+```
+
+### Troubleshooting
+
+- **`multi-claude: command not found`** tras instalar → `~/.local/bin` no está en tu `PATH`.
+  - `uv` y `pipx` añaden automáticamente esa ruta a la config de tu shell, pero hace falta reiniciar la terminal. Si persiste, ejecuta `uv tool dir --bin` o `pipx environment --value PIPX_BIN_DIR` y añade esa ruta a tu `PATH`.
+- **`claude no encontrado en PATH`** al pulsar Enter sobre una sesión → instala Claude Code CLI siguiendo su guía oficial.
+- **Proyectos en gris (huérfanos)** → la carpeta original del proyecto ya no existe (moviste o borraste el directorio). Las sesiones siguen ahí pero no se pueden reanudar; bórralas con `d`.
 
 ## Desarrollo
 
@@ -133,7 +163,7 @@ cd multi-claude
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
-mc                  # arranca la TUI
+multi-claude        # arranca la TUI
 pytest              # corre la suite (74 tests)
 ```
 

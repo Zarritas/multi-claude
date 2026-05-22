@@ -33,7 +33,7 @@ Repository = "https://github.com/Zarritas/multi-claude"
 Issues = "https://github.com/Zarritas/multi-claude/issues"
 
 [project.scripts]
-mc = "multi_claude.__main__:main"
+multi-claude = "multi_claude.__main__:main"
 
 [project.optional-dependencies]
 dev = [

@@ -1,4 +1,4 @@
-"""Entrypoint. `python -m multi_claude` and the `mc` console script both land here."""
+"""Entrypoint. `python -m multi_claude` and the `multi-claude` console script both land here."""
 
 from __future__ import annotations
 
