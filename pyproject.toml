@@ -4,12 +4,33 @@ version = "0.1.0"
 description = "TUI to browse and resume Claude Code projects and sessions"
 readme = "README.md"
 requires-python = ">=3.10"
+license = { text = "MIT" }
 authors = [
     { name = "Jesús Lorenzo", email = "jesus.lorenzo@factorlibre.com" },
+]
+keywords = ["claude", "claude-code", "tui", "textual", "terminal"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development",
+    "Topic :: Terminals",
 ]
 dependencies = [
     "textual>=0.80",
 ]
+
+[project.urls]
+Homepage = "https://github.com/Zarritas/multi-claude"
+Repository = "https://github.com/Zarritas/multi-claude"
+Issues = "https://github.com/Zarritas/multi-claude/issues"
 
 [project.scripts]
 mc = "multi_claude.__main__:main"

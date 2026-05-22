@@ -83,20 +83,58 @@ Todas son extensiones razonables para una v2.
 
 ## Instalación
 
+Lo más rápido — instalación global aislada desde GitHub, queda en PATH como `mc`:
+
 ```bash
-uv tool install .
-# o
-pipx install .
+pipx install git+https://github.com/Zarritas/multi-claude.git
+# o, si prefieres uv:
+uv tool install git+https://github.com/Zarritas/multi-claude.git
 ```
 
-Entrypoint: `mc`.
+Y ya:
+
+```bash
+mc
+```
+
+Para actualizar a la última versión:
+
+```bash
+pipx upgrade multi-claude     # o: uv tool upgrade multi-claude
+```
+
+Para desinstalar:
+
+```bash
+pipx uninstall multi-claude   # o: uv tool uninstall multi-claude
+```
+
+### Requisitos
+
+- Python 3.10+
+- `claude` (Claude Code CLI) en `PATH`
+- Opcional: `tmux` o `zellij` para abrir Claude en un split sin perder la TUI
+
+### Instalación desde una copia local
+
+Si has clonado el repo y quieres instalar tu versión:
+
+```bash
+pipx install .
+# o
+uv tool install .
+```
 
 ## Desarrollo
 
 ```bash
-uv sync
-uv run mc
-uv run pytest
+git clone https://github.com/Zarritas/multi-claude.git
+cd multi-claude
+python -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
+
+mc                  # arranca la TUI
+pytest              # corre la suite (74 tests)
 ```
 
 ## Estructura del código
