@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -85,9 +86,21 @@ def alternate_for(mode: LaunchMode) -> LaunchMode:
 
 
 def config_path() -> Path:
-    """Return the path to the config file (does not create it)."""
+    """Return the path to the config file (does not create it).
+
+    Resolution order:
+      1. ``XDG_CONFIG_HOME`` if set (any platform — explicit opt-in for XDG layout).
+      2. ``%APPDATA%`` on Windows (idiomatic per-user roaming config location).
+      3. ``~/.config`` everywhere else.
+    """
     xdg = os.environ.get("XDG_CONFIG_HOME")
-    base = Path(xdg).expanduser() if xdg else Path.home() / ".config"
+    if xdg:
+        base = Path(xdg).expanduser()
+    elif sys.platform == "win32":
+        appdata = os.environ.get("APPDATA")
+        base = Path(appdata) if appdata else Path.home() / ".config"
+    else:
+        base = Path.home() / ".config"
     return base / "multi-claude" / "config.json"
 
 

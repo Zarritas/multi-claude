@@ -109,8 +109,13 @@ def test_persistence_across_instances(tmp_path: Path) -> None:
 def test_dangling_assignments_are_dropped_on_load(tmp_path: Path) -> None:
     """If the file references a folder that's no longer in `folders`, drop the row."""
     path = tmp_path / "f.json"
+    # Use platform-native path strings as keys, because ``folder_of`` does
+    # ``str(Path(...))`` lookups and on Windows ``str(Path("/y"))`` is ``\\y``.
+    key_y = str(Path("/y"))
+    import json as _json
+
     path.write_text(
-        '{"folders": ["A"], "assignments": {"/x": "Ghost", "/y": "A"}}',
+        _json.dumps({"folders": ["A"], "assignments": {"/x": "Ghost", key_y: "A"}}),
         encoding="utf-8",
     )
     store = ProjectFoldersStore(path)

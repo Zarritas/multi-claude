@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -77,8 +78,27 @@ def test_config_path_respects_xdg_config_home(
     assert config_path() == tmp_path / "multi-claude" / "config.json"
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX default path")
 def test_config_path_defaults_to_home_config(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    assert config_path() == Path.home() / ".config" / "multi-claude" / "config.json"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows default path")
+def test_config_path_defaults_to_appdata_on_windows(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    assert config_path() == tmp_path / "multi-claude" / "config.json"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows fallback when APPDATA missing")
+def test_config_path_falls_back_to_home_config_when_appdata_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.delenv("APPDATA", raising=False)
     assert config_path() == Path.home() / ".config" / "multi-claude" / "config.json"
 
 

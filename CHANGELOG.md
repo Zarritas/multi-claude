@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Windows 10/11 support**. The TUI now runs natively on Windows: `Path.home() / ".claude" / "projects"` correctly resolves to `C:\Users\<user>\.claude\projects`, and project rows show real Windows paths (`C:\…`, `D:\…`) extracted from each session's `cwd` field.
+  - **Windows Terminal** added to the emulator table — detected via `WT_SESSION` env var. In `window`/`auto` mode the launcher spawns `wt.exe new-tab -d <cwd> -- claude [...]`, opening a new tab in the current WT window (or a new window if none is open).
+  - **ConEmu** detected via `ConEmuPID` and surfaced as "not yet supported" with a clear error message (instead of falling through silently).
+  - Config file path now prefers `%APPDATA%\multi-claude\config.json` on Windows (typically `C:\Users\<user>\AppData\Roaming\multi-claude\config.json`). `XDG_CONFIG_HOME` is still honoured if set, and `~/.config` remains the fallback when `%APPDATA%` is unavailable.
+  - On Windows, `detect_multiplexer()` returns `None` (no tmux/zellij/terminator in the native environment) and `auto` falls through directly to window or suspend mode.
 - User-defined project folders (`f` in ProjectsScreen) with **nesting**: paths like `Trabajo/Cliente A/Backend`. ProjectsScreen shows one row per root folder summarising direct members and descendants; `Enter` drills into a FolderScreen that lists subfolders + directly-assigned projects mixed together. Inside a folder, `n` creates a subfolder, `e` renames (cascading to descendants and assignments), `d` deletes (cascade unassigns members), `f` removes a project from the folder. Assignments override worktree-grouping for the assigned members. Persists to `~/.config/multi-claude/project-folders.json`. Filter (`/`) matches folder names. Dangling assignments (folder deleted out-of-band) are auto-cleaned on load.
 - Bulk session cleanup (`D`) in SessionsScreen: pick a preset age (1w / 1m / 3m / 6m / 1y) or a custom `YYYY-MM-DD` date, see a live count of how many sessions would be deleted, confirm. Active sessions are skipped automatically.
 - Per-session colour override (`c`): pick from a palette; persists to `~/.config/multi-claude/session-colors.json`.

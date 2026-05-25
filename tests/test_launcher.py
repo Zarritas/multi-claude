@@ -16,6 +16,17 @@ from multi_claude.launcher import (
     launch_claude,
 )
 
+
+def _p(posix_path: str) -> str:
+    """Return the platform-native string form of a POSIX-style test path.
+
+    Tests build paths from literal POSIX strings (e.g. ``/work/x``) for readability,
+    but the launcher passes them through ``str(Path(...))`` which yields ``\\work\\x``
+    on Windows. This helper produces the expected on-disk representation.
+    """
+    return str(Path(posix_path))
+
+
 # Env vars that signal a terminal emulator. Cleared in tests that want
 # detect_terminal_emulator() to return None so we can isolate other branches.
 _EMULATOR_ENVS = (
@@ -30,6 +41,8 @@ _EMULATOR_ENVS = (
     "GHOSTTY_RESOURCES_DIR",
     "GHOSTTY_BIN_DIR",
     "VSCODE_INJECTION",
+    "WT_SESSION",
+    "ConEmuPID",
 )
 
 
@@ -150,7 +163,7 @@ def test_launch_claude_uses_tmux(monkeypatch: pytest.MonkeyPatch) -> None:
         launch_claude(Path("/work/x"), "sid-1")
 
     assert runner.calls == [
-        ["tmux", "split-window", "-h", "-c", "/work/x", "claude", "--resume", "sid-1"]
+        ["tmux", "split-window", "-h", "-c", _p("/work/x"), "claude", "--resume", "sid-1"]
     ]
 
 
@@ -170,7 +183,9 @@ def test_launch_claude_uses_zellij(monkeypatch: pytest.MonkeyPatch) -> None:
     ):
         launch_claude(Path("/work/y"), None)
 
-    assert runner.calls == [["zellij", "action", "new-pane", "--cwd", "/work/y", "--", "claude"]]
+    assert runner.calls == [
+        ["zellij", "action", "new-pane", "--cwd", _p("/work/y"), "--", "claude"]
+    ]
 
 
 def test_launch_claude_uses_terminator(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -193,7 +208,7 @@ def test_launch_claude_uses_terminator(monkeypatch: pytest.MonkeyPatch) -> None:
         [
             "terminator",
             "--new-tab",
-            "--working-directory=/work/t",
+            f"--working-directory={_p('/work/t')}",
             "-x",
             "claude",
             "--resume",
@@ -247,7 +262,7 @@ def test_launch_claude_fallback_runs_inline(monkeypatch: pytest.MonkeyPatch) -> 
     ):
         launch_claude(Path("/work/z"), "sid-2", app=None)
 
-    assert calls == [(["claude", "--resume", "sid-2"], "/work/z")]
+    assert calls == [(["claude", "--resume", "sid-2"], _p("/work/z"))]
 
 
 def test_launch_claude_window_mode_uses_kitty(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -272,7 +287,7 @@ def test_launch_claude_window_mode_uses_kitty(monkeypatch: pytest.MonkeyPatch) -
 
     assert popen_calls == [
         (
-            ["kitty", "--directory", "/work/k", "claude", "--resume", "sid-k"],
+            ["kitty", "--directory", _p("/work/k"), "claude", "--resume", "sid-k"],
             {
                 "start_new_session": True,
                 "stdin": subprocess.DEVNULL,
@@ -303,7 +318,7 @@ def test_launch_claude_window_mode_falls_back_to_suspend_when_no_emulator(
     ):
         launch_claude(Path("/work/q"), "sid-q", mode="window")
 
-    assert calls == [(["claude", "--resume", "sid-q"], "/work/q")]
+    assert calls == [(["claude", "--resume", "sid-q"], _p("/work/q"))]
 
 
 def test_launch_claude_suspend_mode_skips_multiplexer(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -325,7 +340,7 @@ def test_launch_claude_suspend_mode_skips_multiplexer(monkeypatch: pytest.Monkey
     ):
         launch_claude(Path("/work/s"), None, mode="suspend")
 
-    assert calls == [(["claude"], "/work/s")]
+    assert calls == [(["claude"], _p("/work/s"))]
 
 
 def test_detect_emulator_prefers_term_program_ghostty(
@@ -415,7 +430,14 @@ def test_launch_claude_window_mode_uses_ghostty(monkeypatch: pytest.MonkeyPatch)
         launch_claude(Path("/work/g"), "sid-g", mode="window")
 
     assert popen_calls == [
-        ["ghostty", "--working-directory=/work/g", "-e", "claude", "--resume", "sid-g"]
+        [
+            "ghostty",
+            f"--working-directory={_p('/work/g')}",
+            "-e",
+            "claude",
+            "--resume",
+            "sid-g",
+        ]
     ]
 
 
@@ -440,4 +462,48 @@ def test_launch_claude_auto_falls_through_to_window(monkeypatch: pytest.MonkeyPa
     ):
         launch_claude(Path("/work/w"), None, mode="auto")
 
-    assert popen_calls == [["wezterm", "start", "--cwd", "/work/w", "--", "claude"]]
+    assert popen_calls == [["wezterm", "start", "--cwd", _p("/work/w"), "--", "claude"]]
+
+
+def test_launch_claude_window_mode_uses_windows_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Inside Windows Terminal (WT_SESSION set), window mode spawns a new tab via wt.exe."""
+    _clear_mux_envs(monkeypatch)
+    _clear_emulator_envs(monkeypatch)
+    monkeypatch.setenv("WT_SESSION", "abc-123")
+
+    def fake_which(cmd: str) -> str | None:
+        return f"/fake/{cmd}" if cmd in ("claude", "wt.exe") else None
+
+    popen_calls: list[list[str]] = []
+
+    class FakePopen:
+        def __init__(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+            popen_calls.append(argv)
+
+    with (
+        patch("multi_claude.launcher.shutil.which", side_effect=fake_which),
+        patch("multi_claude.launcher.subprocess.Popen", FakePopen),
+    ):
+        launch_claude(Path("/work/wt"), "sid-wt", mode="window")
+
+    assert popen_calls == [
+        ["wt.exe", "new-tab", "-d", _p("/work/wt"), "--", "claude", "--resume", "sid-wt"]
+    ]
+
+
+def test_detect_emulator_conemu_unsupported_raises_in_window_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ConEmu is detectable but not yet supported for spawning new windows."""
+    _clear_mux_envs(monkeypatch)
+    _clear_emulator_envs(monkeypatch)
+    monkeypatch.setenv("ConEmuPID", "4321")
+
+    with patch(
+        "multi_claude.launcher.shutil.which",
+        side_effect=lambda cmd: "/fake/claude" if cmd == "claude" else None,
+    ):
+        with pytest.raises(LauncherError, match="conemu"):
+            launch_claude(Path("/work/c"), "sid-c", mode="window")

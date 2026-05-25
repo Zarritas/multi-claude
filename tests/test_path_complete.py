@@ -39,9 +39,13 @@ def test_missing_parent_returns_empty(tmp_path: Path) -> None:
     assert list_suggestions(str(tmp_path / "does-not-exist" / "foo")) == []
 
 
-def test_expand_handles_tilde(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    monkeypatch.setenv("HOME", "/tmp/home-fake")
-    assert expand("~/proj") == Path("/tmp/home-fake/proj")
+def test_expand_handles_tilde(monkeypatch, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+    fake_home = tmp_path / "home-fake"
+    # `Path.home()` honors USERPROFILE on Windows and HOME on POSIX. Set both
+    # so the test works on either platform.
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setenv("USERPROFILE", str(fake_home))
+    assert expand("~/proj") == fake_home / "proj"
 
 
 def test_common_prefix_single_candidate_appends_slash(tmp_path: Path) -> None:

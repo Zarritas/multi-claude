@@ -120,6 +120,12 @@ def _argv_ghostty(cwd: str, argv: list[str]) -> list[str]:
     return ["ghostty", f"--working-directory={cwd}", "-e", *argv]
 
 
+def _argv_wt(cwd: str, argv: list[str]) -> list[str]:
+    # `wt.exe new-tab -d <cwd> -- <cmd...>` opens the command in a new tab of the
+    # current Windows Terminal window (or a new window if none is open).
+    return ["wt.exe", "new-tab", "-d", cwd, "--", *argv]
+
+
 def _argv_generic(binary: str) -> ArgvBuilder:
     def build(cwd: str, argv: list[str]) -> list[str]:
         joined = " ".join(_shell_quote(a) for a in argv)
@@ -173,6 +179,12 @@ EMULATORS: tuple[Emulator, ...] = (
         term_programs=("ghostty", "Ghostty"),
         argv=_argv_ghostty,
     ),
+    Emulator(
+        id="windows-terminal",
+        env_vars=("WT_SESSION",),
+        argv=_argv_wt,
+        binary="wt.exe",
+    ),
     # Detected but not supported as standalone windows. Detection still helps surface
     # a clear "not supported" message instead of silently falling through.
     Emulator(
@@ -199,6 +211,11 @@ EMULATORS: tuple[Emulator, ...] = (
     Emulator(
         id="warp",
         term_programs=("WarpTerminal",),
+        argv=None,
+    ),
+    Emulator(
+        id="conemu",
+        env_vars=("ConEmuPID",),
         argv=None,
     ),
 )

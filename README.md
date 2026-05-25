@@ -88,13 +88,14 @@ Atajos:
 | GNOME Terminal    | `gnome-terminal --working-directory=<cwd> -- claude ...`              |
 | foot              | `foot --working-directory=<cwd> claude ...`                           |
 | Terminator        | `terminator --working-directory=<cwd> -x claude ...` (ventana nueva)  |
+| Windows Terminal  | `wt.exe new-tab -d <cwd> -- claude ...`                               |
 | x-terminal-emulator / xterm | `<term> -e sh -c "cd <cwd> && exec claude ..."`             |
 
 Detección del emulador (en orden):
 
 1. `$TERM_PROGRAM` (canónico, lo publican Ghostty, WezTerm…).
-2. Env var específica del emulador (`$KITTY_PID`, `$GHOSTTY_RESOURCES_DIR`, `$ALACRITTY_LOG`, etc.).
-3. Fallback genérico: `x-terminal-emulator` o `xterm` si están en PATH.
+2. Env var específica del emulador (`$KITTY_PID`, `$GHOSTTY_RESOURCES_DIR`, `$ALACRITTY_LOG`, `$WT_SESSION`, etc.).
+3. Fallback genérico: `x-terminal-emulator` o `xterm` si están en PATH (POSIX).
 
 Si ninguno se detecta en modo `window`, la TUI se suspende como último recurso.
 
@@ -113,7 +114,9 @@ Solo se configura el **predeterminado**. El **alternativo** (Shift+Enter) se der
 | `window`       | `suspend`                 |
 | `suspend`      | `window`                  |
 
-Persistido en `~/.config/multi-claude/config.json` (o `$XDG_CONFIG_HOME/multi-claude/config.json`):
+Persistido en:
+- **Linux/macOS**: `~/.config/multi-claude/config.json` (o `$XDG_CONFIG_HOME/multi-claude/config.json` si está definido).
+- **Windows**: `%APPDATA%\multi-claude\config.json` (típicamente `C:\Users\<user>\AppData\Roaming\multi-claude\config.json`).
 
 ```json
 {
@@ -144,11 +147,15 @@ Todas son extensiones razonables para una v2.
 
 ### Requisitos previos
 
-- **Linux** (Ubuntu/Debian/Fedora/Arch testados). macOS no está soportado de momento — falta detección nativa de iTerm2 / Terminal.app. Contribuciones bienvenidas.
-- **Python 3.10+** (la mayoría de distros modernas lo traen).
+- **Linux** (Ubuntu/Debian/Fedora/Arch testados) o **Windows 10/11**. macOS no está soportado de momento — falta detección nativa de iTerm2 / Terminal.app. Contribuciones bienvenidas.
+- **Python 3.10+** (la mayoría de distros modernas lo traen; en Windows usa el instalador oficial o `winget install Python.Python.3.13`).
 - **`claude`** (Claude Code CLI) en `PATH`. Sin él, `multi-claude` arranca pero no podrá reanudar sesiones — la propia TUI te lo dirá.
-- *(Opcional)* **`tmux`**, **`zellij`** o **`terminator`** para que Claude se abra en un split/pestaña sin perder la TUI.
-- *(Opcional)* Un emulador soportado (**kitty**, **WezTerm**, **Ghostty**, **Alacritty**, **Konsole**, **GNOME Terminal**, **foot**, **Terminator**, **xterm**…) — el modo `window` abre una ventana nueva en el emulador que estés usando. Sin nada de esto, la TUI se suspende y vuelve cuando cierras Claude.
+- *(Opcional, Linux)* **`tmux`**, **`zellij`** o **`terminator`** para que Claude se abra en un split/pestaña sin perder la TUI.
+- *(Opcional)* Un emulador soportado:
+  - **Linux**: kitty, WezTerm, Ghostty, Alacritty, Konsole, GNOME Terminal, foot, Terminator, xterm.
+  - **Windows**: **Windows Terminal** (modo `window` abre `claude` en una pestaña nueva vía `wt.exe`).
+
+  Sin nada de esto, la TUI se suspende y vuelve cuando cierras Claude.
 
 ### Paso 1 — Instalar un gestor de herramientas Python (si no tienes ninguno)
 
