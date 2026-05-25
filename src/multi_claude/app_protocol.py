@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from multi_claude.colors import SessionColorsStore
     from multi_claude.config import Config
     from multi_claude.names import NamesStore
+    from multi_claude.project_folders import ProjectFoldersStore
     from multi_claude.project_names import ProjectNamesStore
 
 
@@ -20,5 +21,6 @@ class AppProtocol(Protocol):
     names: NamesStore
     project_names: ProjectNamesStore
     session_colors: SessionColorsStore
+    project_folders: ProjectFoldersStore
 
     def update_prefs(self, prefs: Config) -> None: ...

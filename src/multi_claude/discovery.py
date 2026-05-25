@@ -114,6 +114,38 @@ class WorktreeGroup:
         return sum(p.session_count for p in self.members)
 
 
+@dataclass(frozen=True)
+class ProjectFolder:
+    """A user-defined folder containing projects (and possibly subfolders).
+
+    ``name`` is the **full path** of the folder (e.g. ``"Trabajo/Cliente A"``).
+    ``members`` are projects assigned **directly** to this folder. Subfolders
+    are resolved on demand by FolderScreen via the store.
+
+    ``descendant_member_count`` and ``descendant_session_count`` aggregate
+    everything below (used by the ProjectsScreen row to summarise the subtree).
+    """
+
+    name: str
+    members: tuple[Project, ...]
+    descendant_member_count: int = 0
+    descendant_session_count: int = 0
+    descendant_last_activity: float = 0.0
+
+    @property
+    def last_activity(self) -> float:
+        direct = max((p.last_activity for p in self.members), default=0.0)
+        return max(direct, self.descendant_last_activity)
+
+    @property
+    def session_count(self) -> int:
+        return sum(p.session_count for p in self.members) + self.descendant_session_count
+
+    @property
+    def total_member_count(self) -> int:
+        return len(self.members) + self.descendant_member_count
+
+
 def group_worktrees(projects: list[Project]) -> list[Project | WorktreeGroup]:
     """Collapse projects sharing ``git_common_dir`` into a :class:`WorktreeGroup`.
 
@@ -171,3 +203,81 @@ def resolve_git_common_dir(path: Path) -> Path | None:
     if not candidate.is_absolute():
         candidate = (path / candidate).resolve()
     return candidate
+
+
+def group_into_folders(
+    rows: list[Project | WorktreeGroup],
+    folder_of: dict[str, str],
+) -> list[Project | WorktreeGroup | ProjectFolder]:
+    """Pull folder-assigned projects out of ``rows`` and bundle them by folder name.
+
+    ``folder_of`` maps ``str(encoded_path) → folder_name``. The grouping rule:
+
+    - A ``WorktreeGroup`` whose every member shares the same folder is moved as
+      a whole (the worktree-group is preserved inside the folder result via the
+      individual member projects — folders contain only ``Project`` rows for
+      simplicity; if you need the worktree structure, turn off the folder view).
+    - A ``WorktreeGroup`` whose members are mixed (some assigned, some not) is
+      split: assigned members go into their folders, the rest stays as a
+      smaller ``WorktreeGroup`` (or a lone ``Project`` if only one survives).
+    - Unassigned ``Project`` rows pass through untouched.
+
+    Output preserves the relative order of the first occurrence of each
+    folder / un-folded row.
+    """
+    root_buckets: dict[str, dict[str, list[Project]]] = {}
+    root_first_idx: dict[str, int] = {}
+    out: list[tuple[int, Project | WorktreeGroup | ProjectFolder]] = []
+
+    def _route_project(project: Project, idx: int) -> None:
+        folder = folder_of.get(str(project.encoded_path))
+        if folder is None:
+            out.append((idx, project))
+            return
+        root = folder.split("/", 1)[0]
+        bucket = root_buckets.setdefault(root, {"direct": [], "descendants": []})
+        if folder.casefold() == root.casefold():
+            bucket["direct"].append(project)
+        else:
+            bucket["descendants"].append(project)
+        if root not in root_first_idx:
+            root_first_idx[root] = idx
+
+    for idx, row in enumerate(rows):
+        if isinstance(row, ProjectFolder):
+            out.append((idx, row))
+            continue
+        if isinstance(row, WorktreeGroup):
+            assignments = [folder_of.get(str(m.encoded_path)) for m in row.members]
+            if all(a is None for a in assignments):
+                out.append((idx, row))
+                continue
+            for member in row.members:
+                _route_project(member, idx)
+            unassigned = [m for m in row.members if folder_of.get(str(m.encoded_path)) is None]
+            if len(unassigned) >= 2:
+                out = [(i, r) for (i, r) in out if not (isinstance(r, Project) and r in unassigned)]
+                out.append((idx, WorktreeGroup(repo_root=row.repo_root, members=tuple(unassigned))))
+            continue
+        _route_project(row, idx)
+
+    for root, bucket in root_buckets.items():
+        direct = bucket["direct"]
+        descendants = bucket["descendants"]
+        descendant_session_count = sum(p.session_count for p in descendants)
+        descendant_last_activity = max((p.last_activity for p in descendants), default=0.0)
+        out.append(
+            (
+                root_first_idx[root],
+                ProjectFolder(
+                    name=root,
+                    members=tuple(direct),
+                    descendant_member_count=len(descendants),
+                    descendant_session_count=descendant_session_count,
+                    descendant_last_activity=descendant_last_activity,
+                ),
+            )
+        )
+
+    out.sort(key=lambda pair: pair[0])
+    return [row for _, row in out]

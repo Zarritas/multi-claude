@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- User-defined project folders (`f` in ProjectsScreen) with **nesting**: paths like `Trabajo/Cliente A/Backend`. ProjectsScreen shows one row per root folder summarising direct members and descendants; `Enter` drills into a FolderScreen that lists subfolders + directly-assigned projects mixed together. Inside a folder, `n` creates a subfolder, `e` renames (cascading to descendants and assignments), `d` deletes (cascade unassigns members), `f` removes a project from the folder. Assignments override worktree-grouping for the assigned members. Persists to `~/.config/multi-claude/project-folders.json`. Filter (`/`) matches folder names. Dangling assignments (folder deleted out-of-band) are auto-cleaned on load.
 - Bulk session cleanup (`D`) in SessionsScreen: pick a preset age (1w / 1m / 3m / 6m / 1y) or a custom `YYYY-MM-DD` date, see a live count of how many sessions would be deleted, confirm. Active sessions are skipped automatically.
 - Per-session colour override (`c`): pick from a palette; persists to `~/.config/multi-claude/session-colors.json`.
 - In-TUI editor for the colour rules (`Shift+C` / `C`): list, add (`a`), edit (`e` or Enter), delete (`d`), reorder (`j`/`k`). Save with `s`, cancel with `Esc`. Available from both ProjectsScreen and SessionsScreen since rules are global.

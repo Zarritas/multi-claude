@@ -7,6 +7,7 @@ from textual.app import App
 from multi_claude.colors import SessionColorsStore
 from multi_claude.config import Config, load_config, save_config
 from multi_claude.names import NamesStore
+from multi_claude.project_folders import ProjectFoldersStore
 from multi_claude.project_names import ProjectNamesStore
 
 
@@ -22,6 +23,7 @@ class ClaudeBrowserApp(App[None]):
         self.names: NamesStore = NamesStore()
         self.project_names: ProjectNamesStore = ProjectNamesStore()
         self.session_colors: SessionColorsStore = SessionColorsStore()
+        self.project_folders: ProjectFoldersStore = ProjectFoldersStore()
 
     def on_mount(self) -> None:
         from multi_claude.screens.projects import ProjectsScreen

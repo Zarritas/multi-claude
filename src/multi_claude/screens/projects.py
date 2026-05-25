@@ -17,12 +17,20 @@ from multi_claude.app_protocol import AppProtocol
 from multi_claude.colors import ColorRule
 from multi_claude.config import Config, SortSpec
 from multi_claude.deletion import delete_project, list_active_sessions, merge_projects
-from multi_claude.discovery import Project, WorktreeGroup, group_worktrees, scan_projects
+from multi_claude.discovery import (
+    Project,
+    ProjectFolder,
+    WorktreeGroup,
+    group_into_folders,
+    group_worktrees,
+    scan_projects,
+)
 from multi_claude.filtering import FilterQuery, matches_fuzzy, parse_query
 from multi_claude.formatting import format_relative_time
 from multi_claude.launcher import LauncherError, launch_claude
 from multi_claude.modals import (
     AddProjectModal,
+    AssignFolderModal,
     ColorRulesEditorModal,
     ConfirmDeleteModal,
     MergeProjectModal,
@@ -52,6 +60,7 @@ class ProjectsScreen(Screen[None]):
         Binding("4", "sort_column('last_activity')", "Sort última", show=False),
         Binding("shift+s", "toggle_sort_direction", "Sort dir"),
         Binding("g", "toggle_groups", "Group worktrees"),
+        Binding("f", "assign_folder", "Folder"),
         Binding("m", "merge_orphan", "Merge orphan"),
         Binding("question_mark", "search_global", "FTS global", show=False),
         Binding("ctrl+q", "quit", "Quit"),
@@ -60,8 +69,8 @@ class ProjectsScreen(Screen[None]):
     def __init__(self) -> None:
         super().__init__()
         self._projects: list[Project] = []
-        # Either individual ``Project`` rows or ``WorktreeGroup`` rows, depending on prefs.
-        self._rows: list[Project | WorktreeGroup] = []
+        # Rows shown to the user can be ``Project``, ``WorktreeGroup`` or ``ProjectFolder``.
+        self._rows: list[Project | WorktreeGroup | ProjectFolder] = []
         self._visible_indices: list[int] = []
 
     @property
@@ -102,10 +111,17 @@ class ProjectsScreen(Screen[None]):
     def _apply_sort(self) -> None:
         spec = self._claude_app.prefs.projects_sort
         self._projects.sort(key=_project_sort_value(spec.key), reverse=spec.descending)
+        base_rows: list[Project | WorktreeGroup]
         if self._claude_app.prefs.group_worktrees:
-            self._rows = group_worktrees(self._projects)
+            base_rows = group_worktrees(self._projects)
         else:
-            self._rows = list(self._projects)
+            base_rows = list(self._projects)
+        # Pull folder-assigned projects out of base_rows into ProjectFolder rows.
+        folder_of = self._claude_app.project_folders.all_assignments()
+        if folder_of:
+            self._rows = group_into_folders(base_rows, folder_of)
+        else:
+            self._rows = list(base_rows)
 
     def _repaint(self) -> None:
         table = self.query_one("#projects", DataTable)
@@ -123,8 +139,25 @@ class ProjectsScreen(Screen[None]):
         if self._visible_indices and not filter_input.has_focus:
             table.focus()
 
-    def _format_row(self, row_item: Project | WorktreeGroup) -> tuple[str, str, str, str]:
+    def _format_row(
+        self, row_item: Project | WorktreeGroup | ProjectFolder
+    ) -> tuple[str, str, str, str]:
         store = self._claude_app.project_names
+        if isinstance(row_item, ProjectFolder):
+            total = row_item.total_member_count
+            if row_item.descendant_member_count:
+                summary = (
+                    f"{len(row_item.members)} directos · "
+                    f"{row_item.descendant_member_count} en subcarpetas"
+                )
+            else:
+                summary = f"{total} proyecto(s)"
+            return (
+                f"📁 {row_item.name}",
+                summary,
+                str(row_item.session_count),
+                format_relative_time(row_item.last_activity),
+            )
         if isinstance(row_item, WorktreeGroup):
             members = row_item.members
             alias = store.for_repo(row_item.repo_root)
@@ -147,9 +180,15 @@ class ProjectsScreen(Screen[None]):
             format_relative_time(project.last_activity),
         )
 
-    def _matches(self, row_item: Project | WorktreeGroup, query: FilterQuery) -> bool:
+    def _matches(
+        self, row_item: Project | WorktreeGroup | ProjectFolder, query: FilterQuery
+    ) -> bool:
         store = self._claude_app.project_names
-        if isinstance(row_item, WorktreeGroup):
+        if isinstance(row_item, ProjectFolder):
+            names = " ".join(m.name for m in row_item.members)
+            paths = " ".join(str(m.path) for m in row_item.members)
+            haystack = f"{row_item.name} {names} {paths}"
+        elif isinstance(row_item, WorktreeGroup):
             paths = " ".join(str(m.path) for m in row_item.members)
             names = " ".join(m.name for m in row_item.members)
             group_alias = store.for_repo(row_item.repo_root) or ""
@@ -175,6 +214,11 @@ class ProjectsScreen(Screen[None]):
         row_item = self._row_for_key(event.row_key)
         if row_item is None:
             return
+        if isinstance(row_item, ProjectFolder):
+            from multi_claude.screens.folder import FolderScreen
+
+            self.app.push_screen(FolderScreen(row_item.name))
+            return
         if isinstance(row_item, WorktreeGroup):
             from multi_claude.screens.worktrees import WorktreesScreen
 
@@ -191,7 +235,7 @@ class ProjectsScreen(Screen[None]):
 
         self.app.push_screen(SessionsScreen(project))
 
-    def _row_for_key(self, row_key: RowKey) -> Project | WorktreeGroup | None:
+    def _row_for_key(self, row_key: RowKey) -> Project | WorktreeGroup | ProjectFolder | None:
         if row_key.value is None:
             return None
         idx = int(row_key.value)
@@ -199,7 +243,7 @@ class ProjectsScreen(Screen[None]):
             return None
         return self._rows[idx]
 
-    def _selected_row(self) -> Project | WorktreeGroup | None:
+    def _selected_row(self) -> Project | WorktreeGroup | ProjectFolder | None:
         table = self.query_one("#projects", DataTable)
         if table.cursor_row is None or table.cursor_row < 0:
             return None
@@ -305,10 +349,12 @@ class ProjectsScreen(Screen[None]):
         self.notify("Proyectos re-escaneados")
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
-        """Hide row-dependent bindings (delete, rename, merge_orphan) when not applicable."""
+        """Hide row-dependent bindings when not applicable."""
         if action == "delete" and self._selected_project() is None:
             return False
         if action == "rename" and self._selected_row() is None:
+            return False
+        if action == "assign_folder" and self._selected_project() is None:
             return False
         if action == "merge_orphan":
             project = self._selected_project()
@@ -386,6 +432,17 @@ class ProjectsScreen(Screen[None]):
         if row is None:
             return
         store = self._claude_app.project_names
+        if isinstance(row, ProjectFolder):
+            self.app.push_screen(
+                RenameModal(
+                    subtitle=f"📁 {row.name} · {len(row.members)} proyecto(s)",
+                    current_name=row.name,
+                    title="Renombrar carpeta",
+                    placeholder="nuevo nombre de carpeta",
+                ),
+                lambda result: self._apply_rename_folder(row, result),
+            )
+            return
         if isinstance(row, WorktreeGroup):
             current = store.for_repo(row.repo_root)
             self.app.push_screen(
@@ -410,6 +467,26 @@ class ProjectsScreen(Screen[None]):
             lambda result: self._apply_rename_project(row, result),
         )
 
+    def _apply_rename_folder(self, folder: ProjectFolder, result: str | None) -> None:
+        if result is None:
+            return
+        if result == "":
+            # Empty = delete the folder (members become unassigned).
+            import contextlib
+
+            with contextlib.suppress(KeyError):
+                self._claude_app.project_folders.delete_folder(folder.name)
+            self.notify(f"Carpeta {folder.name} eliminada")
+        else:
+            try:
+                self._claude_app.project_folders.rename_folder(folder.name, result)
+            except (KeyError, ValueError) as exc:
+                self.notify(f"Error: {exc}", severity="error")
+                return
+            self.notify(f"Carpeta renombrada: {result}")
+        self._apply_sort()
+        self._repaint()
+
     def _apply_rename_group(self, group: WorktreeGroup, result: str | None) -> None:
         if result is None:
             return
@@ -432,6 +509,36 @@ class ProjectsScreen(Screen[None]):
         else:
             store.set_for_project(project.encoded_path, result)
             self.notify(f"Proyecto renombrado: {result}")
+        self._repaint()
+
+    def action_assign_folder(self) -> None:
+        project = self._selected_project()
+        if project is None:
+            self.notify(
+                "Selecciona un proyecto individual (no un grupo ni una carpeta)",
+                severity="warning",
+            )
+            return
+        store = self._claude_app.project_folders
+        current = store.folder_of(project.encoded_path)
+        modal = AssignFolderModal(
+            subtitle=f"{project.name} — {project.path}",
+            existing_folders=store.list_folders(),
+            current_folder=current,
+        )
+        self.app.push_screen(modal, lambda r: self._apply_assign_folder(project, r))
+
+    def _apply_assign_folder(self, project: Project, result: str | None) -> None:
+        if result is None:
+            return
+        store = self._claude_app.project_folders
+        if result == "":
+            store.unassign(project.encoded_path)
+            self.notify(f"{project.name} quitado de su carpeta")
+        else:
+            store.assign(project.encoded_path, result)
+            self.notify(f"{project.name} asignado a {result}")
+        self._apply_sort()
         self._repaint()
 
     def action_merge_orphan(self) -> None:

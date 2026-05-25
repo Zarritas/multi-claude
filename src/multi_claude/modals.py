@@ -1168,3 +1168,132 @@ class CleanupModal(ModalScreen[float | None]):
 
     def action_cancel(self) -> None:
         self.dismiss(None)
+
+
+_FOLDER_UNASSIGN_SENTINEL = "\x00__unassign__"  # private marker; callers must not pass this
+
+
+class AssignFolderModal(ModalScreen[str | None]):
+    """Pick a folder to assign a project to.
+
+    Dismisses with:
+      - ``None`` → cancel (no change)
+      - ``""``   → unassign (remove from any current folder)
+      - ``"Trabajo"`` → assign to that folder (creating it if new)
+
+    The user can type a brand-new name in the input or pick one of the existing
+    folders from the list. ``Enter`` on the input creates+assigns; ``Enter`` on
+    a list option assigns to that existing folder.
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancelar"),
+    ]
+
+    DEFAULT_CSS = """
+    AssignFolderModal {
+        align: center middle;
+    }
+    AssignFolderModal > Vertical {
+        background: $surface;
+        border: thick $primary;
+        padding: 1 2;
+        width: 80;
+        height: auto;
+    }
+    AssignFolderModal Label.title {
+        text-style: bold;
+    }
+    AssignFolderModal Label.section {
+        margin-top: 1;
+        text-style: bold;
+        color: $accent;
+    }
+    AssignFolderModal Label.hint {
+        color: $text-muted;
+        margin-top: 1;
+    }
+    AssignFolderModal OptionList#existing-folders {
+        max-height: 10;
+        border: round $accent;
+        margin-top: 1;
+    }
+    """
+
+    def __init__(
+        self,
+        subtitle: str,
+        existing_folders: list[str],
+        current_folder: str | None,
+    ) -> None:
+        super().__init__()
+        self.subtitle = subtitle
+        self.existing_folders = existing_folders
+        self.current_folder = current_folder
+
+    def compose(self) -> ComposeResult:
+        from textual.widgets import OptionList
+        from textual.widgets.option_list import Option
+
+        with Vertical():
+            yield Label("Asignar proyecto a carpeta", classes="title")
+            yield Static(self.subtitle)
+            if self.current_folder:
+                yield Static(f"Actualmente en: {self.current_folder}")
+
+            yield Label("Crear carpeta nueva (acepta anidación con /)", classes="section")
+            yield Input(placeholder="Trabajo · Trabajo/Cliente A", id="new-folder")
+
+            yield Label("O elige existente", classes="section")
+            options: list[Option] = []
+            if self.current_folder is not None:
+                options.append(Option("(quitar de la carpeta)", id="__unassign__"))
+            # Sort folders by path so descendants follow their ancestor; indent leaves
+            # to make hierarchy obvious.
+            for name in sorted(self.existing_folders, key=str.casefold):
+                depth = name.count("/")
+                indent = "  " * depth
+                leaf = name.rsplit("/", 1)[-1]
+                label = f"{indent}📁 {leaf}" if depth else f"📁 {leaf}"
+                options.append(Option(label, id=f"folder:{name}"))
+            opt_list = OptionList(*options, id="existing-folders")
+            opt_list.display = bool(options)
+            yield opt_list
+
+            yield Label("", id="folder-error", classes="error")
+            yield Label("Enter en input crea · Enter en lista asigna · Esc cancela", classes="hint")
+
+    def on_mount(self) -> None:
+        self.query_one("#new-folder", Input).focus()
+
+    @on(Input.Submitted, "#new-folder")
+    def _on_new_folder(self, event: Input.Submitted) -> None:
+        name = event.value.strip()
+        if not name:
+            self._set_error("Indica un nombre o elige una existente")
+            return
+        self.dismiss(name)
+
+    def on_option_list_option_selected(self, event: object) -> None:
+        from textual.widgets import OptionList
+
+        control = getattr(event, "control", None) or getattr(event, "option_list", None)
+        if control is not None and getattr(control, "id", None) != "existing-folders":
+            return
+        _ = OptionList  # silence unused
+        option = getattr(event, "option", None)
+        option_id = getattr(option, "id", None) if option is not None else None
+        if option_id == "__unassign__":
+            self.dismiss("")
+            return
+        if isinstance(option_id, str) and option_id.startswith("folder:"):
+            self.dismiss(option_id.split(":", 1)[1])
+
+    def _set_error(self, msg: str) -> None:
+        self.query_one("#folder-error", Label).update(msg)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+_ = _FOLDER_UNASSIGN_SENTINEL  # kept for future internal use; not exported
