@@ -126,6 +126,46 @@ def _argv_wt(cwd: str, argv: list[str]) -> list[str]:
     return ["wt.exe", "new-tab", "-d", cwd, "--", *argv]
 
 
+def _applescript_quote(s: str) -> str:
+    """Wrap ``s`` as a double-quoted AppleScript string literal.
+
+    AppleScript double-quoted strings only need ``\\`` and ``"`` escaped. The
+    embedded shell command we wrap is already POSIX-single-quoted, so any
+    single quotes inside ``s`` need no further treatment here.
+    """
+    escaped = s.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def _argv_apple_terminal(cwd: str, argv: list[str]) -> list[str]:
+    # Terminal.app has no CLI flag to run a command in a directory, so we drive
+    # it via AppleScript. `do script` opens a fresh window; `activate` brings
+    # Terminal to the foreground so the user sees the new session immediately.
+    shell_cmd = f"cd {_shell_quote(cwd)} && exec " + " ".join(_shell_quote(a) for a in argv)
+    as_literal = _applescript_quote(shell_cmd)
+    return [
+        "osascript",
+        "-e",
+        f"tell application \"Terminal\" to do script {as_literal}",
+        "-e",
+        'tell application "Terminal" to activate',
+    ]
+
+
+def _argv_iterm(cwd: str, argv: list[str]) -> list[str]:
+    # Two-step form (create window, then `write text` into the new session) works
+    # across iTerm2 versions; the one-shot `command` parameter is inconsistent.
+    shell_cmd = f"cd {_shell_quote(cwd)} && exec " + " ".join(_shell_quote(a) for a in argv)
+    as_literal = _applescript_quote(shell_cmd)
+    return [
+        "osascript",
+        "-e", 'tell application "iTerm"',
+        "-e", "  create window with default profile",
+        "-e", f"  tell current session of current window to write text {as_literal}",
+        "-e", "end tell",
+    ]
+
+
 def _argv_generic(binary: str) -> ArgvBuilder:
     def build(cwd: str, argv: list[str]) -> list[str]:
         joined = " ".join(_shell_quote(a) for a in argv)
@@ -185,22 +225,24 @@ EMULATORS: tuple[Emulator, ...] = (
         argv=_argv_wt,
         binary="wt.exe",
     ),
+    Emulator(
+        id="iterm",
+        term_programs=("iTerm.app",),
+        argv=_argv_iterm,
+        binary="osascript",
+    ),
+    Emulator(
+        id="apple-terminal",
+        term_programs=("Apple_Terminal",),
+        argv=_argv_apple_terminal,
+        binary="osascript",
+    ),
     # Detected but not supported as standalone windows. Detection still helps surface
     # a clear "not supported" message instead of silently falling through.
     Emulator(
         id="vscode",
         env_vars=("VSCODE_INJECTION",),
         term_programs=("vscode",),
-        argv=None,
-    ),
-    Emulator(
-        id="iterm",
-        term_programs=("iTerm.app",),
-        argv=None,
-    ),
-    Emulator(
-        id="apple-terminal",
-        term_programs=("Apple_Terminal",),
         argv=None,
     ),
     Emulator(

@@ -89,6 +89,8 @@ Atajos:
 | foot              | `foot --working-directory=<cwd> claude ...`                           |
 | Terminator        | `terminator --working-directory=<cwd> -x claude ...` (ventana nueva)  |
 | Windows Terminal  | `wt.exe new-tab -d <cwd> -- claude ...`                               |
+| iTerm2 (macOS)    | `osascript` → `tell application "iTerm" ... write text "cd <cwd> && exec claude ..."` |
+| Apple Terminal (macOS) | `osascript` → `tell application "Terminal" to do script "cd <cwd> && exec claude ..."` |
 | x-terminal-emulator / xterm | `<term> -e sh -c "cd <cwd> && exec claude ..."`             |
 
 Detección del emulador (en orden):
@@ -147,12 +149,13 @@ Todas son extensiones razonables para una v2.
 
 ### Requisitos previos
 
-- **Linux** (Ubuntu/Debian/Fedora/Arch testados) o **Windows 10/11**. macOS no está soportado de momento — falta detección nativa de iTerm2 / Terminal.app. Contribuciones bienvenidas.
-- **Python 3.10+** (la mayoría de distros modernas lo traen; en Windows usa el instalador oficial o `winget install Python.Python.3.13`).
+- **Linux** (Ubuntu/Debian/Fedora/Arch testados), **macOS** o **Windows 10/11**.
+- **Python 3.10+** (la mayoría de distros modernas lo traen; en macOS `brew install python@3.13`; en Windows usa el instalador oficial o `winget install Python.Python.3.13`).
 - **`claude`** (Claude Code CLI) en `PATH`. Sin él, `multi-claude` arranca pero no podrá reanudar sesiones — la propia TUI te lo dirá.
-- *(Opcional, Linux)* **`tmux`**, **`zellij`** o **`terminator`** para que Claude se abra en un split/pestaña sin perder la TUI.
+- *(Opcional, Linux/macOS)* **`tmux`** o **`zellij`** (o **`terminator`** sólo en Linux) para que Claude se abra en un split/pestaña sin perder la TUI.
 - *(Opcional)* Un emulador soportado:
   - **Linux**: kitty, WezTerm, Ghostty, Alacritty, Konsole, GNOME Terminal, foot, Terminator, xterm.
+  - **macOS**: **iTerm2** o **Terminal.app** (modo `window` invoca AppleScript vía `osascript`, que viene de serie en macOS). kitty, WezTerm, Ghostty y Alacritty también funcionan si los usas.
   - **Windows**: **Windows Terminal** (modo `window` abre `claude` en una pestaña nueva vía `wt.exe`).
 
   Sin nada de esto, la TUI se suspende y vuelve cuando cierras Claude.

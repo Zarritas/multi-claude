@@ -507,3 +507,112 @@ def test_detect_emulator_conemu_unsupported_raises_in_window_mode(
     ):
         with pytest.raises(LauncherError, match="conemu"):
             launch_claude(Path("/work/c"), "sid-c", mode="window")
+
+
+def test_launch_claude_window_mode_uses_apple_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Inside Apple Terminal, window mode drives Terminal.app via AppleScript."""
+    _clear_mux_envs(monkeypatch)
+    _clear_emulator_envs(monkeypatch)
+    monkeypatch.setenv("TERM_PROGRAM", "Apple_Terminal")
+
+    def fake_which(cmd: str) -> str | None:
+        return f"/usr/bin/{cmd}" if cmd in ("claude", "osascript") else None
+
+    popen_calls: list[list[str]] = []
+
+    class FakePopen:
+        def __init__(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+            popen_calls.append(argv)
+
+    with (
+        patch("multi_claude.launcher.shutil.which", side_effect=fake_which),
+        patch("multi_claude.launcher.subprocess.Popen", FakePopen),
+    ):
+        launch_claude(Path("/Users/jane/proj"), "sid-mac", mode="window")
+
+    # The cwd flows through two layers: POSIX single-quoting for the shell command,
+    # then AppleScript escaping (backslashes doubled, double-quotes backslash-escaped)
+    # when embedded as a string literal in the `do script` call. On macOS the path
+    # has no backslashes so the AS escape is a no-op; on Windows runners we must
+    # mirror both layers in the expected value.
+    cwd_str = _p("/Users/jane/proj")
+    shell_cmd = f"cd '{cwd_str}' && exec 'claude' '--resume' 'sid-mac'"
+    as_escaped = shell_cmd.replace("\\", "\\\\").replace('"', '\\"')
+    assert popen_calls == [
+        [
+            "osascript",
+            "-e",
+            f'tell application "Terminal" to do script "{as_escaped}"',
+            "-e",
+            'tell application "Terminal" to activate',
+        ]
+    ]
+
+
+def test_launch_claude_window_mode_uses_iterm(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Inside iTerm2, window mode spawns a new window via AppleScript `write text`."""
+    _clear_mux_envs(monkeypatch)
+    _clear_emulator_envs(monkeypatch)
+    monkeypatch.setenv("TERM_PROGRAM", "iTerm.app")
+
+    def fake_which(cmd: str) -> str | None:
+        return f"/usr/bin/{cmd}" if cmd in ("claude", "osascript") else None
+
+    popen_calls: list[list[str]] = []
+
+    class FakePopen:
+        def __init__(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+            popen_calls.append(argv)
+
+    with (
+        patch("multi_claude.launcher.shutil.which", side_effect=fake_which),
+        patch("multi_claude.launcher.subprocess.Popen", FakePopen),
+    ):
+        launch_claude(Path("/Users/jane/proj"), None, mode="window")
+
+    cwd_str = _p("/Users/jane/proj")
+    shell_cmd = f"cd '{cwd_str}' && exec 'claude'"
+    as_escaped = shell_cmd.replace("\\", "\\\\").replace('"', '\\"')
+    assert popen_calls == [
+        [
+            "osascript",
+            "-e", 'tell application "iTerm"',
+            "-e", "  create window with default profile",
+            "-e",
+            f'  tell current session of current window to write text "{as_escaped}"',
+            "-e", "end tell",
+        ]
+    ]
+
+
+def test_iterm_applescript_escapes_embedded_quotes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Display names containing quotes or backslashes must round-trip safely."""
+    _clear_mux_envs(monkeypatch)
+    _clear_emulator_envs(monkeypatch)
+    monkeypatch.setenv("TERM_PROGRAM", "iTerm.app")
+
+    def fake_which(cmd: str) -> str | None:
+        return f"/usr/bin/{cmd}" if cmd in ("claude", "osascript") else None
+
+    popen_calls: list[list[str]] = []
+
+    class FakePopen:
+        def __init__(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+            popen_calls.append(argv)
+
+    with (
+        patch("multi_claude.launcher.shutil.which", side_effect=fake_which),
+        patch("multi_claude.launcher.subprocess.Popen", FakePopen),
+    ):
+        launch_claude(Path("/work"), None, display_name='say "hi" \\n', mode="window")
+
+    # The display name passes through two escaping layers (POSIX shell single-quotes
+    # for the shell command, then AppleScript escaping for backslashes and quotes).
+    # We assert end-to-end that no literal `"` or unescaped `\` leak into the final argv.
+    [argv] = popen_calls
+    write_text_line = next(line for line in argv if "write text" in line)
+    # AppleScript-level escapes — backslash escaped as \\, double quote as \"
+    assert '\\"hi\\"' in write_text_line
+    assert '\\\\n' in write_text_line

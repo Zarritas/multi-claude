@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **macOS support** for spawning new windows in `window`/`auto` mode:
+  - **iTerm2** (`TERM_PROGRAM=iTerm.app`) — drives iTerm2 via AppleScript: `tell application "iTerm" to create window with default profile` followed by `write text "cd <cwd> && exec claude [...]"` into the new session. Uses the two-step form because the one-shot `command` parameter is inconsistent across iTerm2 versions.
+  - **Terminal.app** (`TERM_PROGRAM=Apple_Terminal`) — `tell application "Terminal" to do script "cd <cwd> && exec claude [...]"` followed by `activate` so the new window comes to the foreground.
+  - Both go through `osascript` (always available on macOS). Display names and paths with embedded quotes or backslashes round-trip safely through the POSIX-single-quote + AppleScript-escape layers.
+  - Cross-platform emulators (kitty, WezTerm, Ghostty, Alacritty) already worked on macOS without any change — only iTerm2 and Terminal.app needed native AppleScript dispatch.
 - **Windows 10/11 support**. The TUI now runs natively on Windows: `Path.home() / ".claude" / "projects"` correctly resolves to `C:\Users\<user>\.claude\projects`, and project rows show real Windows paths (`C:\…`, `D:\…`) extracted from each session's `cwd` field.
   - **Windows Terminal** added to the emulator table — detected via `WT_SESSION` env var. In `window`/`auto` mode the launcher spawns `wt.exe new-tab -d <cwd> -- claude [...]`, opening a new tab in the current WT window (or a new window if none is open).
   - **ConEmu** detected via `ConEmuPID` and surfaced as "not yet supported" with a clear error message (instead of falling through silently).
