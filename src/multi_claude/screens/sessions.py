@@ -8,11 +8,12 @@ from textual.binding import Binding
 from textual.screen import Screen
 from textual.widgets import DataTable, Footer, Header, Input
 
+from multi_claude.config import Config, LaunchMode, alternate_for
 from multi_claude.deletion import delete_session, list_active_sessions
 from multi_claude.discovery import Project
 from multi_claude.formatting import format_relative_time, format_size
 from multi_claude.launcher import LauncherError, launch_claude
-from multi_claude.modals import ConfirmDeleteModal, RenameModal
+from multi_claude.modals import ConfirmDeleteModal, RenameModal, SettingsModal
 from multi_claude.names import NamesStore
 from multi_claude.session import Session, scan_sessions
 
@@ -22,8 +23,10 @@ class SessionsScreen(Screen):
 
     BINDINGS = [
         Binding("n", "new_session", "New"),
+        Binding("shift+enter", "launch_alternate", "Launch alt"),
         Binding("e", "rename", "Rename"),
         Binding("d", "delete", "Delete"),
+        Binding("s", "settings", "Settings"),
         Binding("slash", "show_filter", "Filter"),
         Binding("escape", "back_or_clear", "Back"),
         Binding("left", "back_or_clear", "Back", show=False),
@@ -96,7 +99,7 @@ class SessionsScreen(Screen):
         session = self._session_for_row(event.row_key)
         if session is None:
             return
-        self._launch(session.id, session.display_name)
+        self._launch(session.id, session.display_name, self._prefs().default_mode)
 
     def _session_for_row(self, row_key) -> Session | None:
         if row_key.value is None:
@@ -115,15 +118,43 @@ class SessionsScreen(Screen):
         return self._sessions[self._visible_indices[table.cursor_row]]
 
     def action_new_session(self) -> None:
-        self._launch(None, None)
+        self._launch(None, None, self._prefs().default_mode)
 
-    def _launch(self, session_id: str | None, display_name: str | None) -> None:
+    def action_launch_alternate(self) -> None:
+        session = self._selected_session()
+        if session is None:
+            return
+        self._launch(
+            session.id,
+            session.display_name,
+            alternate_for(self._prefs().default_mode),
+        )
+
+    def action_settings(self) -> None:
+        self.app.push_screen(SettingsModal(self._prefs()), self._apply_settings)
+
+    def _apply_settings(self, result: Config | None) -> None:
+        if result is None:
+            return
+        self.app.update_prefs(result)  # type: ignore[attr-defined]
+        self.notify("Ajustes guardados")
+
+    def _prefs(self) -> Config:
+        return self.app.prefs  # type: ignore[attr-defined,no-any-return]
+
+    def _launch(
+        self,
+        session_id: str | None,
+        display_name: str | None,
+        mode: LaunchMode,
+    ) -> None:
         try:
             launch_claude(
                 self.project.path,
                 session_id,
                 display_name=display_name,
                 app=self.app,
+                mode=mode,
             )
         except LauncherError as exc:
             self.notify(str(exc), severity="error")

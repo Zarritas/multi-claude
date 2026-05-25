@@ -6,7 +6,7 @@ TUI para navegar los proyectos y sesiones de Claude Code y reanudar (o crear) se
 
 Claude Code guarda cada sesión como un `.jsonl` bajo `~/.claude/projects/<encoded-path>/`. Cuando acumulas decenas de proyectos y cientos de sesiones, encontrar "aquella conversación de hace tres semanas sobre el refactor X" se vuelve incómodo: `claude --resume` te muestra solo las del cwd actual, y saltar entre proyectos implica `cd`s y memorizar UUIDs.
 
-`multi-claude` es un dashboard en terminal que lista todos tus proyectos, muestra sus sesiones con metadatos legibles, y al pulsar Enter lanza `claude --resume <id>` en un panel nuevo del multiplexer.
+`multi-claude` es un dashboard en terminal que lista todos tus proyectos, muestra sus sesiones con metadatos legibles, y al pulsar Enter lanza `claude --resume <id>` en un panel/pestaña nueva del multiplexer o emulador de terminal.
 
 ## Stack
 
@@ -50,19 +50,78 @@ Atajos:
 - Orden por defecto: última actividad descendente.
 
 Atajos:
-- `Enter` — reanudar esta sesión (`claude --resume <id>` con cwd del proyecto).
-- `n` — nueva sesión en este proyecto (`claude` con cwd del proyecto, sin `--resume`).
+- `Enter` — reanudar esta sesión con el **modo de lanzamiento predeterminado**.
+- `Shift+Enter` — reanudar esta sesión con el **modo alternativo**.
+- `n` — nueva sesión en este proyecto (modo predeterminado).
+- `s` — abrir el modal de **Ajustes** para cambiar predeterminado/alternativo.
 - `Esc` / `←` — volver a la pantalla de proyectos.
 - `r` — re-escanear las sesiones del proyecto.
 - `q` — salir.
 
 ## Cómo se lanza Claude
 
-`launcher.launch_claude(cwd, session_id=None)` resuelve el entorno y elige modo:
+`launcher.launch_claude(cwd, session_id=None, *, mode="auto")` despacha según el modo elegido:
 
-1. **`$TMUX` está definido** → `tmux split-window -h -c <cwd> claude [--resume <id>]`. La TUI sigue viva en su pane.
-2. **`$ZELLIJ` está definido** → `zellij action new-pane --cwd <cwd> -- claude [--resume <id>]`.
-3. **Ninguno** → `app.suspend()` y `subprocess.run(["claude", ...], cwd=cwd)`. Al salir de Claude vuelves a la TUI.
+| Modo       | Estrategia                                                                                              |
+|------------|---------------------------------------------------------------------------------------------------------|
+| `auto`     | multiplexer split → ventana nueva del emulador → suspender la TUI                                       |
+| `window`   | ventana nueva del emulador → suspender la TUI                                                           |
+| `suspend`  | suspender la TUI siempre (`app.suspend()` + `subprocess.run`)                                           |
+
+**Cadena `auto` (en orden):**
+
+1. `$TMUX` → `tmux split-window -h -c <cwd> claude [--resume <id>]`.
+2. `$ZELLIJ` → `zellij action new-pane --cwd <cwd> -- claude [--resume <id>]`.
+3. `$TERMINATOR_UUID` → `terminator --new-tab --working-directory=<cwd> -x claude [...]`.
+4. **Ventana nueva del emulador detectado** (ver tabla más abajo).
+5. `app.suspend()` + `subprocess.run(["claude", ...], cwd=cwd)`.
+
+**Emuladores soportados en modo `window`** (detectados vía env vars + binario en PATH):
+
+| Emulador          | Comando lanzado                                                       |
+|-------------------|-----------------------------------------------------------------------|
+| kitty             | `kitty --directory <cwd> claude ...`                                  |
+| WezTerm           | `wezterm start --cwd <cwd> -- claude ...`                             |
+| Ghostty           | `ghostty --working-directory=<cwd> -e claude ...`                     |
+| Alacritty         | `alacritty --working-directory <cwd> -e claude ...`                   |
+| Konsole           | `konsole --workdir <cwd> -e claude ...`                               |
+| GNOME Terminal    | `gnome-terminal --working-directory=<cwd> -- claude ...`              |
+| foot              | `foot --working-directory=<cwd> claude ...`                           |
+| Terminator        | `terminator --working-directory=<cwd> -x claude ...` (ventana nueva)  |
+| x-terminal-emulator / xterm | `<term> -e sh -c "cd <cwd> && exec claude ..."`             |
+
+Detección del emulador (en orden):
+
+1. `$TERM_PROGRAM` (canónico, lo publican Ghostty, WezTerm…).
+2. Env var específica del emulador (`$KITTY_PID`, `$GHOSTTY_RESOURCES_DIR`, `$ALACRITTY_LOG`, etc.).
+3. Fallback genérico: `x-terminal-emulator` o `xterm` si están en PATH.
+
+Si ninguno se detecta en modo `window`, la TUI se suspende como último recurso.
+
+## Ajustes (`s`)
+
+Modal en la TUI con dos selectores:
+
+- **Enter (predeterminado)** — modo por defecto (recomendado: `auto`).
+- **Shift+Enter (alternativo)** — modo del atajo alternativo (recomendado: `window`).
+
+Solo se configura el **predeterminado**. El **alternativo** (Shift+Enter) se deriva automáticamente:
+
+| Predeterminado | Alternativo (Shift+Enter) |
+|----------------|---------------------------|
+| `auto`         | `suspend`                 |
+| `window`       | `suspend`                 |
+| `suspend`      | `window`                  |
+
+Persistido en `~/.config/multi-claude/config.json` (o `$XDG_CONFIG_HOME/multi-claude/config.json`):
+
+```json
+{
+  "default_mode": "auto"
+}
+```
+
+> Nota sobre `Shift+Enter`: la mayoría de los emuladores modernos lo transmiten distinto a `Enter`, pero algunos antiguos no — en ese caso `Shift+Enter` simplemente hará lo mismo que `Enter`. Si te ocurre, cambia el predeterminado en Ajustes para que ambas teclas hagan lo que quieres.
 
 ## Identidad de un proyecto
 
@@ -87,7 +146,8 @@ Todas son extensiones razonables para una v2.
 
 - **Python 3.10+** (la mayoría de distros modernas lo traen).
 - **`claude`** (Claude Code CLI) en `PATH`. Sin él, `multi-claude` arranca pero no podrá reanudar sesiones — la propia TUI te lo dirá.
-- *(Opcional)* **`tmux`** o **`zellij`** para que Claude se abra en un split sin perder la TUI. Sin multiplexer, la TUI se suspende y vuelve cuando cierras Claude.
+- *(Opcional)* **`tmux`**, **`zellij`** o **`terminator`** para que Claude se abra en un split/pestaña sin perder la TUI.
+- *(Opcional)* Un emulador soportado (**kitty**, **WezTerm**, **Ghostty**, **Alacritty**, **Konsole**, **GNOME Terminal**, **foot**, **Terminator**, **xterm**…) — el modo `window` abre una ventana nueva en el emulador que estés usando. Sin nada de esto, la TUI se suspende y vuelve cuando cierras Claude.
 
 ### Paso 1 — Instalar un gestor de herramientas Python (si no tienes ninguno)
 

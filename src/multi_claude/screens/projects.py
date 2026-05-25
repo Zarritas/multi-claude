@@ -10,11 +10,12 @@ from textual.binding import Binding
 from textual.screen import Screen
 from textual.widgets import DataTable, Footer, Header, Input
 
+from multi_claude.config import Config
 from multi_claude.deletion import delete_project
 from multi_claude.discovery import Project, scan_projects
 from multi_claude.formatting import format_relative_time
 from multi_claude.launcher import LauncherError, launch_claude
-from multi_claude.modals import AddProjectModal, ConfirmDeleteModal
+from multi_claude.modals import AddProjectModal, ConfirmDeleteModal, SettingsModal
 
 
 class ProjectsScreen(Screen):
@@ -23,6 +24,7 @@ class ProjectsScreen(Screen):
     BINDINGS = [
         Binding("a", "add_project", "Add"),
         Binding("d", "delete", "Delete"),
+        Binding("s", "settings", "Settings"),
         Binding("slash", "show_filter", "Filter"),
         Binding("escape", "clear_filter", "Clear", show=False),
         Binding("r", "refresh", "Refresh"),
@@ -119,11 +121,28 @@ class ProjectsScreen(Screen):
         if path is None:
             return
         try:
-            launch_claude(path, None, app=self.app)
+            launch_claude(
+                path,
+                None,
+                app=self.app,
+                mode=self.app.prefs.default_mode,  # type: ignore[attr-defined]
+            )
         except LauncherError as exc:
             self.notify(str(exc), severity="error")
             return
         self.notify(f"Claude lanzado en {path}. Pulsa `r` para refrescar.")
+
+    def action_settings(self) -> None:
+        self.app.push_screen(
+            SettingsModal(self.app.prefs),  # type: ignore[attr-defined]
+            self._apply_settings,
+        )
+
+    def _apply_settings(self, result: Config | None) -> None:
+        if result is None:
+            return
+        self.app.update_prefs(result)  # type: ignore[attr-defined]
+        self.notify("Ajustes guardados")
 
     def action_delete(self) -> None:
         project = self._selected_project()

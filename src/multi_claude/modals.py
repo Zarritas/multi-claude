@@ -14,7 +14,9 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Center, Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Button, Input, Label, Static
+from textual.widgets import Button, Input, Label, RadioButton, RadioSet, Static
+
+from multi_claude.config import VALID_MODES, Config, LaunchMode, alternate_for
 
 
 class RenameModal(ModalScreen[str | None]):
@@ -139,6 +141,128 @@ class AddProjectModal(ModalScreen[Path | None]):
 
     def action_cancel(self) -> None:
         self.dismiss(None)
+
+
+_MODE_LABELS: dict[LaunchMode, str] = {
+    "auto": "Auto — multiplexer > ventana nueva > suspend",
+    "window": "Ventana nueva del emulador (suspend si no se detecta)",
+    "suspend": "Suspender la TUI",
+}
+
+
+class SettingsModal(ModalScreen[Config | None]):
+    """Edit the default launch mode. Shift+Enter mode is derived (see alternate_for)."""
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+    ]
+
+    DEFAULT_CSS = """
+    SettingsModal {
+        align: center middle;
+    }
+    SettingsModal > Vertical {
+        background: $surface;
+        border: thick $primary;
+        padding: 1 2;
+        width: 80;
+        height: auto;
+    }
+    SettingsModal Label.title {
+        text-style: bold;
+    }
+    SettingsModal Label.section {
+        margin-top: 1;
+        text-style: bold;
+        color: $accent;
+    }
+    SettingsModal Label.alt-preview {
+        margin-top: 1;
+        color: $text-muted;
+    }
+    SettingsModal Label.hint {
+        color: $text-muted;
+        margin-top: 1;
+    }
+    SettingsModal Horizontal {
+        align: center middle;
+        height: auto;
+        margin-top: 1;
+    }
+    SettingsModal Button {
+        margin: 0 1;
+    }
+    """
+
+    def __init__(self, config: Config) -> None:
+        super().__init__()
+        self._initial = config
+
+    def compose(self) -> ComposeResult:
+        from textual.containers import Horizontal
+
+        with Vertical():
+            yield Label("Ajustes — modo de lanzamiento", classes="title")
+
+            yield Label("Enter (predeterminado)", classes="section")
+            with RadioSet(id="default-mode"):
+                for mode in VALID_MODES:
+                    yield RadioButton(
+                        _MODE_LABELS[mode],
+                        value=(mode == self._initial.default_mode),
+                        id=f"default-{mode}",
+                    )
+
+            yield Label(
+                self._alt_preview_text(self._initial.default_mode),
+                id="alt-preview",
+                classes="alt-preview",
+            )
+
+            yield Label("Enter guarda · Esc cancela", classes="hint")
+            with Horizontal():
+                yield Button("Cancelar", id="cancel", variant="default")
+                yield Button("Guardar", id="save", variant="primary")
+
+    def on_mount(self) -> None:
+        self.query_one("#default-mode", RadioSet).focus()
+
+    @on(RadioSet.Changed, "#default-mode")
+    def _on_default_changed(self, event: RadioSet.Changed) -> None:
+        mode = self._mode_from_radio_id(event.pressed.id, self._initial.default_mode)
+        self.query_one("#alt-preview", Label).update(self._alt_preview_text(mode))
+
+    @on(Button.Pressed, "#cancel")
+    def _cancel(self) -> None:
+        self.dismiss(None)
+
+    @on(Button.Pressed, "#save")
+    def _save(self) -> None:
+        self.dismiss(self._collect())
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def _collect(self) -> Config:
+        radio_set = self.query_one("#default-mode", RadioSet)
+        pressed = radio_set.pressed_button
+        mode = self._mode_from_radio_id(
+            pressed.id if pressed is not None else None,
+            self._initial.default_mode,
+        )
+        return Config(default_mode=mode)
+
+    @staticmethod
+    def _mode_from_radio_id(radio_id: str | None, fallback: LaunchMode) -> LaunchMode:
+        if radio_id and radio_id.startswith("default-"):
+            candidate = radio_id.split("-", 1)[1]
+            if candidate in VALID_MODES:
+                return candidate  # type: ignore[return-value]
+        return fallback
+
+    @staticmethod
+    def _alt_preview_text(default: LaunchMode) -> str:
+        return f"Shift+Enter → {_MODE_LABELS[alternate_for(default)]}"
 
 
 class ConfirmDeleteModal(ModalScreen[bool]):

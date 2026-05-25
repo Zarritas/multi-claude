@@ -346,9 +346,10 @@ async def test_add_project_invokes_launcher(synthetic_world: Path, tmp_path: Pat
 
     captured: dict = {}
 
-    def fake_launch(cwd, session_id, *, display_name=None, app=None):
+    def fake_launch(cwd, session_id, *, display_name=None, app=None, mode="auto"):
         captured["cwd"] = cwd
         captured["session_id"] = session_id
+        captured["mode"] = mode
 
     with patch("multi_claude.screens.projects.launch_claude", side_effect=fake_launch):
         app = ClaudeBrowserApp()
@@ -399,3 +400,69 @@ async def test_ctrl_q_quits_app(synthetic_world: Path) -> None:
         await pilot.pause()
     # If we reach here without hanging, the app exited cleanly.
     assert app._exit is True or not app.is_running
+
+
+async def test_enter_uses_default_mode_and_shift_enter_uses_opposite(
+    synthetic_world: Path,
+) -> None:
+    """Enter → prefs.default_mode; Shift+Enter → alternate_for(default)."""
+    captured: list[dict] = []
+
+    def fake_launch(cwd, session_id, *, display_name=None, app=None, mode="auto"):
+        captured.append({"session_id": session_id, "mode": mode})
+
+    with patch("multi_claude.screens.sessions.launch_claude", side_effect=fake_launch):
+        app = ClaudeBrowserApp()
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            # Drill into the first project (beta).
+            from textual.widgets import DataTable
+
+            from multi_claude.screens.projects import ProjectsScreen
+            from multi_claude.screens.sessions import SessionsScreen
+
+            assert isinstance(app.screen, ProjectsScreen)
+            app.screen.query_one("#projects", DataTable).action_select_cursor()
+            await pilot.pause()
+            assert isinstance(app.screen, SessionsScreen)
+
+            # Default = "auto" → Enter launches auto.
+            app.screen.query_one("#sessions", DataTable).action_select_cursor()
+            await pilot.pause()
+
+            # Shift+Enter → opposite of auto = "suspend".
+            await pilot.press("shift+enter")
+            await pilot.pause()
+
+    assert [c["mode"] for c in captured] == ["auto", "suspend"]
+
+
+async def test_settings_modal_persists_changes(
+    synthetic_world: Path, tmp_path: Path
+) -> None:
+    """Open settings, switch default to 'window', save → prefs and disk updated."""
+    from multi_claude.config import load_config
+
+    app = ClaudeBrowserApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("s")
+        await pilot.pause()
+
+        from multi_claude.modals import SettingsModal
+        from textual.widgets import RadioButton
+
+        assert isinstance(app.screen, SettingsModal)
+        # Select "window" in the default-mode set.
+        app.screen.query_one("#default-window", RadioButton).value = True
+        await pilot.pause()
+        # Click save.
+        from textual.widgets import Button
+
+        app.screen.query_one("#save", Button).press()
+        await pilot.pause()
+
+    assert app.prefs.default_mode == "window"
+    # And it was persisted to disk under XDG_CONFIG_HOME (set by the fixture).
+    persisted = load_config()
+    assert persisted.default_mode == "window"
