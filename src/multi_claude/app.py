@@ -9,6 +9,7 @@ from multi_claude.config import Config, load_config, save_config
 from multi_claude.names import NamesStore
 from multi_claude.project_folders import ProjectFoldersStore
 from multi_claude.project_names import ProjectNamesStore
+from multi_claude.tags import TagsStore
 
 
 class ClaudeBrowserApp(App[None]):
@@ -24,6 +25,7 @@ class ClaudeBrowserApp(App[None]):
         self.project_names: ProjectNamesStore = ProjectNamesStore()
         self.session_colors: SessionColorsStore = SessionColorsStore()
         self.project_folders: ProjectFoldersStore = ProjectFoldersStore()
+        self.tags: TagsStore = TagsStore()
 
     def on_mount(self) -> None:
         from multi_claude.screens.projects import ProjectsScreen

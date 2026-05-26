@@ -28,11 +28,19 @@ from multi_claude.modals import (
     ConfirmDeleteModal,
     RenameModal,
     SettingsModal,
+    TagEditorModal,
 )
 from multi_claude.session import Session, scan_sessions
 from multi_claude.widgets.preview import SessionPreview
 
-_SORT_KEYS_BY_COLUMN: tuple[str, ...] = ("prompt", "branch", "messages", "size", "last_activity")
+_SORT_KEYS_BY_COLUMN: tuple[str, ...] = (
+    "prompt",
+    "branch",
+    "tags",
+    "messages",
+    "size",
+    "last_activity",
+)
 
 
 class SessionsScreen(Screen[None]):
@@ -42,6 +50,7 @@ class SessionsScreen(Screen[None]):
         Binding("n", "new_session", "New"),
         Binding("shift+enter", "launch_alternate", "Launch alt"),
         Binding("e", "rename", "Rename"),
+        Binding("t", "edit_tags", "Etiquetas"),
         Binding("c", "set_color", "Color"),
         Binding("C", "edit_color_rules", "Reglas color"),
         Binding("d", "delete", "Delete"),
@@ -55,9 +64,10 @@ class SessionsScreen(Screen[None]):
         Binding("r", "refresh", "Refresh"),
         Binding("1", "sort_column('prompt')", "Sort prompt", show=False),
         Binding("2", "sort_column('branch')", "Sort branch", show=False),
-        Binding("3", "sort_column('messages')", "Sort msgs", show=False),
-        Binding("4", "sort_column('size')", "Sort tamaño", show=False),
-        Binding("5", "sort_column('last_activity')", "Sort última", show=False),
+        Binding("3", "sort_column('tags')", "Sort tags", show=False),
+        Binding("4", "sort_column('messages')", "Sort msgs", show=False),
+        Binding("5", "sort_column('size')", "Sort tamaño", show=False),
+        Binding("6", "sort_column('last_activity')", "Sort última", show=False),
         Binding("shift+s", "toggle_sort_direction", "Sort dir"),
         Binding("ctrl+q", "quit", "Quit"),
     ]
@@ -86,7 +96,7 @@ class SessionsScreen(Screen[None]):
     def on_mount(self) -> None:
         self.sub_title = f"{self.project.name} — {self.project.path}"
         table = self.query_one("#sessions", DataTable)
-        table.add_columns("Prompt", "Branch", "Msgs", "Tamaño", "Última")
+        table.add_columns("Prompt", "Branch", "Tags", "Msgs", "Tamaño", "Última")
         self._apply_preview_visibility()
         self._populate()
 
@@ -100,7 +110,11 @@ class SessionsScreen(Screen[None]):
 
     @work(thread=True, exclusive=True, group="scan-sessions")
     def _scan_sessions_worker(self) -> None:
-        results = scan_sessions(self.project.encoded_path, names_store=self._claude_app.names)
+        results = scan_sessions(
+            self.project.encoded_path,
+            names_store=self._claude_app.names,
+            tags_store=self._claude_app.tags,
+        )
         self.app.call_from_thread(self._on_scan_complete, results)
 
     def _on_scan_complete(self, sessions: list[Session]) -> None:
@@ -131,9 +145,11 @@ class SessionsScreen(Screen[None]):
             style = resolve_style(session, manual=manual, rules=rules, is_active=is_active)
             label = session.display_name or session.first_prompt
             label_cell = Text(label, style=style) if style else label
+            tags_cell = self._format_tags_cell(session.tags)
             row = (
                 label_cell,
                 session.branch or "—",
+                tags_cell,
                 str(session.message_count),
                 format_size(session.size_bytes),
                 format_relative_time(session.last_activity),
@@ -153,6 +169,11 @@ class SessionsScreen(Screen[None]):
                 return False
             if key == "id" and value not in session.id.lower():
                 return False
+            if key == "tag":
+                needed = [t for t in (s.strip() for s in value.split(",")) if t]
+                tags_lower = [t.lower() for t in session.tags]
+                if not all(any(n in t for t in tags_lower) for n in needed):
+                    return False
         haystack = " ".join(
             filter(
                 None,
@@ -160,10 +181,24 @@ class SessionsScreen(Screen[None]):
                     session.display_name or "",
                     session.first_prompt or "",
                     session.branch or "",
+                    " ".join(session.tags),
                 ],
             )
         )
         return matches_fuzzy(haystack, query.free_text)
+
+    @staticmethod
+    def _format_tags_cell(tags: tuple[str, ...]) -> Any:
+        if not tags:
+            return "—"
+        from rich.text import Text
+
+        text = Text()
+        for i, tag in enumerate(tags):
+            if i:
+                text.append(" ")
+            text.append(f"#{tag}", style="bold cyan")
+        return text
 
     @on(DataTable.RowSelected)
     def _on_row_selected(self, event: DataTable.RowSelected) -> None:
@@ -235,6 +270,32 @@ class SessionsScreen(Screen[None]):
         except LauncherError as exc:
             self.notify(str(exc), severity="error")
 
+    def action_edit_tags(self) -> None:
+        session = self._selected_session()
+        if session is None:
+            return
+        store = self._claude_app.tags
+        subtitle = f"{(session.display_name or session.first_prompt)[:60]}"
+        self.app.push_screen(
+            TagEditorModal(
+                subtitle=subtitle,
+                current_tags=session.tags,
+                known_tags=store.all_known_tags(),
+            ),
+            lambda result: self._apply_tags(session.id, result),
+        )
+
+    def _apply_tags(self, session_id: str, result: list[str] | None) -> None:
+        if result is None:
+            return  # cancelled
+        store = self._claude_app.tags
+        new_tags = store.set(session_id, result)
+        if new_tags:
+            self.notify(f"Etiquetas: {' '.join('#' + t for t in new_tags)}")
+        else:
+            self.notify("Etiquetas borradas")
+        self._populate()
+
     def action_rename(self) -> None:
         session = self._selected_session()
         if session is None:
@@ -284,6 +345,7 @@ class SessionsScreen(Screen[None]):
                 session.id,
                 self.project.encoded_path,
                 names_store=self._claude_app.names,
+                tags_store=self._claude_app.tags,
                 force=True,  # user already confirmed the warning in the modal
             )
         except OSError as exc:
@@ -322,6 +384,7 @@ class SessionsScreen(Screen[None]):
                     session.id,
                     self.project.encoded_path,
                     names_store=self._claude_app.names,
+                    tags_store=self._claude_app.tags,
                     force=True,
                 )
                 deleted += 1
@@ -436,7 +499,14 @@ class SessionsScreen(Screen[None]):
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         """Hide row-dependent bindings when no row is selected; hide cleanup if empty."""
-        row_dependent = {"rename", "delete", "launch_alternate", "yank_id", "set_color"}
+        row_dependent = {
+            "rename",
+            "delete",
+            "launch_alternate",
+            "yank_id",
+            "set_color",
+            "edit_tags",
+        }
         if action in row_dependent and self._selected_session() is None:
             return False
         return not (action == "cleanup" and not self._sessions)
@@ -472,6 +542,10 @@ def _session_sort_value(key: str) -> Callable[[Session], Any]:
         return lambda s: (s.display_name or s.first_prompt or "").casefold()
     if key == "branch":
         return lambda s: (s.branch or "").casefold()
+    if key == "tags":
+        # (no_tags_flag, joined_tags_casefolded) → tagged rows cluster together
+        # alphabetically; untagged sessions fall at the bottom (asc) or top (desc).
+        return lambda s: (not s.tags, " ".join(s.tags).casefold())
     if key == "messages":
         return lambda s: s.message_count
     if key == "size":

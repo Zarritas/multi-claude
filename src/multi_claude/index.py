@@ -36,6 +36,7 @@ class IndexedSession:
     size_bytes: int
     mtime: float
     jsonl_path: str
+    embedded_name: str | None = None
 
 
 _SCHEMA = """
@@ -61,6 +62,13 @@ CREATE VIRTUAL TABLE IF NOT EXISTS sessions_fts USING fts5(
 """
 
 
+def _ensure_columns(conn: sqlite3.Connection) -> None:
+    """Idempotent migration: add columns introduced after the initial schema."""
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()}
+    if "embedded_name" not in existing:
+        conn.execute("ALTER TABLE sessions ADD COLUMN embedded_name TEXT")
+
+
 class SessionIndex:
     """Thread-safe SQLite handle. One connection per index; queries are short-lived."""
 
@@ -76,6 +84,7 @@ class SessionIndex:
                 str(self.path), check_same_thread=False, isolation_level=None
             )
             self._conn.executescript(_SCHEMA)
+            _ensure_columns(self._conn)
         return self._conn
 
     def close(self) -> None:
@@ -92,8 +101,9 @@ class SessionIndex:
             conn.execute(
                 """
                 INSERT INTO sessions(session_id, project_dir, cwd, branch, first_prompt,
-                                      message_count, size_bytes, mtime, jsonl_path)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                      message_count, size_bytes, mtime, jsonl_path,
+                                      embedded_name)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(session_id) DO UPDATE SET
                     project_dir=excluded.project_dir,
                     cwd=excluded.cwd,
@@ -102,7 +112,8 @@ class SessionIndex:
                     message_count=excluded.message_count,
                     size_bytes=excluded.size_bytes,
                     mtime=excluded.mtime,
-                    jsonl_path=excluded.jsonl_path
+                    jsonl_path=excluded.jsonl_path,
+                    embedded_name=excluded.embedded_name
                 """,
                 (
                     session.session_id,
@@ -114,6 +125,7 @@ class SessionIndex:
                     session.size_bytes,
                     session.mtime,
                     session.jsonl_path,
+                    session.embedded_name,
                 ),
             )
             if fts_content is not None:
@@ -137,7 +149,7 @@ class SessionIndex:
             row = conn.execute(
                 """
                 SELECT session_id, project_dir, cwd, branch, first_prompt,
-                       message_count, size_bytes, mtime, jsonl_path
+                       message_count, size_bytes, mtime, jsonl_path, embedded_name
                 FROM sessions WHERE session_id = ?
                 """,
                 (session_id,),
@@ -159,7 +171,7 @@ class SessionIndex:
             rows = conn.execute(
                 """
                 SELECT session_id, project_dir, cwd, branch, first_prompt,
-                       message_count, size_bytes, mtime, jsonl_path
+                       message_count, size_bytes, mtime, jsonl_path, embedded_name
                 FROM sessions WHERE project_dir = ?
                 """,
                 (project_dir,),
@@ -176,7 +188,8 @@ class SessionIndex:
             rows = conn.execute(
                 """
                 SELECT s.session_id, s.project_dir, s.cwd, s.branch, s.first_prompt,
-                       s.message_count, s.size_bytes, s.mtime, s.jsonl_path
+                       s.message_count, s.size_bytes, s.mtime, s.jsonl_path,
+                       s.embedded_name
                 FROM sessions_fts f
                 JOIN sessions s ON s.session_id = f.session_id
                 WHERE sessions_fts MATCH ?
@@ -189,7 +202,7 @@ class SessionIndex:
 
 
 def _row_to_session(row: Any) -> IndexedSession:
-    sid, project_dir, cwd, branch, first_prompt, mc, sb, mtime, jp = row
+    sid, project_dir, cwd, branch, first_prompt, mc, sb, mtime, jp, embedded = row
     return IndexedSession(
         session_id=str(sid),
         project_dir=str(project_dir),
@@ -200,6 +213,7 @@ def _row_to_session(row: Any) -> IndexedSession:
         size_bytes=int(sb),
         mtime=float(mtime),
         jsonl_path=str(jp),
+        embedded_name=str(embedded) if embedded is not None else None,
     )
 
 

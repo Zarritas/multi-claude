@@ -9,6 +9,7 @@ Supported keys (where present):
 - ``branch:`` — substring match against the branch field
 - ``path:``   — substring match against the project path
 - ``id:``     — substring match against the session id
+- ``tag:``    — comma-separated list, every item must match a session tag
 
 Free-text terms are scored with :func:`rapidfuzz.fuzz.partial_ratio`. A match
 requires score >= :data:`FUZZY_THRESHOLD`.
@@ -22,7 +23,7 @@ from rapidfuzz import fuzz
 
 FUZZY_THRESHOLD = 70
 
-KNOWN_KEYS: frozenset[str] = frozenset({"branch", "path", "id"})
+KNOWN_KEYS: frozenset[str] = frozenset({"branch", "path", "id", "tag"})
 
 
 @dataclass(frozen=True)

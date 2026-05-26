@@ -20,6 +20,7 @@ from textual.widgets import Button, Input, Label, RadioButton, RadioSet, Static
 from multi_claude.colors import PALETTE, ColorRule
 from multi_claude.config import VALID_MODES, Config, LaunchMode, alternate_for
 from multi_claude.discovery import Project
+from multi_claude.tags import parse_tag_list
 
 
 def _stop_event(event: object) -> None:
@@ -1297,3 +1298,153 @@ class AssignFolderModal(ModalScreen[str | None]):
 
 
 _ = _FOLDER_UNASSIGN_SENTINEL  # kept for future internal use; not exported
+
+
+class TagEditorModal(ModalScreen[list[str] | None]):
+    """Edit the tag list of a session.
+
+    Dismisses with:
+      - ``None``       → cancel (no change)
+      - ``[]``         → clear every tag from the session
+      - ``["a", "b"]`` → replace the session's tags with this list (normalised)
+
+    The input accepts both comma- and whitespace-separated tags. ``Tab`` extends
+    the current trailing token to the longest common prefix among known tags
+    that start with it; pressing it again with no extension picks the next
+    candidate so the user can cycle. Clicking on a known-tag chip toggles it
+    in the input.
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancelar"),
+        Binding("ctrl+s", "save", "Guardar", show=False),
+    ]
+
+    DEFAULT_CSS = """
+    TagEditorModal {
+        align: center middle;
+    }
+    TagEditorModal > Vertical {
+        background: $surface;
+        border: thick $primary;
+        padding: 1 2;
+        width: 90;
+        height: auto;
+    }
+    TagEditorModal Label.title {
+        text-style: bold;
+    }
+    TagEditorModal Label.section {
+        margin-top: 1;
+        text-style: bold;
+        color: $accent;
+    }
+    TagEditorModal Label.hint {
+        color: $text-muted;
+        margin-top: 1;
+    }
+    TagEditorModal OptionList#known-tags {
+        max-height: 10;
+        border: round $accent;
+        margin-top: 1;
+    }
+    """
+
+    def __init__(
+        self,
+        subtitle: str,
+        current_tags: tuple[str, ...] | list[str],
+        known_tags: list[str],
+    ) -> None:
+        super().__init__()
+        self.subtitle = subtitle
+        self.current_tags = list(current_tags)
+        self.known_tags = sorted({t for t in known_tags if t})
+
+    def compose(self) -> ComposeResult:
+        from textual.widgets import OptionList
+        from textual.widgets.option_list import Option
+
+        with Vertical():
+            yield Label("Etiquetas de la sesión", classes="title")
+            yield Static(self.subtitle)
+            yield Label("Etiquetas (espacio o coma para separar)", classes="section")
+            yield Input(
+                value=" ".join(self.current_tags),
+                placeholder="bug urgente cliente-acme",
+                id="tags-input",
+            )
+            if self.known_tags:
+                yield Label("Conocidas (Enter para añadir / quitar)", classes="section")
+                opt_list = OptionList(
+                    *[Option(f"# {t}", id=f"tag:{t}") for t in self.known_tags],
+                    id="known-tags",
+                )
+                yield opt_list
+            yield Label(
+                "Enter en input guarda · vacío borra todas · Esc cancela",
+                classes="hint",
+            )
+
+    def on_mount(self) -> None:
+        self.query_one("#tags-input", Input).focus()
+
+    @on(Input.Submitted, "#tags-input")
+    def _submit(self, event: Input.Submitted) -> None:
+        self.dismiss(parse_tag_list(event.value))
+
+    def on_key(self, event: object) -> None:
+        key = getattr(event, "key", None)
+        if key == "tab":
+            self._tab_complete()
+            _stop_event(event)
+
+    def _tab_complete(self) -> None:
+        if not self.known_tags:
+            return
+        input_w = self.query_one("#tags-input", Input)
+        text = input_w.value
+        # Find the last token (after the last comma or whitespace).
+        boundary = max(text.rfind(" "), text.rfind(","), text.rfind("\t"))
+        prefix = text[boundary + 1 :].lower()
+        if not prefix:
+            return
+        matches = [t for t in self.known_tags if t.startswith(prefix)]
+        if not matches:
+            return
+        # Cycle if Tab is pressed while we already match exactly one of them.
+        candidate = matches[0]
+        if prefix in self.known_tags:
+            try:
+                idx = matches.index(prefix)
+            except ValueError:
+                idx = -1
+            candidate = matches[(idx + 1) % len(matches)]
+        new_value = text[: boundary + 1] + candidate
+        input_w.value = new_value
+        input_w.cursor_position = len(new_value)
+
+    def on_option_list_option_selected(self, event: object) -> None:
+        control = getattr(event, "control", None) or getattr(event, "option_list", None)
+        if control is not None and getattr(control, "id", None) != "known-tags":
+            return
+        option = getattr(event, "option", None)
+        option_id = getattr(option, "id", None) if option is not None else None
+        if not isinstance(option_id, str) or not option_id.startswith("tag:"):
+            return
+        tag = option_id.split(":", 1)[1]
+        input_w = self.query_one("#tags-input", Input)
+        current = parse_tag_list(input_w.value)
+        if tag in current:
+            current.remove(tag)
+        else:
+            current.append(tag)
+        input_w.value = " ".join(current)
+        input_w.cursor_position = len(input_w.value)
+        input_w.focus()
+
+    def action_save(self) -> None:
+        self.dismiss(parse_tag_list(self.query_one("#tags-input", Input).value))
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)

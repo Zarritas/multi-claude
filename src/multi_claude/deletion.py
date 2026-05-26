@@ -22,6 +22,7 @@ from pathlib import Path
 
 from multi_claude.index import SessionIndex, default_index
 from multi_claude.names import NamesStore
+from multi_claude.tags import TagsStore
 
 CLAUDE_HOME = Path.home() / ".claude"
 SESSION_ENV_DIR = CLAUDE_HOME / "session-env"
@@ -45,6 +46,7 @@ def delete_session(
     active_sessions_dir: Path = ACTIVE_SESSIONS_DIR,
     force: bool = False,
     index: SessionIndex | None = None,
+    tags_store: TagsStore | None = None,
 ) -> None:
     """Remove every artefact tied to ``session_id``. Idempotent.
 
@@ -71,6 +73,7 @@ def delete_session(
         env_path.unlink(missing_ok=True)
 
     (names_store or NamesStore()).delete(session_id)
+    (tags_store or TagsStore()).delete(session_id)
     (index or default_index()).delete_session(session_id)
 
 
@@ -82,6 +85,7 @@ def delete_project(
     active_sessions_dir: Path = ACTIVE_SESSIONS_DIR,
     force: bool = False,
     index: SessionIndex | None = None,
+    tags_store: TagsStore | None = None,
 ) -> None:
     """Remove every session inside ``project_dir`` plus the directory itself.
 
@@ -90,6 +94,7 @@ def delete_project(
     """
     store = names_store or NamesStore()
     idx = index if index is not None else default_index()
+    tags = tags_store or TagsStore()
 
     if project_dir.is_dir():
         if not force:
@@ -107,6 +112,7 @@ def delete_project(
                 active_sessions_dir=active_sessions_dir,
                 force=True,  # already gated above
                 index=idx,
+                tags_store=tags,
             )
         shutil.rmtree(project_dir, ignore_errors=True)
 

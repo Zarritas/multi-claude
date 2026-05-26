@@ -36,6 +36,19 @@ def test_parse_id_and_path_constraints() -> None:
     assert q.constraints == {"id": "abc1234", "path": "gextia"}
 
 
+def test_parse_tag_constraint() -> None:
+    q = parse_query("tag:bug review")
+    assert q.free_text == "review"
+    assert q.constraints == {"tag": "bug"}
+
+
+def test_parse_tag_constraint_with_comma_list() -> None:
+    """Comma-separated lists are preserved verbatim — caller AND-matches each part."""
+    q = parse_query("tag:bug,urgent")
+    assert q.free_text == ""
+    assert q.constraints == {"tag": "bug,urgent"}
+
+
 def test_matches_fuzzy_substring_wins() -> None:
     assert matches_fuzzy("refactor auth module", "refactor")
 

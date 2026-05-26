@@ -17,11 +17,18 @@ from pathlib import Path
 
 from multi_claude.index import IndexedSession, SessionIndex, default_index
 from multi_claude.names import NamesStore
+from multi_claude.tags import TagsStore
 
 HEADER_SCAN_LINES = 80
 PROMPT_MAX_CHARS = 120
 FTS_CONTENT_MAX_CHARS = 64_000  # cap per-session FTS payload (~64 KB)
 FTS_REINDEX_SCAN_LINES = 2_000  # cap how much we read into the FTS payload
+RENAME_SCAN_LINES = 50_000  # cap when scanning for the latest /rename in long sessions
+
+_RENAME_RE = re.compile(
+    r"<local-command-stdout>\s*Session renamed to:\s*(?P<name>.+?)\s*</local-command-stdout>",
+    re.DOTALL,
+)
 
 
 @dataclass(frozen=True)
@@ -35,6 +42,7 @@ class Session:
     size_bytes: int
     last_activity: float
     display_name: str | None
+    tags: tuple[str, ...] = ()
 
 
 def scan_sessions(
@@ -42,14 +50,16 @@ def scan_sessions(
     *,
     names_store: NamesStore | None = None,
     index: SessionIndex | None = None,
+    tags_store: TagsStore | None = None,
 ) -> list[Session]:
     """Return all sessions under ``project_dir`` sorted by last_activity desc."""
     store = names_store or NamesStore()
     idx = index if index is not None else default_index()
+    tags = tags_store or TagsStore()
     sessions: list[Session] = []
     for jsonl in project_dir.glob("*.jsonl"):
         try:
-            session = _build_session(jsonl, store, idx, project_dir)
+            session = _build_session(jsonl, store, idx, project_dir, tags)
         except OSError:
             continue
         sessions.append(session)
@@ -62,6 +72,7 @@ def _build_session(
     names_store: NamesStore,
     index: SessionIndex,
     project_dir: Path,
+    tags_store: TagsStore,
 ) -> Session:
     stat = jsonl_path.stat()
     sid = jsonl_path.stem
@@ -79,12 +90,14 @@ def _build_session(
                 message_count=indexed.message_count,
                 size_bytes=indexed.size_bytes,
                 last_activity=indexed.mtime,
-                display_name=names_store.get(sid),
+                display_name=names_store.get(sid) or indexed.embedded_name,
+                tags=tags_store.get(sid),
             )
 
     header = parse_session_header(jsonl_path)
     line_count = count_lines(jsonl_path)
     fts_content = _extract_fts_content(jsonl_path)
+    embedded_name = extract_embedded_name(jsonl_path)
 
     indexed = IndexedSession(
         session_id=sid,
@@ -96,6 +109,7 @@ def _build_session(
         size_bytes=stat.st_size,
         mtime=stat.st_mtime,
         jsonl_path=str(jsonl_path),
+        embedded_name=embedded_name,
     )
     index.upsert_session(indexed, fts_content=fts_content)
 
@@ -108,7 +122,8 @@ def _build_session(
         message_count=line_count,
         size_bytes=stat.st_size,
         last_activity=stat.st_mtime,
-        display_name=names_store.get(sid),
+        display_name=names_store.get(sid) or embedded_name,
+        tags=tags_store.get(sid),
     )
 
 
@@ -147,6 +162,50 @@ def parse_session_header(
     except OSError:
         pass
     return result
+
+
+def extract_embedded_name(jsonl_path: Path) -> str | None:
+    """Return the latest name set inside ``jsonl_path`` via Claude's ``/rename``.
+
+    Looks at every ``system/local_command`` event whose ``content`` matches
+    ``<local-command-stdout>Session renamed to: X</local-command-stdout>`` and
+    returns the X of the last occurrence (so subsequent renames win). Falls
+    back to a top-level ``name`` string if some Claude build wrote one inline.
+    ``None`` if nothing relevant is found.
+    """
+    latest: str | None = None
+    try:
+        with jsonl_path.open("r", encoding="utf-8", errors="replace") as f:
+            for _ in range(RENAME_SCAN_LINES):
+                line = f.readline()
+                if not line:
+                    break
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(event, dict):
+                    continue
+                # Deprecated path: top-level ``name`` string.
+                top_name = event.get("name")
+                if isinstance(top_name, str) and top_name.strip():
+                    latest = top_name.strip()
+                    continue
+                if event.get("type") != "system":
+                    continue
+                if event.get("subtype") != "local_command":
+                    continue
+                content = event.get("content")
+                if not isinstance(content, str):
+                    continue
+                match = _RENAME_RE.search(content)
+                if match:
+                    candidate = match.group("name").strip()
+                    if candidate:
+                        latest = candidate
+    except OSError:
+        return latest
+    return latest
 
 
 def _extract_fts_content(jsonl_path: Path) -> str:
