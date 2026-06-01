@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+from pathlib import Path
 from typing import cast
 
 from textual import on
@@ -15,7 +16,13 @@ from textual.widgets.data_table import RowKey
 from multi_claude.app_protocol import AppProtocol
 from multi_claude.discovery import Project, scan_projects
 from multi_claude.formatting import format_relative_time
-from multi_claude.modals import AssignFolderModal, RenameModal
+from multi_claude.modals import (
+    AssignFolderModal,
+    FilePathModal,
+    ImportTargetModal,
+    RenameModal,
+)
+from multi_claude.transfer import ArchiveError, import_archive, read_manifest
 
 
 class FolderScreen(Screen[None]):
@@ -30,6 +37,7 @@ class FolderScreen(Screen[None]):
         Binding("n", "new_subfolder", "Nueva subcarpeta"),
         Binding("e", "rename", "Renombrar"),
         Binding("f", "unassign", "Quitar de carpeta"),
+        Binding("i", "import_archive", "Importar"),
         Binding("d", "delete_folder", "Borrar carpeta"),
         Binding("escape", "back", "Back"),
         Binding("left", "back", "Back", show=False),
@@ -261,6 +269,68 @@ class FolderScreen(Screen[None]):
         with contextlib.suppress(KeyError):
             self._claude_app.project_folders.delete_folder(target)
         self.notify(f"Subcarpeta {target} eliminada (proyectos vuelven a root)")
+        self._refresh_rows()
+        self._repaint()
+
+    def action_import_archive(self) -> None:
+        self.app.push_screen(
+            FilePathModal(
+                title="Importar sesiones desde un .zip",
+                mode="open",
+                placeholder="/ruta/al/export.zip",
+            ),
+            self._on_archive_chosen,
+        )
+
+    def _on_archive_chosen(self, archive: Path | None) -> None:
+        if archive is None:
+            return  # cancelled
+        try:
+            sessions = read_manifest(archive)
+        except ArchiveError as exc:
+            self.notify(f"Archivo inválido: {exc}", severity="error")
+            return
+        # Destinations are this folder's directly-assigned projects.
+        candidates = [r for r in self._rows if isinstance(r, Project) and not r.is_orphan]
+        if not candidates:
+            self.notify(
+                "Esta carpeta no tiene proyectos donde importar. Asigna alguno "
+                "o importa desde la pantalla de proyectos.",
+                severity="warning",
+            )
+            return
+        from multi_claude.screens.projects import _import_summary
+
+        self.app.push_screen(
+            ImportTargetModal(_import_summary(sessions), candidates),
+            lambda dest: self._apply_import(archive, dest),
+        )
+
+    def _apply_import(self, archive: Path, destination: Project | None) -> None:
+        if destination is None:
+            return  # cancelled
+        try:
+            result = import_archive(
+                archive,
+                destination.encoded_path,
+                names_store=self._claude_app.names,
+                tags_store=self._claude_app.tags,
+            )
+        except (ArchiveError, OSError) as exc:
+            self.notify(f"Error al importar: {exc}", severity="error")
+            return
+        parts = []
+        if result.imported:
+            parts.append(f"Importadas {len(result.imported)} a {destination.name}")
+        if result.skipped_existing:
+            parts.append(f"{len(result.skipped_existing)} ya existían")
+        if result.skipped_missing:
+            parts.append(f"{len(result.skipped_missing)} sin contenido")
+        had_issue = bool(result.skipped_existing or result.skipped_missing)
+        self.notify(
+            " · ".join(parts) or "No se importó nada",
+            severity="warning" if (had_issue or not result.imported) else "information",
+        )
         self._refresh_rows()
         self._repaint()
 
