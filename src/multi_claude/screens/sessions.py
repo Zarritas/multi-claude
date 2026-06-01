@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any, cast
 
 from textual import on, work
@@ -16,8 +17,14 @@ from multi_claude.app_protocol import AppProtocol
 from multi_claude.clipboard import ClipboardError, copy_to_clipboard
 from multi_claude.colors import ColorRule, resolve_style
 from multi_claude.config import Config, LaunchMode, SortSpec, alternate_for
-from multi_claude.deletion import delete_session, list_active_sessions
-from multi_claude.discovery import Project
+from multi_claude.deletion import (
+    SessionActiveError,
+    SessionCollisionError,
+    delete_session,
+    list_active_sessions,
+    move_session,
+)
+from multi_claude.discovery import Project, scan_projects
 from multi_claude.filtering import FilterQuery, matches_fuzzy, parse_query
 from multi_claude.formatting import format_relative_time, format_size
 from multi_claude.launcher import LauncherError, launch_claude
@@ -26,11 +33,14 @@ from multi_claude.modals import (
     ColorPickerModal,
     ColorRulesEditorModal,
     ConfirmDeleteModal,
+    FilePathModal,
+    MoveSessionModal,
     RenameModal,
     SettingsModal,
     TagEditorModal,
 )
 from multi_claude.session import Session, scan_sessions
+from multi_claude.transfer import export_sessions, safe_filename
 from multi_claude.widgets.preview import SessionPreview
 
 _SORT_KEYS_BY_COLUMN: tuple[str, ...] = (
@@ -53,6 +63,9 @@ class SessionsScreen(Screen[None]):
         Binding("t", "edit_tags", "Etiquetas"),
         Binding("c", "set_color", "Color"),
         Binding("C", "edit_color_rules", "Reglas color"),
+        Binding("space", "toggle_mark", "Marcar"),
+        Binding("m", "move", "Mover"),
+        Binding("x", "export", "Exportar"),
         Binding("d", "delete", "Delete"),
         Binding("D", "cleanup", "Limpieza"),
         Binding("y", "yank_id", "Copiar id"),
@@ -78,6 +91,7 @@ class SessionsScreen(Screen[None]):
         self._sessions: list[Session] = []
         self._visible_indices: list[int] = []
         self._active_session_ids: set[str] = set()
+        self._marked: set[str] = set()
 
     @property
     def _claude_app(self) -> AppProtocol:
@@ -119,6 +133,7 @@ class SessionsScreen(Screen[None]):
 
     def _on_scan_complete(self, sessions: list[Session]) -> None:
         self._sessions = sessions
+        self._marked &= {s.id for s in sessions}
         self._active_session_ids = list_active_sessions()
         self.sub_title = f"{self.project.name} — {self.project.path}"
         self._apply_sort()
@@ -144,7 +159,14 @@ class SessionsScreen(Screen[None]):
             is_active = session.id in self._active_session_ids
             style = resolve_style(session, manual=manual, rules=rules, is_active=is_active)
             label = session.display_name or session.first_prompt
-            label_cell = Text(label, style=style) if style else label
+            label_cell: Text | str
+            if session.id in self._marked:
+                marked_cell = Text()
+                marked_cell.append("✓ ", style="bold green")
+                marked_cell.append(label, style=style or "")
+                label_cell = marked_cell
+            else:
+                label_cell = Text(label, style=style) if style else label
             tags_cell = self._format_tags_cell(session.tags)
             row = (
                 label_cell,
@@ -269,6 +291,136 @@ class SessionsScreen(Screen[None]):
             )
         except LauncherError as exc:
             self.notify(str(exc), severity="error")
+
+    def action_toggle_mark(self) -> None:
+        session = self._selected_session()
+        if session is None:
+            return
+        table = self.query_one("#sessions", DataTable)
+        row = table.cursor_row
+        if session.id in self._marked:
+            self._marked.discard(session.id)
+        else:
+            self._marked.add(session.id)
+        self._repaint()
+        if row is not None and 0 <= row < len(self._visible_indices):
+            table.move_cursor(row=row)
+
+    def _selected_sessions(self) -> list[Session]:
+        """Bulk-action targets: the marked set, or the current row if none marked."""
+        if self._marked:
+            return [s for s in self._sessions if s.id in self._marked]
+        current = self._selected_session()
+        return [current] if current is not None else []
+
+    def action_move(self) -> None:
+        targets = self._selected_sessions()
+        if not targets:
+            self.notify("Selecciona sesión(es) para mover", severity="warning")
+            return
+        if self.project.git_common_dir is None:
+            self.notify(
+                "Esta sesión no pertenece a un grupo de worktrees", severity="warning"
+            )
+            return
+        self._gather_move_destinations(targets)
+
+    @work(thread=True, exclusive=True, group="move-destinations")
+    def _gather_move_destinations(self, targets: list[Session]) -> None:
+        common = self.project.git_common_dir
+        candidates = [
+            p
+            for p in scan_projects()
+            if p.git_common_dir == common
+            and p.encoded_path != self.project.encoded_path
+            and not p.is_orphan
+        ]
+        self.app.call_from_thread(self._prompt_move, targets, candidates)
+
+    def _prompt_move(self, targets: list[Session], candidates: list[Project]) -> None:
+        if not candidates:
+            self.notify(
+                "No hay otros worktrees del mismo repo a los que mover",
+                severity="warning",
+            )
+            return
+        self.app.push_screen(
+            MoveSessionModal(len(targets), candidates),
+            lambda dest: self._apply_move(targets, dest),
+        )
+
+    def _apply_move(self, targets: list[Session], destination: Project | None) -> None:
+        if destination is None:
+            return  # cancelled
+        moved = 0
+        blocked = 0
+        failed = 0
+        for session in targets:
+            try:
+                move_session(
+                    session.id,
+                    self.project.encoded_path,
+                    destination.encoded_path,
+                )
+                moved += 1
+            except SessionActiveError:
+                blocked += 1
+            except (SessionCollisionError, OSError):
+                failed += 1
+        self._marked.clear()
+        parts = []
+        if moved:
+            parts.append(f"Movidas {moved} a {destination.name}")
+        if blocked:
+            parts.append(f"{blocked} activa(s) omitida(s)")
+        if failed:
+            parts.append(f"{failed} con conflicto/error")
+        self.notify(
+            " · ".join(parts) or "Nada que mover",
+            severity="warning" if (blocked or failed) else "information",
+        )
+        self._populate()
+
+    def action_export(self) -> None:
+        targets = self._selected_sessions()
+        if not targets:
+            self.notify("Selecciona sesión(es) para exportar", severity="warning")
+            return
+        default = self._default_export_path(targets)
+        self.app.push_screen(
+            FilePathModal(
+                title=f"Exportar {len(targets)} sesión(es) a un .zip",
+                mode="save",
+                default=str(default),
+            ),
+            lambda path: self._apply_export(targets, path),
+        )
+
+    def _default_export_path(self, targets: list[Session]) -> Path:
+        base = Path.home() / "Downloads"
+        if not base.is_dir():
+            base = Path.home()
+        if len(targets) == 1:
+            stem = safe_filename(
+                targets[0].display_name or targets[0].first_prompt or targets[0].id
+            )
+            return base / f"{stem}.claude-session.zip"
+        return base / f"claude-sessions-{len(targets)}.zip"
+
+    def _apply_export(self, targets: list[Session], path: Path | None) -> None:
+        if path is None:
+            return  # cancelled
+        try:
+            count = export_sessions(targets, self.project.encoded_path, path)
+        except OSError as exc:
+            self.notify(f"Error al exportar: {exc}", severity="error")
+            return
+        if count == 0:
+            self.notify("No se exportó nada (ficheros no encontrados)", severity="warning")
+            return
+        self._marked.clear()
+        self._repaint()
+        self.notify(f"Exportadas {count} sesión(es) → {path}")
 
     def action_edit_tags(self) -> None:
         session = self._selected_session()
@@ -506,8 +658,11 @@ class SessionsScreen(Screen[None]):
             "yank_id",
             "set_color",
             "edit_tags",
+            "toggle_mark",
         }
         if action in row_dependent and self._selected_session() is None:
+            return False
+        if action in ("move", "export") and not self._selected_sessions():
             return False
         return not (action == "cleanup" and not self._sessions)
 

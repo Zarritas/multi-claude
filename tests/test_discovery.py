@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+import shutil
+import subprocess
 from pathlib import Path
+
+import pytest
 
 from multi_claude.discovery import (
     decode_path_fallback,
+    encode_cwd,
+    resolve_git_common_dir,
     resolve_real_cwd,
     scan_projects,
 )
@@ -113,3 +119,60 @@ def test_resolve_real_cwd_picks_up_cwd_in_later_event(tmp_path: Path) -> None:
     jsonl.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     assert resolve_real_cwd(project_dir) == Path("/real/late")
+
+
+def test_encode_cwd_matches_claude_scheme() -> None:
+    assert encode_cwd("/home/me/WS/repo") == "-home-me-WS-repo"
+    assert encode_cwd("/home/me/Proyecto de UI") == "-home-me-Proyecto-de-UI"
+    assert encode_cwd("/a/b.c/d_e") == "-a-b-c-d-e"
+
+
+def test_resolve_real_cwd_prefers_dir_name_match_over_stale_newest(tmp_path: Path) -> None:
+    """A moved/resumed session whose newest file records a stale (parent) cwd must not
+    flip the project's identity: we prefer the cwd whose encoding matches the dir name.
+    """
+    # Dir named after the SUBDIR cwd (Claude's encoding).
+    subdir_cwd = "/repo/projects/migrations"
+    project_dir = tmp_path / encode_cwd(subdir_cwd)
+
+    # Newest file carries the stale parent cwd (as if moved/resumed from /repo).
+    write_session(project_dir, session_id="moved", cwd="/repo", mtime=2000.0)
+    # Older files carry the real subdir cwd.
+    write_session(project_dir, session_id="native", cwd=subdir_cwd, mtime=1000.0)
+
+    assert resolve_real_cwd(project_dir) == Path(subdir_cwd)
+
+
+def test_resolve_real_cwd_falls_back_to_newest_when_no_name_match(tmp_path: Path) -> None:
+    # Dir name matches no candidate's encoding (e.g. orphan/renamed): newest wins.
+    project_dir = tmp_path / "-some-unrelated-name"
+    write_session(project_dir, session_id="a", cwd="/real/new", mtime=2000.0)
+    write_session(project_dir, session_id="b", cwd="/real/old", mtime=1000.0)
+    assert resolve_real_cwd(project_dir) == Path("/real/new")
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git no disponible")
+def test_resolve_git_common_dir_only_for_worktree_root(tmp_path: Path) -> None:
+    """A repo root yields its common dir; a subdirectory of it yields None.
+
+    Regression: subdirectory-cwds (e.g. ``repo/projects/migrations``) share the
+    repo's git-common-dir, so grouping by it alone wrongly folded them into the
+    repo's worktree group. They must stay standalone.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subdir = repo / "projects" / "migrations"
+    subdir.mkdir(parents=True)
+
+    root_common = resolve_git_common_dir(repo)
+    assert root_common is not None
+    assert root_common.resolve() == (repo / ".git").resolve()
+
+    # The subdirectory shares the same .git but is NOT a worktree root → None.
+    assert resolve_git_common_dir(subdir) is None
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git no disponible")
+def test_resolve_git_common_dir_none_outside_repo(tmp_path: Path) -> None:
+    assert resolve_git_common_dir(tmp_path) is None

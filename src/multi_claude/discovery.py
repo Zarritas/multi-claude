@@ -11,6 +11,7 @@ the UI can group multiple worktrees of the same repo together.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -69,32 +70,61 @@ def decode_path_fallback(encoded: str) -> Path:
     return Path("/" + encoded.lstrip("-").replace("-", "/"))
 
 
-def resolve_real_cwd(project_dir: Path) -> Path | None:
-    """Read the first jsonl event with a `cwd` field. Return None if no jsonl yields one.
+def encode_cwd(cwd: str) -> str:
+    """Replicate Claude Code's project-dir encoding: every non-alphanumeric char → '-'.
 
-    Iterates files newest first so a corrupted ancient session does not block resolution.
+    e.g. ``/home/me/WS/repo`` → ``-home-me-WS-repo``. This is the inverse intent of
+    :func:`decode_path_fallback`, but lossless in the forward direction, so it can be
+    used to *verify* which candidate cwd a project dir was actually named after.
+    """
+    return re.sub(r"[^A-Za-z0-9]", "-", cwd)
+
+
+def resolve_real_cwd(project_dir: Path) -> Path | None:
+    """Resolve the project's real cwd by reading the `cwd` field of its sessions.
+
+    Iterates files newest first. A session that was *moved/resumed across cwds*
+    (its first event records an old cwd, e.g. the repo root, while it now lives in a
+    subdir's dir) would otherwise flip the whole project's identity, because the
+    naive "newest file's first cwd" is stale. To stay robust we prefer the candidate
+    cwd whose encoding matches ``project_dir.name`` (the dir Claude named after that
+    very cwd); only if none matches do we fall back to the newest file's first cwd.
+    Returns None if no jsonl yields a cwd.
     """
     jsonl_files = sorted(
         project_dir.glob("*.jsonl"),
         key=lambda p: p.stat().st_mtime,
         reverse=True,
     )
+    fallback: str | None = None
     for jsonl in jsonl_files:
-        try:
-            with jsonl.open("r", encoding="utf-8", errors="replace") as f:
-                for _ in range(CWD_SCAN_LINES):
-                    line = f.readline()
-                    if not line:
-                        break
-                    try:
-                        event = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    cwd = event.get("cwd")
-                    if isinstance(cwd, str) and cwd:
-                        return Path(cwd)
-        except OSError:
+        cwd = _first_cwd(jsonl)
+        if cwd is None:
             continue
+        if fallback is None:
+            fallback = cwd
+        if encode_cwd(cwd) == project_dir.name:
+            return Path(cwd)
+    return Path(fallback) if fallback is not None else None
+
+
+def _first_cwd(jsonl: Path) -> str | None:
+    """Return the first non-empty ``cwd`` in the header of ``jsonl``, or None."""
+    try:
+        with jsonl.open("r", encoding="utf-8", errors="replace") as f:
+            for _ in range(CWD_SCAN_LINES):
+                line = f.readline()
+                if not line:
+                    break
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                cwd = event.get("cwd")
+                if isinstance(cwd, str) and cwd:
+                    return cwd
+    except OSError:
+        return None
     return None
 
 
@@ -179,14 +209,23 @@ def group_worktrees(projects: list[Project]) -> list[Project | WorktreeGroup]:
 
 
 def resolve_git_common_dir(path: Path) -> Path | None:
-    """Return ``git rev-parse --git-common-dir`` resolved to an absolute path, or None.
+    """Return the repo's common git dir **only when ``path`` is a worktree root**.
 
-    Used to group multiple worktrees of the same repo under one entry. ``None`` means
-    ``path`` is not inside a git repo or the binary is unavailable.
+    Used to group multiple worktrees of the same repo under one entry. Two real
+    worktrees of a repo share a common dir and each sits at its own top-level, so
+    grouping by common dir collapses them into one entry — the intended behaviour.
+
+    But a plain *subdirectory* of a checkout (e.g. ``repo/projects/migrations``)
+    shares that same common dir too, while its top-level is the checkout root, not
+    itself. Grouping by common dir alone would therefore wrongly fold every such
+    subdirectory-project into the repo's worktree group (and let the move feature
+    shuffle sessions between them). We gate on ``--show-toplevel == path`` so only
+    genuine worktree roots participate; subdirectories return ``None`` and stay
+    standalone. ``None`` also when ``path`` is not in a git repo or git is missing.
     """
     try:
         result = subprocess.run(
-            ["git", "-C", str(path), "rev-parse", "--git-common-dir"],
+            ["git", "-C", str(path), "rev-parse", "--show-toplevel", "--git-common-dir"],
             capture_output=True,
             text=True,
             check=False,
@@ -196,10 +235,20 @@ def resolve_git_common_dir(path: Path) -> Path | None:
         return None
     if result.returncode != 0:
         return None
-    raw = result.stdout.strip()
-    if not raw:
+    lines = [ln.strip() for ln in result.stdout.splitlines() if ln.strip()]
+    if len(lines) < 2:
         return None
-    candidate = Path(raw)
+    toplevel, common_raw = Path(lines[0]), lines[1]
+
+    # Only the worktree root participates in grouping; subdirectories stand alone.
+    try:
+        is_root = toplevel.resolve() == path.resolve()
+    except OSError:
+        is_root = toplevel == path
+    if not is_root:
+        return None
+
+    candidate = Path(common_raw)
     if not candidate.is_absolute():
         candidate = (path / candidate).resolve()
     return candidate

@@ -32,6 +32,7 @@ Claude Code guarda cada sesión como un `.jsonl` bajo `~/.claude/projects/<encod
 
 Atajos:
 - `Enter` — entrar a la pantalla de sesiones del proyecto.
+- `i` — **importar** un `.zip` de sesiones exportado por otra persona; tras validar el archivo, eliges en qué proyecto existente aterrizan.
 - `r` — re-escanear `~/.claude/projects/`.
 - `q` — salir.
 
@@ -53,6 +54,9 @@ Atajos:
 - `Enter` — reanudar esta sesión con el **modo de lanzamiento predeterminado**.
 - `Shift+Enter` — reanudar esta sesión con el **modo alternativo**.
 - `n` — nueva sesión en este proyecto (modo predeterminado).
+- `Espacio` — marcar/desmarcar la sesión actual (multi-selección).
+- `m` — **mover** la(s) sesión(es) seleccionada(s) a otro worktree del mismo repo (el checkout principal o un worktree hermano). Si no hay nada marcado, mueve la fila actual.
+- `x` — **exportar** la(s) sesión(es) seleccionada(s) a un único `.zip` compartible (para enviárselo a un compañero). Si no hay nada marcado, exporta la fila actual.
 - `s` — abrir el modal de **Ajustes** para cambiar predeterminado/alternativo.
 - `Esc` / `←` — volver a la pantalla de proyectos.
 - `r` — re-escanear las sesiones del proyecto.

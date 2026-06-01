@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from dataclasses import replace
 from pathlib import Path
 
 from multi_claude.index import SessionIndex, default_index
@@ -35,6 +36,15 @@ class SessionActiveError(RuntimeError):
     def __init__(self, active_ids: set[str]) -> None:
         super().__init__(f"sesiones activas: {sorted(active_ids)}")
         self.active_ids = active_ids
+
+
+class SessionCollisionError(RuntimeError):
+    """Raised when moving a session would overwrite an existing one at the destination."""
+
+    def __init__(self, session_id: str, destination: Path) -> None:
+        super().__init__(f"ya existe {session_id} en {destination}")
+        self.session_id = session_id
+        self.destination = destination
 
 
 def delete_session(
@@ -146,6 +156,62 @@ def merge_projects(
     # Best-effort cleanup of whatever remains.
     shutil.rmtree(orphan_dir, ignore_errors=True)
     return moved
+
+
+def move_session(
+    session_id: str,
+    source_dir: Path,
+    dest_dir: Path,
+    *,
+    active_sessions_dir: Path = ACTIVE_SESSIONS_DIR,
+    force: bool = False,
+    index: SessionIndex | None = None,
+) -> None:
+    """Move a session's ``<id>.jsonl`` (plus its sibling ``<id>/`` subdir) from
+    ``source_dir`` to ``dest_dir`` and repoint its index row at the new location.
+
+    Claude finds a session by computing the encoded-path dir of the resume cwd, so
+    physically relocating the jsonl is all it takes to make the session resume under
+    a different project. Per-session artefacts keyed by id (display name, tags,
+    ``session-env``) need no move: they are looked up by ``session_id`` regardless of
+    which project holds the jsonl.
+
+    Idempotent on a missing source (no-op). Raises:
+
+    - :class:`SessionActiveError` if the session is live in ``~/.claude/sessions/``
+      and ``force`` is False — moving the jsonl out from under a running session
+      would break it.
+    - :class:`SessionCollisionError` if ``dest_dir`` already holds that session id
+      (so two real sessions never silently collide).
+    """
+    if not force:
+        active = list_active_sessions(sessions_dir=active_sessions_dir)
+        if session_id in active:
+            raise SessionActiveError({session_id})
+
+    source_jsonl = source_dir / f"{session_id}.jsonl"
+    if not source_jsonl.exists():
+        return
+
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest_jsonl = dest_dir / f"{session_id}.jsonl"
+    if dest_jsonl.exists():
+        raise SessionCollisionError(session_id, dest_dir)
+
+    shutil.move(str(source_jsonl), str(dest_jsonl))
+
+    source_subdir = source_dir / session_id
+    if source_subdir.is_dir():
+        dest_subdir = dest_dir / session_id
+        if not dest_subdir.exists():
+            shutil.move(str(source_subdir), str(dest_subdir))
+
+    idx = index if index is not None else default_index()
+    indexed = idx.get(session_id)
+    if indexed is not None:
+        idx.upsert_session(
+            replace(indexed, project_dir=str(dest_dir), jsonl_path=str(dest_jsonl))
+        )
 
 
 def list_active_sessions(

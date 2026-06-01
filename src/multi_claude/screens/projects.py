@@ -33,10 +33,13 @@ from multi_claude.modals import (
     AssignFolderModal,
     ColorRulesEditorModal,
     ConfirmDeleteModal,
+    FilePathModal,
+    ImportTargetModal,
     MergeProjectModal,
     RenameModal,
     SettingsModal,
 )
+from multi_claude.transfer import ArchiveError, ManifestSession, import_archive, read_manifest
 
 # Sort keys exposed via number keys. Order = column order in the table.
 _SORT_KEYS_BY_COLUMN: tuple[str, ...] = ("name", "path", "session_count", "last_activity")
@@ -61,6 +64,7 @@ class ProjectsScreen(Screen[None]):
         Binding("shift+s", "toggle_sort_direction", "Sort dir"),
         Binding("g", "toggle_groups", "Group worktrees"),
         Binding("f", "assign_folder", "Folder"),
+        Binding("i", "import_archive", "Importar"),
         Binding("m", "merge_orphan", "Merge orphan"),
         Binding("question_mark", "search_global", "FTS global", show=False),
         Binding("ctrl+q", "quit", "Quit"),
@@ -568,6 +572,77 @@ class ProjectsScreen(Screen[None]):
         store.delete_for_project(orphan.encoded_path)
         self.notify(f"Movidas {moved} sesión(es) a {destination.name}")
         self._populate()
+
+    def action_import_archive(self) -> None:
+        self.app.push_screen(
+            FilePathModal(
+                title="Importar sesiones desde un .zip",
+                mode="open",
+                placeholder="/ruta/al/export.zip",
+            ),
+            self._on_archive_chosen,
+        )
+
+    def _on_archive_chosen(self, archive: Path | None) -> None:
+        if archive is None:
+            return  # cancelled
+        try:
+            sessions = read_manifest(archive)
+        except ArchiveError as exc:
+            self.notify(f"Archivo inválido: {exc}", severity="error")
+            return
+        candidates = [p for p in self._projects if not p.is_orphan]
+        if not candidates:
+            self.notify(
+                "No hay proyectos donde importar. Abre Claude en algún proyecto primero.",
+                severity="warning",
+            )
+            return
+        self.app.push_screen(
+            ImportTargetModal(_import_summary(sessions), candidates),
+            lambda dest: self._apply_import(archive, dest),
+        )
+
+    def _apply_import(self, archive: Path, destination: Project | None) -> None:
+        if destination is None:
+            return  # cancelled
+        try:
+            result = import_archive(
+                archive,
+                destination.encoded_path,
+                names_store=self._claude_app.names,
+                tags_store=self._claude_app.tags,
+            )
+        except ArchiveError as exc:
+            self.notify(f"Error al importar: {exc}", severity="error")
+            return
+        except OSError as exc:
+            self.notify(f"Error al importar: {exc}", severity="error")
+            return
+        parts = []
+        if result.imported:
+            parts.append(f"Importadas {len(result.imported)} a {destination.name}")
+        if result.skipped_existing:
+            parts.append(f"{len(result.skipped_existing)} ya existían")
+        if result.skipped_missing:
+            parts.append(f"{len(result.skipped_missing)} sin contenido")
+        had_issue = bool(result.skipped_existing or result.skipped_missing)
+        self.notify(
+            " · ".join(parts) or "No se importó nada",
+            severity="warning" if (had_issue or not result.imported) else "information",
+        )
+        self._populate()
+
+
+def _import_summary(sessions: tuple[ManifestSession, ...]) -> list[str]:
+    """Build the preview lines shown in the import destination picker."""
+    lines = [f"{len(sessions)} sesión(es) en el archivo:"]
+    for ms in sessions[:5]:
+        label = ms.display_name or ms.first_prompt or ms.session_id
+        lines.append(f"  · {label[:70]}")
+    if len(sessions) > 5:
+        lines.append(f"  … y {len(sessions) - 5} más")
+    return lines
 
 
 def _project_sort_value(key: str) -> Callable[[Project], Any]:

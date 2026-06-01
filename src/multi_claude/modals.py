@@ -982,6 +982,257 @@ class MergeProjectModal(ModalScreen[Project | None]):
         self.dismiss(None)
 
 
+class MoveSessionModal(ModalScreen["Project | None"]):
+    """Pick a destination worktree (sibling or parent) to move session(s) into.
+
+    Lists the other live members of the current repo's worktree group. Dismisses
+    with the chosen :class:`Project`, or ``None`` on cancel. The caller guarantees
+    ``candidates`` is non-empty.
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+    ]
+
+    DEFAULT_CSS = """
+    MoveSessionModal {
+        align: center middle;
+    }
+    MoveSessionModal > Vertical {
+        background: $surface;
+        border: thick $primary;
+        padding: 1 2;
+        width: 90;
+        height: auto;
+    }
+    MoveSessionModal Label.title {
+        text-style: bold;
+    }
+    MoveSessionModal Label.section {
+        margin-top: 1;
+        text-style: bold;
+        color: $accent;
+    }
+    MoveSessionModal Label.hint {
+        color: $text-muted;
+        margin-top: 1;
+    }
+    MoveSessionModal Label.error {
+        color: $error;
+        margin-top: 1;
+    }
+    """
+
+    def __init__(self, session_count: int, candidates: list[Project]) -> None:
+        super().__init__()
+        self.session_count = session_count
+        self.candidates = candidates
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Label("Mover sesión(es) a otro worktree", classes="title")
+            yield Static(f"{self.session_count} sesión(es) seleccionada(s)")
+            yield Label("Destino", classes="section")
+            with RadioSet(id="move-target"):
+                for idx, candidate in enumerate(self.candidates):
+                    label = f"{candidate.name} — {candidate.path}"
+                    yield RadioButton(label, value=(idx == 0), id=f"target-{idx}")
+            yield Label("Enter confirma · Esc cancela", classes="hint")
+            yield Label("", id="move-error", classes="error")
+
+    def on_mount(self) -> None:
+        self.query_one("#move-target", RadioSet).focus()
+
+    def on_key(self, event: object) -> None:
+        if getattr(event, "key", None) == "enter":
+            self._submit()
+
+    def _submit(self) -> None:
+        radio_set = self.query_one("#move-target", RadioSet)
+        pressed = radio_set.pressed_button
+        if pressed is None or pressed.id is None or not pressed.id.startswith("target-"):
+            self.query_one("#move-error", Label).update("Selecciona un destino.")
+            return
+        idx = int(pressed.id.split("-", 1)[1])
+        self.dismiss(self.candidates[idx])
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class FilePathModal(ModalScreen["Path | None"]):
+    """Prompt for a filesystem path, prefilled with a default the user can edit.
+
+    ``mode="open"`` → the path must point at an existing file (import an archive).
+    ``mode="save"`` → the path must not be a directory; its parent is created on
+    write by the caller (choose where to write an export). Returns the resolved
+    :class:`Path` on submit, ``None`` on cancel.
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+    ]
+
+    DEFAULT_CSS = """
+    FilePathModal {
+        align: center middle;
+    }
+    FilePathModal > Vertical {
+        background: $surface;
+        border: thick $primary;
+        padding: 1 2;
+        width: 90;
+        height: auto;
+    }
+    FilePathModal Label.title {
+        text-style: bold;
+    }
+    FilePathModal Label.error {
+        color: $error;
+        margin-top: 1;
+    }
+    FilePathModal Label.hint {
+        color: $text-muted;
+        margin-top: 1;
+    }
+    """
+
+    def __init__(
+        self,
+        *,
+        title: str,
+        mode: str = "open",
+        default: str = "",
+        placeholder: str = "/ruta/al/archivo.zip",
+    ) -> None:
+        super().__init__()
+        self._title = title
+        self._mode = mode
+        self._default = default
+        self._placeholder = placeholder
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Label(self._title, classes="title")
+            yield Input(value=self._default, placeholder=self._placeholder, id="path-input")
+            yield Label("", id="path-error", classes="error")
+            yield Label("Enter confirma · Esc cancela", classes="hint")
+
+    def on_mount(self) -> None:
+        input_w = self.query_one("#path-input", Input)
+        input_w.focus()
+        input_w.cursor_position = len(input_w.value)
+
+    @on(Input.Submitted, "#path-input")
+    def _submit(self, event: Input.Submitted) -> None:
+        raw = event.value.strip()
+        if not raw:
+            self._set_error("Indica una ruta")
+            return
+        try:
+            resolved = Path(raw).expanduser().resolve(strict=False)
+        except OSError as exc:
+            self._set_error(f"Ruta inválida: {exc}")
+            return
+        if self._mode == "open":
+            if not resolved.exists():
+                self._set_error(f"No existe: {resolved}")
+                return
+            if not resolved.is_file():
+                self._set_error(f"No es un archivo: {resolved}")
+                return
+        elif resolved.is_dir():
+            self._set_error("Es un directorio; indica un nombre de archivo")
+            return
+        self.dismiss(resolved)
+
+    def _set_error(self, msg: str) -> None:
+        self.query_one("#path-error", Label).update(msg)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class ImportTargetModal(ModalScreen["Project | None"]):
+    """Pick the destination project for an imported session archive.
+
+    Lists every live (non-orphan) project; the imported sessions land in the chosen
+    project's encoded dir and resume under its cwd. Dismisses with the chosen
+    :class:`Project`, or ``None`` on cancel. The caller guarantees ``candidates`` is
+    non-empty.
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+    ]
+
+    DEFAULT_CSS = """
+    ImportTargetModal {
+        align: center middle;
+    }
+    ImportTargetModal > Vertical {
+        background: $surface;
+        border: thick $primary;
+        padding: 1 2;
+        width: 90;
+        height: auto;
+    }
+    ImportTargetModal Label.title {
+        text-style: bold;
+    }
+    ImportTargetModal Label.section {
+        margin-top: 1;
+        text-style: bold;
+        color: $accent;
+    }
+    ImportTargetModal Label.hint {
+        color: $text-muted;
+        margin-top: 1;
+    }
+    ImportTargetModal Label.error {
+        color: $error;
+        margin-top: 1;
+    }
+    """
+
+    def __init__(self, summary: list[str], candidates: list[Project]) -> None:
+        super().__init__()
+        self.summary = summary
+        self.candidates = candidates
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Label("Importar sesiones — elegir proyecto destino", classes="title")
+            for line in self.summary:
+                yield Static(line)
+            yield Label("Destino", classes="section")
+            with RadioSet(id="import-target"):
+                for idx, candidate in enumerate(self.candidates):
+                    label = f"{candidate.name} — {candidate.path}"
+                    yield RadioButton(label, value=(idx == 0), id=f"target-{idx}")
+            yield Label("Enter confirma · Esc cancela", classes="hint")
+            yield Label("", id="import-error", classes="error")
+
+    def on_mount(self) -> None:
+        self.query_one("#import-target", RadioSet).focus()
+
+    def on_key(self, event: object) -> None:
+        if getattr(event, "key", None) == "enter":
+            self._submit()
+
+    def _submit(self) -> None:
+        radio_set = self.query_one("#import-target", RadioSet)
+        pressed = radio_set.pressed_button
+        if pressed is None or pressed.id is None or not pressed.id.startswith("target-"):
+            self.query_one("#import-error", Label).update("Selecciona un destino.")
+            return
+        idx = int(pressed.id.split("-", 1)[1])
+        self.dismiss(self.candidates[idx])
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 _CLEANUP_PRESETS: tuple[tuple[str, int | None], ...] = (
     ("Más antiguas de 1 semana", 7),
     ("Más antiguas de 1 mes", 30),
