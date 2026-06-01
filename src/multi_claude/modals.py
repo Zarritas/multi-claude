@@ -1063,14 +1063,22 @@ class MoveSessionModal(ModalScreen["Project | None"]):
 class FilePathModal(ModalScreen["Path | None"]):
     """Prompt for a filesystem path, prefilled with a default the user can edit.
 
-    ``mode="open"`` → the path must point at an existing file (import an archive).
-    ``mode="save"`` → the path must not be a directory; its parent is created on
-    write by the caller (choose where to write an export). Returns the resolved
+    Shell-like autocomplete (mirroring :class:`AddProjectModal`) surfaces matching
+    directories and files below the input:
+      - ``Tab``  → extend the input to the longest common prefix of candidates.
+      - ``↓``    → move focus into the suggestion list; ``Enter`` picks one.
+      - ``Enter`` on the input → submit and resolve the path.
+
+    Files are filtered to ``suffixes`` (default ``(".zip",)``); directories are
+    always shown so you can keep descending. ``mode="open"`` requires the final
+    path to be an existing file (import an archive); ``mode="save"`` only forbids
+    a directory (choose where to write an export). Returns the resolved
     :class:`Path` on submit, ``None`` on cancel.
     """
 
     BINDINGS = [
         Binding("escape", "cancel", "Cancel"),
+        Binding("down", "focus_suggestions", "Elegir sugerencia", priority=True),
     ]
 
     DEFAULT_CSS = """
@@ -1095,6 +1103,11 @@ class FilePathModal(ModalScreen["Path | None"]):
         color: $text-muted;
         margin-top: 1;
     }
+    FilePathModal OptionList#path-suggestions {
+        max-height: 12;
+        border: round $accent;
+        margin-top: 1;
+    }
     """
 
     def __init__(
@@ -1104,24 +1117,160 @@ class FilePathModal(ModalScreen["Path | None"]):
         mode: str = "open",
         default: str = "",
         placeholder: str = "/ruta/al/archivo.zip",
+        suffixes: tuple[str, ...] = (".zip",),
     ) -> None:
         super().__init__()
         self._title = title
         self._mode = mode
         self._default = default
         self._placeholder = placeholder
+        self._suffixes = suffixes
 
     def compose(self) -> ComposeResult:
+        from textual.widgets import OptionList
+
         with Vertical():
             yield Label(self._title, classes="title")
             yield Input(value=self._default, placeholder=self._placeholder, id="path-input")
+            suggestions = OptionList(id="path-suggestions")
+            suggestions.display = False
+            yield suggestions
             yield Label("", id="path-error", classes="error")
-            yield Label("Enter confirma · Esc cancela", classes="hint")
+            yield Label("Enter confirma · Tab completa · ↓ elige · Esc cancela", classes="hint")
 
     def on_mount(self) -> None:
         input_w = self.query_one("#path-input", Input)
         input_w.focus()
         input_w.cursor_position = len(input_w.value)
+        self._refresh_suggestions(input_w.value)
+
+    # -- typing + suggestions ------------------------------------------------ #
+
+    @on(Input.Changed, "#path-input")
+    def _on_input_changed(self, event: Input.Changed) -> None:
+        self._refresh_suggestions(event.value)
+
+    def _refresh_suggestions(self, prefix: str) -> None:
+        from textual.widgets import OptionList
+
+        from multi_claude.path_complete import list_suggestions
+
+        suggestions = list_suggestions(prefix, include_files=True, suffixes=self._suffixes)
+        opt_list = self.query_one("#path-suggestions", OptionList)
+        opt_list.clear_options()
+        if not suggestions:
+            opt_list.display = False
+            return
+        opt_list.display = True
+        for path in suggestions:
+            opt_list.add_option(str(path) + ("/" if path.is_dir() else ""))
+
+    # -- keys ---------------------------------------------------------------- #
+
+    def on_key(self, event: object) -> None:
+        key = getattr(event, "key", None)
+        if key == "tab":
+            self._tab_complete()
+            _stop_event(event)
+            return
+        if self._suggestions_have_focus():
+            if key == "escape":
+                self._focus_input()
+                _stop_event(event)
+                return
+            if key == "up" and self._suggestions_at_top():
+                self._focus_input()
+                _stop_event(event)
+
+    def _suggestions_have_focus(self) -> bool:
+        from textual.widgets import OptionList
+
+        try:
+            opt_list = self.query_one("#path-suggestions", OptionList)
+        except Exception:
+            return False
+        return bool(opt_list.has_focus)
+
+    def _suggestions_at_top(self) -> bool:
+        from textual.widgets import OptionList
+
+        try:
+            opt_list = self.query_one("#path-suggestions", OptionList)
+        except Exception:
+            return False
+        return opt_list.highlighted in (None, 0)
+
+    def _focus_input(self) -> None:
+        input_w = self.query_one("#path-input", Input)
+        input_w.focus()
+        input_w.cursor_position = len(input_w.value)
+
+    def action_focus_suggestions(self) -> None:
+        """Move focus into the suggestion list (priority binding so Input doesn't eat ↓)."""
+        from textual.widgets import OptionList
+
+        input_w = self.query_one("#path-input", Input)
+        opt_list = self.query_one("#path-suggestions", OptionList)
+        if not input_w.has_focus:
+            return
+        if not opt_list.display or opt_list.option_count == 0:
+            return
+        opt_list.focus()
+        opt_list.highlighted = 0
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        if action == "focus_suggestions":
+            try:
+                input_w = self.query_one("#path-input", Input)
+            except Exception:
+                return False
+            if not input_w.has_focus:
+                return False
+            from textual.widgets import OptionList
+
+            try:
+                opt_list = self.query_one("#path-suggestions", OptionList)
+            except Exception:
+                return False
+            if not opt_list.display or opt_list.option_count == 0:
+                return False
+        return True
+
+    def _tab_complete(self) -> None:
+        from multi_claude.path_complete import common_prefix_completion
+
+        input_w = self.query_one("#path-input", Input)
+        completion = common_prefix_completion(
+            input_w.value, include_files=True, suffixes=self._suffixes
+        )
+        if completion is None or completion == input_w.value:
+            return
+        input_w.value = completion
+        input_w.cursor_position = len(completion)
+        self._refresh_suggestions(completion)
+
+    # -- option picked ------------------------------------------------------- #
+
+    def _handle_suggestion_selected(self, prompt: str) -> None:
+        if not prompt:
+            return
+        # The label already carries a trailing "/" for directories, so picking one
+        # lists its contents on the next refresh; a file becomes the final value.
+        input_w = self.query_one("#path-input", Input)
+        input_w.value = prompt
+        input_w.cursor_position = len(prompt)
+        input_w.focus()
+        self._refresh_suggestions(prompt)
+
+    def on_option_list_option_selected(self, event: object) -> None:
+        control = getattr(event, "control", None) or getattr(event, "option_list", None)
+        if control is not None and getattr(control, "id", None) != "path-suggestions":
+            return
+        option = getattr(event, "option", None)
+        prompt = str(getattr(option, "prompt", "")) if option is not None else ""
+        self._handle_suggestion_selected(prompt)
+
+    # -- submit / cancel ----------------------------------------------------- #
 
     @on(Input.Submitted, "#path-input")
     def _submit(self, event: Input.Submitted) -> None:

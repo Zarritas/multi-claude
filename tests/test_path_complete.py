@@ -76,3 +76,36 @@ def test_common_prefix_does_not_truncate_when_already_at_common(tmp_path: Path) 
     completion = common_prefix_completion(typed)
     # No advancement possible — both candidates share exactly this prefix.
     assert completion is None or completion == typed
+
+
+def test_include_files_filters_by_suffix(tmp_path: Path) -> None:
+    (tmp_path / "export.zip").write_text("x", encoding="utf-8")
+    (tmp_path / "notes.txt").write_text("x", encoding="utf-8")
+    (tmp_path / "sub").mkdir()
+    # Default: directories only.
+    assert {p.name for p in list_suggestions(str(tmp_path) + "/")} == {"sub"}
+    # With files but no suffix filter: every entry.
+    assert {p.name for p in list_suggestions(str(tmp_path) + "/", include_files=True)} == {
+        "export.zip",
+        "notes.txt",
+        "sub",
+    }
+    # With a suffix filter: only matching files (plus directories).
+    result = list_suggestions(str(tmp_path) + "/", include_files=True, suffixes=(".zip",))
+    assert {p.name for p in result} == {"export.zip", "sub"}
+
+
+def test_directories_sort_before_files(tmp_path: Path) -> None:
+    (tmp_path / "zzz_dir").mkdir()
+    (tmp_path / "aaa.zip").write_text("x", encoding="utf-8")
+    result = list_suggestions(str(tmp_path) + "/", include_files=True, suffixes=(".zip",))
+    assert [p.name for p in result] == ["zzz_dir", "aaa.zip"]
+
+
+def test_common_prefix_single_file_has_no_trailing_slash(tmp_path: Path) -> None:
+    f = tmp_path / "backup.zip"
+    f.write_text("x", encoding="utf-8")
+    completion = common_prefix_completion(
+        str(tmp_path / "back"), include_files=True, suffixes=(".zip",)
+    )
+    assert completion == str(f)  # file → no trailing "/"
