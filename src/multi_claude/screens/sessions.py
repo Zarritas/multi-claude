@@ -26,6 +26,7 @@ from multi_claude.deletion import (
 )
 from multi_claude.discovery import Project, scan_projects
 from multi_claude.filtering import FilterQuery, matches_fuzzy, parse_query
+from multi_claude.focus import find_live_session, focus_terminal
 from multi_claude.formatting import format_relative_time, format_size
 from multi_claude.launcher import LauncherError, launch_claude
 from multi_claude.modals import (
@@ -281,6 +282,21 @@ class SessionsScreen(Screen[None]):
         display_name: str | None,
         mode: LaunchMode,
     ) -> None:
+        # Never open two terminals on the same session: if it's already live,
+        # bring its terminal to the foreground (best-effort) instead of resuming
+        # a duplicate, which would have two processes writing the same jsonl.
+        if session_id is not None:
+            live = find_live_session(session_id)
+            if live is not None:
+                if focus_terminal(live.pid):
+                    self.notify("Sesión ya abierta — terminal traída al frente")
+                else:
+                    self.notify(
+                        "Esta sesión ya está abierta en otra terminal "
+                        f"(pid {live.pid}); no se abre duplicado",
+                        severity="warning",
+                    )
+                return
         try:
             launch_claude(
                 self.project.path,

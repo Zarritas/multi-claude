@@ -53,6 +53,8 @@ Atajos:
 Atajos:
 - `Enter` — reanudar esta sesión con el **modo de lanzamiento predeterminado**.
 - `Shift+Enter` — reanudar esta sesión con el **modo alternativo**.
+
+> **Sesiones ya abiertas**: si la sesión ya está corriendo en otra terminal (registrada como viva en `~/.claude/sessions/`), `Enter`/`Shift+Enter` **no abren un duplicado** — multi-claude intenta traer al frente la terminal existente (tmux → X11/XWayland vía `xdotool`/`wmctrl` → GNOME Wayland vía la extensión [Window Calls](https://github.com/ickyicky/window-calls) → macOS vía System Events). Si ninguna estrategia aplica en tu entorno (p.ej. GNOME Wayland sin esa extensión), se bloquea el lanzamiento con un aviso en lugar de abrir una segunda terminal sobre el mismo jsonl.
 - `n` — nueva sesión en este proyecto (modo predeterminado).
 - `Espacio` — marcar/desmarcar la sesión actual (multi-selección).
 - `m` — **mover** la(s) sesión(es) seleccionada(s) a otro worktree del mismo repo (el checkout principal o un worktree hermano). Si no hay nada marcado, mueve la fila actual.
