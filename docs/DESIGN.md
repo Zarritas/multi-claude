@@ -8,11 +8,12 @@ Este documento extiende el README con detalles que no caben en una visión gener
 |-------------------------------|--------------------------------------------------------------------------|
 | Stack                         | Python 3.10+ con Textual                                                 |
 | Lanzamiento de `claude`       | Modo configurable: auto (mux→window→suspend) / window / suspend           |
-| Metadatos por sesión          | primer prompt, fecha, branch, nº mensajes, tamaño                        |
-| Scope MVP                     | navegación + reanudar + nueva sesión (sin preview, búsqueda, borrar)     |
-| Huérfanos                     | visibles, estilo dim, acciones bloqueadas                                |
-| Acciones extra (editor, etc.) | fuera del MVP                                                            |
-| Worktrees / proyecto movido   | no agrupación; tratamiento como proyectos independientes                 |
+| Metadatos por sesión          | primer prompt, fecha, branch, tags, nº mensajes, tamaño                  |
+| Búsqueda                      | índice SQLite + FTS5 como caché reconstruible, nunca fuente de verdad    |
+| Huérfanos                     | visibles, estilo dim, acciones bloqueadas (salvo merge y borrado)        |
+| Worktrees                     | agrupados por `git_common_dir`, solo cuando el cwd es la raíz del worktree |
+| Proyecto movido de path       | sin reconciliación automática; merge manual del huérfano sobre el vivo   |
+| Escrituras en disco de Claude | ninguna, salvo mover/borrar jsonl; el estado propio va a ficheros aparte  |
 
 ## Fuente de verdad del cwd
 

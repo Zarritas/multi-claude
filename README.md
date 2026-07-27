@@ -8,10 +8,25 @@ Claude Code guarda cada sesión como un `.jsonl` bajo `~/.claude/projects/<encod
 
 `multi-claude` es un dashboard en terminal que lista todos tus proyectos, muestra sus sesiones con metadatos legibles, y al pulsar Enter lanza `claude --resume <id>` en un panel/pestaña nueva del multiplexer o emulador de terminal.
 
+## Qué trae
+
+- **Búsqueda full-text** (`?`) sobre el contenido de todas las sesiones, con índice FTS5 de SQLite — encuentra "aquella conversación sobre el refactor X" por lo que se dijo dentro.
+- **Preview** (`p`) de los últimos turnos de una sesión sin reanudarla.
+- **Worktrees agrupados** por defecto: los worktrees de un mismo repo colapsan en una fila, con pantalla propia para entrar a cada uno.
+- **Carpetas de usuario** (`f`) para organizar proyectos en un árbol propio.
+- **Filtro incremental** (`/`) con `branch:`, `path:`, `id:`, `tag:` y texto libre fuzzy.
+- **Etiquetas** (`t`) y **colores** por sesión (`c`), con reglas automáticas por branch, antigüedad o actividad (`C`).
+- **Nombres persistentes** (`e`) para sesiones y proyectos, incluido el `/rename` de Claude como fallback.
+- **Mover, exportar e importar** sesiones entre worktrees o hacia un `.zip` compartible (`m`, `x`, `i`).
+- **Sin duplicados**: si una sesión ya está abierta en otra terminal, la trae al frente en vez de abrir una segunda.
+- **Borrado y limpieza** (`d`, `D`) que arrastran todos los artefactos en disco, no solo el jsonl.
+
 ## Stack
 
 - Python 3.10+
 - [Textual](https://textual.textualize.io/) para la TUI
+- [rapidfuzz](https://github.com/rapidfuzz/RapidFuzz) para el matching fuzzy del filtro
+- SQLite (`sqlite3` de la stdlib, con FTS5) para el índice y la búsqueda global
 - Standard library para todo lo demás (sin dependencias pesadas de parsing)
 
 ## Comportamiento
@@ -25,16 +40,31 @@ Claude Code guarda cada sesión como un `.jsonl` bajo `~/.claude/projects/<encod
 | Proyecto          | basename del cwd real                                                  |
 | Path              | cwd real extraído del primer evento del jsonl (no por decodificación)  |
 | Sesiones          | nº de archivos `.jsonl` en el directorio del proyecto                  |
-| Última actividad  | mtime más reciente entre los `.jsonl` del proyecto                     |
+| Última            | mtime más reciente entre los `.jsonl` del proyecto                     |
 
 - Orden por defecto: última actividad descendente.
 - Proyectos huérfanos (cwd ya no existe en disco): aparecen en estilo apagado, no se pueden abrir.
+- Los **worktrees git del mismo repo se agrupan** en una sola fila (ver [Worktrees](#worktrees-g)).
+- Los proyectos asignados a una **carpeta** se muestran dentro de ella (ver [Carpetas](#carpetas-f)).
 
 Atajos:
-- `Enter` — entrar a la pantalla de sesiones del proyecto.
+- `Enter` — entrar a la pantalla de sesiones del proyecto (o a la de worktrees / la carpeta, según la fila).
+- `a` — añadir un proyecto a mano indicando su path.
+- `e` — renombrar el proyecto (alias local, no toca el disco).
+- `f` — asignar el proyecto a una **carpeta** (o quitarlo de ella).
+- `g` — alternar entre **worktrees agrupados** y expandidos.
 - `i` — **importar** un `.zip` de sesiones exportado por otra persona; tras validar el archivo, eliges en qué proyecto existente aterrizan.
+- `m` — **merge de un proyecto huérfano** sobre otro proyecto vivo: mueve sus sesiones y le traspasa el alias. Solo disponible sobre filas huérfanas.
+- `d` — borrar el proyecto (cascada sobre todas sus sesiones y artefactos en disco).
+- `C` — editar las **reglas de color** (ver [Colores](#colores-c-y-c)).
+- `/` — filtrar la lista (ver [Filtro](#filtro-)).
+- `?` — **búsqueda full-text global** sobre el contenido de todas las sesiones (ver [Búsqueda global](#búsqueda-global-full-text-)).
+- `1`…`4` — ordenar por nombre / path / nº de sesiones / última actividad.
+- `Shift+S` — invertir la dirección del orden.
+- `s` — abrir el modal de **Ajustes**.
 - `r` — re-escanear `~/.claude/projects/`.
-- `q` — salir.
+- `Esc` — limpiar el filtro.
+- `Ctrl+Q` — salir.
 
 ### Pantalla 2 — Sesiones del proyecto
 
@@ -42,13 +72,15 @@ Atajos:
 
 | Columna           | Origen                                                                                |
 |-------------------|---------------------------------------------------------------------------------------|
-| Primer prompt     | primer `type=user` con `role=user`, limpiando wrappers `<command-message>` / args     |
+| Prompt            | primer `type=user` con `role=user`, limpiando wrappers `<command-message>` / args      |
 | Branch            | `gitBranch` del primer evento con cwd                                                 |
+| Tags              | etiquetas asignadas a mano (ver [Etiquetas](#etiquetas-t))                             |
 | Msgs              | nº de líneas del jsonl                                                                |
 | Tamaño            | size en KB del jsonl                                                                  |
-| Última actividad  | mtime del jsonl                                                                       |
+| Última            | mtime del jsonl                                                                       |
 
 - Orden por defecto: última actividad descendente.
+- Si la sesión tiene un nombre puesto con `e` (o con el `/rename` de Claude), ese nombre sustituye al primer prompt en la columna **Prompt**.
 
 Atajos:
 - `Enter` — reanudar esta sesión con el **modo de lanzamiento predeterminado**.
@@ -57,12 +89,86 @@ Atajos:
 > **Sesiones ya abiertas**: si la sesión ya está corriendo en otra terminal (registrada como viva en `~/.claude/sessions/`), `Enter`/`Shift+Enter` **no abren un duplicado** — multi-claude intenta traer al frente la terminal existente (tmux → X11/XWayland vía `xdotool`/`wmctrl` → GNOME Wayland vía la extensión [Window Calls](https://github.com/ickyicky/window-calls) → macOS vía System Events). Si ninguna estrategia aplica en tu entorno (p.ej. GNOME Wayland sin esa extensión), se bloquea el lanzamiento con un aviso en lugar de abrir una segunda terminal sobre el mismo jsonl.
 - `n` — nueva sesión en este proyecto (modo predeterminado).
 - `Espacio` — marcar/desmarcar la sesión actual (multi-selección).
+- `p` — mostrar/ocultar el **panel de preview** (ver [Preview](#preview-p)).
+- `e` — renombrar la sesión (nombre persistente propio de multi-claude).
+- `t` — editar las **etiquetas** de la sesión.
+- `c` — asignar un **color** manual a la sesión; `C` — editar las **reglas de color**.
+- `y` — copiar el **id** de la sesión al portapapeles.
 - `m` — **mover** la(s) sesión(es) seleccionada(s) a otro worktree del mismo repo (el checkout principal o un worktree hermano). Si no hay nada marcado, mueve la fila actual.
 - `x` — **exportar** la(s) sesión(es) seleccionada(s) a un único `.zip` compartible (para enviárselo a un compañero). Si no hay nada marcado, exporta la fila actual.
+- `d` — borrar la(s) sesión(es) seleccionada(s) y todos sus artefactos en disco.
+- `D` — **limpieza** por antigüedad: eliges un umbral y borra de golpe las sesiones más viejas (las sesiones vivas quedan protegidas).
+- `/` — filtrar la lista (ver [Filtro](#filtro-)).
+- `1`…`6` — ordenar por prompt / branch / tags / msgs / tamaño / última actividad.
+- `Shift+S` — invertir la dirección del orden.
 - `s` — abrir el modal de **Ajustes** para cambiar predeterminado/alternativo.
-- `Esc` / `←` — volver a la pantalla de proyectos.
+- `Esc` / `←` — limpiar el filtro, o volver a la pantalla de proyectos.
 - `r` — re-escanear las sesiones del proyecto.
-- `q` — salir.
+- `Ctrl+Q` — salir.
+
+### Worktrees (`g`)
+
+Varios worktrees de un mismo repo son cwds distintos y por tanto proyectos distintos en `~/.claude/projects/`. multi-claude los **agrupa por defecto** (`group_worktrees: true`): los proyectos que comparten `git_common_dir` colapsan en una única fila con el nº de sesiones y la última actividad agregados del grupo.
+
+- `g` alterna entre agrupados y expandidos, y la preferencia se persiste.
+- `Enter` sobre una fila de grupo abre la **pantalla de worktrees**, que lista los miembros individuales; desde ahí `Enter` entra a las sesiones de ese worktree concreto y `e` lo renombra.
+
+### Carpetas (`f`)
+
+Además de la agrupación automática por repo, puedes organizar los proyectos en carpetas jerárquicas creadas por ti (`Trabajo`, `Trabajo/Cliente A`…). Un proyecto pertenece como máximo a una carpeta.
+
+- `f` sobre un proyecto lo asigna a una carpeta (o lo saca de ella).
+- `Enter` sobre una carpeta abre la **pantalla de carpeta**, con sus subcarpetas y sus proyectos. Dentro: `n` crea una subcarpeta, `e` renombra, `f` quita un proyecto de la carpeta, `i` importa un `.zip`, `d` borra la carpeta.
+
+El árbol se guarda en `project-folders.json` (ver [Ficheros de estado](#ficheros-de-estado)).
+
+### Búsqueda global full-text (`?`)
+
+`?` desde la pantalla de proyectos abre una pantalla de búsqueda que consulta una tabla **FTS5 de SQLite** construida sobre la concatenación de los prompts del usuario y el texto del asistente de cada sesión. Escribes y los resultados se refrescan en un worker en background (hasta 200 filas), con columnas Sesión / Proyecto / Branch / Última.
+
+`Enter` sobre un resultado te lleva a la pantalla de sesiones del proyecto que lo contiene.
+
+El tokenizer es `unicode61 remove_diacritics 2`, así que `refactor` encuentra `refactorización` y los acentos son indiferentes. El índice es una **caché, no la fuente de verdad**: vive en `$XDG_DATA_HOME/multi-claude/index.sqlite3` (por defecto `~/.local/share/...`) y si se corrompe se reconstruye en el siguiente escaneo.
+
+### Preview (`p`)
+
+`p` en la pantalla de sesiones abre un panel lateral de solo lectura que renderiza los **últimos turnos** de la sesión bajo el cursor (hasta 12 turnos, leyendo las últimas 60 líneas del jsonl, con el texto recortado a 800 caracteres por mensaje). Sirve para reconocer una conversación sin reanudarla. La visibilidad se persiste en `preview_visible`.
+
+### Filtro (`/`)
+
+`/` abre un input de filtrado incremental sobre la tabla actual. La sintaxis admite restricciones `clave:valor` mezcladas con texto libre:
+
+| Clave     | Efecto                                                              |
+|-----------|---------------------------------------------------------------------|
+| `branch:` | subcadena sobre la branch                                           |
+| `path:`   | subcadena sobre el path del proyecto                                |
+| `id:`     | subcadena sobre el id de la sesión                                  |
+| `tag:`    | lista separada por comas; **todas** las etiquetas deben coincidir   |
+
+Todo lo que no sea `clave:valor` se trata como texto libre y se puntúa con `rapidfuzz.fuzz.partial_ratio` (umbral 70), así que tolera erratas. Ejemplo: `branch:main tag:bug,urgente refacto`.
+
+> Ojo: `/` filtra las filas que ya están en pantalla. Para buscar **dentro del contenido** de las conversaciones, usa `?`.
+
+### Etiquetas (`t`)
+
+Etiquetas planas y múltiples por sesión, para cortar la lista con `tag:`. Se normalizan a minúsculas, los espacios internos pasan a `-` y los caracteres reservados (`,` y `:`) se descartan para que nunca choquen con la sintaxis del filtro. Se guardan en `session-tags.json`.
+
+### Colores (`c` y `C`)
+
+Dos capas, y la manual gana:
+
+1. **Color manual** (`c`) — eliges de una paleta de 9 colores y queda fijado a esa sesión en `session-colors.json`.
+2. **Reglas** (`C`) — patrones evaluados en orden; gana la primera que casa. Se guardan en `config.json`.
+
+Condiciones soportadas en una regla (un `when` por regla):
+
+| Condición             | Significado                                                        |
+|-----------------------|--------------------------------------------------------------------|
+| `branch=main`         | branch exacta (case-insensitive)                                   |
+| `branch~=feature/*`   | glob sobre la branch                                               |
+| `prompt~=^/`          | regex sobre el prompt / nombre mostrado                            |
+| `active=true`         | la sesión está viva según `~/.claude/sessions`                     |
+| `age<1h`, `age<2d`    | la última actividad es más reciente que el umbral (`s`/`m`/`h`/`d`/`w`) |
 
 ## Cómo se lanza Claude
 
@@ -126,13 +232,37 @@ Persistido en:
 - **Linux/macOS**: `~/.config/multi-claude/config.json` (o `$XDG_CONFIG_HOME/multi-claude/config.json` si está definido).
 - **Windows**: `%APPDATA%\multi-claude\config.json` (típicamente `C:\Users\<user>\AppData\Roaming\multi-claude\config.json`).
 
+El fichero guarda, además del modo, el estado de la UI que se recuerda entre arranques:
+
 ```json
 {
-  "default_mode": "auto"
+  "default_mode": "auto",
+  "projects_sort": { "key": "last_activity", "descending": true },
+  "sessions_sort": { "key": "last_activity", "descending": true },
+  "preview_visible": true,
+  "group_worktrees": true,
+  "color_rules": []
 }
 ```
 
+Un `config.json` ausente, corrupto o con claves inválidas cae silenciosamente a estos valores por defecto — nunca es un error fatal.
+
 > Nota sobre `Shift+Enter`: la mayoría de los emuladores modernos lo transmiten distinto a `Enter`, pero algunos antiguos no — en ese caso `Shift+Enter` simplemente hará lo mismo que `Enter`. Si te ocurre, cambia el predeterminado en Ajustes para que ambas teclas hagan lo que quieres.
+
+## Ficheros de estado
+
+Todo lo que multi-claude guarda por su cuenta (nunca escribe dentro de los jsonl de Claude). Las rutas respetan `$XDG_CONFIG_HOME` / `$XDG_DATA_HOME` si están definidas, con `%APPDATA%` en Windows para la config:
+
+| Fichero                                          | Contenido                                            |
+|--------------------------------------------------|------------------------------------------------------|
+| `~/.config/multi-claude/config.json`             | preferencias (modo, orden, preview, agrupación, reglas de color) |
+| `~/.config/multi-claude/names.json`              | nombres de sesión persistentes (`e`)                 |
+| `~/.config/multi-claude/session-tags.json`       | etiquetas por sesión (`t`)                           |
+| `~/.config/multi-claude/session-colors.json`     | colores manuales por sesión (`c`)                    |
+| `~/.config/multi-claude/project-folders.json`    | árbol de carpetas y asignación de proyectos (`f`)    |
+| `~/.local/share/multi-claude/index.sqlite3`      | índice SQLite + tabla FTS5 (caché reconstruible)     |
+
+Borrar cualquiera de ellos es seguro: se pierde ese estado, no las sesiones.
 
 ## Identidad de un proyecto
 
@@ -142,14 +272,12 @@ El nombre de la carpeta `~/.claude/projects/<encoded>/` es la ruta original con 
 
 `os.path.isdir(cwd)` decide si el proyecto está vivo o huérfano.
 
-## Limitaciones conocidas (MVP)
+## Limitaciones conocidas
 
-- **Worktrees git**: cada worktree es un cwd distinto → un proyecto distinto en la TUI. No se agrupan bajo el repo raíz.
-- **Proyecto movido de path**: si renombras una carpeta, las sesiones viejas y nuevas aparecen como dos proyectos. No se reconcilian.
-- **Sin preview de mensajes**: la lista de sesiones muestra solo el primer prompt. Para leer la conversación tienes que reanudarla o abrir el jsonl a mano.
-- **Sin búsqueda full-text**: no hay grep sobre el contenido de las sesiones. Filtras visualmente.
-
-Todas son extensiones razonables para una v2.
+- **La búsqueda global solo ve lo indexado**: el índice FTS se puebla en `scan_sessions`, es decir al **entrar** a la pantalla de sesiones de un proyecto. Un proyecto que nunca has abierto en la TUI no aparece en los resultados de `?`. Si `?` te devuelve menos de lo esperado, entra una vez en los proyectos que te falten.
+- **Payload FTS acotado por sesión**: se indexan como máximo las primeras 2.000 líneas del jsonl y 64 KB de texto (`FTS_REINDEX_SCAN_LINES` / `FTS_CONTENT_MAX_CHARS` en `session.py`). En sesiones muy largas, el final de la conversación no es buscable.
+- **Proyecto movido de path**: si renombras la carpeta de un proyecto, las sesiones viejas y nuevas siguen siendo dos entradas distintas en `~/.claude/projects/`. No se reconcilian solas — la vieja queda como huérfana y la unes a mano con `m` (merge).
+- **Ordenar por tags no se persiste**: `3` ordena la tabla de sesiones por etiquetas en la sesión actual de la TUI, pero `tags` no está en `VALID_SESSION_SORT` (`config.py`), así que al reabrir vuelve al orden por última actividad.
 
 ## Instalación
 
@@ -263,7 +391,7 @@ python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
 multi-claude        # arranca la TUI
-pytest              # corre la suite (74 tests)
+pytest              # corre la suite (282 tests)
 ```
 
 ## Estructura del código
@@ -271,12 +399,33 @@ pytest              # corre la suite (74 tests)
 ```
 src/multi_claude/
   __main__.py        # entrypoint: arranca ClaudeBrowserApp
-  app.py             # ClaudeBrowserApp(textual.App) — registra screens
-  discovery.py       # scan_projects() → list[Project]
-  session.py         # scan_sessions(project) → list[Session], parsers
+  app.py             # ClaudeBrowserApp(textual.App) — registra screens y stores
+  app_protocol.py    # Protocol que las screens usan para hablar con la app
+  discovery.py       # scan_projects() → list[Project], WorktreeGroup, ProjectFolder
+  session.py         # scan_sessions(project) → list[Session], parsers, payload FTS
+  index.py           # SessionIndex — SQLite + tabla FTS5 (caché reconstruible)
   launcher.py        # launch_claude(cwd, session_id) con detección de multiplexer
+  focus.py           # traer al frente la terminal de una sesión ya viva
+  deletion.py        # borrado de sesiones/proyectos y sus artefactos en disco
+  transfer.py        # export/import de sesiones en .zip
+  filtering.py       # parseo de las queries de `/` + matching fuzzy
+  config.py          # Config persistida en config.json
+  names.py           # NamesStore — nombres de sesión
+  project_names.py   # alias de proyectos
+  project_folders.py # árbol de carpetas de usuario
+  tags.py            # TagsStore — etiquetas por sesión
+  colors.py          # colores manuales + ColorRule
+  formatting.py      # formateo de tiempos/tamaños para las tablas
+  path_complete.py   # autocompletado de paths en los modales
+  clipboard.py       # copiar al portapapeles (`y`)
+  modals.py          # modales: ajustes, rename, tags, colores, import/export…
   screens/
     projects.py      # ProjectsScreen — DataTable, bindings
-    sessions.py      # SessionsScreen — DataTable, bindings
+    sessions.py      # SessionsScreen — DataTable, bindings, preview
+    worktrees.py     # WorktreesScreen — miembros de un grupo de worktrees
+    folder.py        # FolderScreen — subcarpetas + proyectos de una carpeta
+    search.py        # SearchScreen — búsqueda FTS5 global
+  widgets/
+    preview.py       # SessionPreview — últimos turnos del jsonl
   styles.tcss        # estilos Textual
 ```
