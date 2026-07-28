@@ -205,8 +205,10 @@ async def test_filter_in_sessions_screen(synthetic_world: Path) -> None:
         filter_input.value = "another"
         await pilot.pause()
         # Only ses-beta-2 has "another" in its prompt
-        assert len(app.screen._visible_indices) == 1
-        assert app.screen._sessions[app.screen._visible_indices[0]].id == "ses-beta-2"
+        assert len(app.screen._rows) == 1
+        is_remote, index = app.screen._rows[0]
+        assert not is_remote
+        assert app.screen._sessions[index].id == "ses-beta-2"
 
 
 async def test_rename_session_via_modal(synthetic_world: Path, tmp_path: Path) -> None:

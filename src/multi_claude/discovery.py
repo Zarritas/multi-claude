@@ -330,3 +330,53 @@ def group_into_folders(
 
     out.sort(key=lambda pair: pair[0])
     return [row for _, row in out]
+
+
+def resolve_git_remote(path: Path) -> str | None:
+    """Return the URL of ``origin`` for the repo at ``path``, or None.
+
+    Published sessions record this so a colleague can tell whether the conversation
+    was recorded against the same repository they have checked out. The path itself
+    is useless for that: it differs on every machine.
+    """
+    return _git_line(path, ["remote", "get-url", "origin"])
+
+
+def resolve_git_head(path: Path) -> str | None:
+    """Return the short HEAD sha for the repo at ``path``, or None.
+
+    The transcript travels but the code does not, so this is what lets hydration warn
+    that the local checkout has moved on since the session was recorded.
+    """
+    return _git_line(path, ["rev-parse", "--short", "HEAD"])
+
+
+def resolve_git_user_email(path: Path) -> str | None:
+    """Return the git ``user.email`` in effect at ``path``, or None.
+
+    Used to stamp who published a session. git config is the closest thing to an
+    identity multi-claude already has access to, and it is the same name the audit
+    trail of the backing repo would show anyway.
+    """
+    return _git_line(path, ["config", "user.email"])
+
+
+def _git_line(path: Path, args: list[str]) -> str | None:
+    """Run a git command in ``path`` and return its single line of stdout, or None.
+
+    Missing git, a timeout, a non-zero exit or empty output all collapse to None: this
+    is metadata for a warning, never something worth failing a publish over.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(path), *args],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=2,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None

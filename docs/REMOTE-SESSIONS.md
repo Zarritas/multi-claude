@@ -38,12 +38,12 @@ compañero y la carpeta de proyecto local.
 | Modelo | Local-first; el remoto es un almacén, nunca el directorio de trabajo |
 | uuid | Se preserva tal cual (uuid v4, no colisionan entre empleados) |
 | `cwd` embebido | No se reescribe: es histórico y Claude lo ignora (validado, ver Fase 0) |
-| Backend v1 | Repo privado de GitLab vía API REST, sin clonar |
+| Backend v1 | Directorio compartido (`DirectoryRemote`). GitLab vía API REST: pendiente |
 | Credenciales | Variable de entorno o fichero `600`; **nunca** en `config.json` |
-| Compresión | gzip de la stdlib (los jsonl comprimen ~8:1) |
+| Compresión | gzip de la stdlib (medido ~3,7:1 sobre una sesión real de 4,6 MB) |
 | Manifests | Uno por sesión, nunca un manifest global (evita conflictos de escritura) |
 | Concurrencia | Fork explícito, no merge (ver "Concurrencia") |
-| Cifrado | Ninguno en v1: el control de acceso lo da el repo privado |
+| Cifrado | Ninguno en v1: el control de acceso lo dan los permisos del directorio (y, cuando exista, el repo privado) |
 
 ### Excepción a "ninguna escritura en disco de Claude"
 
@@ -111,10 +111,11 @@ Un módulo nuevo:
 
 ```
 src/multi_claude/remote.py
-    RemoteStore(Protocol)   list_manifests() / get_session() / put_session()
-    GitLabRemote            driver de producción (API REST)
-    DirectoryRemote         driver de carpeta
+    RemoteStore(Protocol)   list_sessions() / fetch() / publish()
+    DirectoryRemote         driver de carpeta (implementado)
+    GitLabRemote            driver de API REST (pendiente)
     RemoteSession           dataclass de metadatos
+    store_from_settings()   factoría; $MULTI_CLAUDE_REMOTE_DIR gana sobre el config
 ```
 
 `DirectoryRemote` no es solo un doble de test: da un segundo backend real (carpeta compartida,
@@ -139,15 +140,10 @@ manifests leídos se cachean en el índice local.
 
 ### Cambios en módulos existentes
 
-**`index.py`** — tres columnas vía `_ensure_columns()`, que ya es una migración idempotente:
-
-```
-origin          TEXT   -- 'local' | 'remote'
-remote_author   TEXT
-remote_updated  REAL
-```
-
-Así las sesiones remotas entran en el FTS y en el filtro sin tocar el resto.
+**`index.py`** — sin cambios. La idea original era cachear el listado remoto en tres columnas
+(`origin`, `remote_author`, `remote_updated`) vía `_ensure_columns()`. No se hizo: ver
+"Desviaciones del plan". Consecuencia asumida: las sesiones compartidas **no** entran en el
+FTS global (`?`) hasta que se hidratan.
 
 **`screens/sessions.py`** — dos bindings nuevos (`u` y `R` están libres):
 
@@ -159,13 +155,19 @@ Así las sesiones remotas entran en el FTS y en el filtro sin tocar el resto.
 **`screens/sessions.py`, acción `Enter`** — si la fila es remota: hidratar en `project_dir` y luego
 `launch_claude(cwd, session_id=...)`, cuya firma ya sirve sin cambios.
 
-**`config.py`** — `remote_url`, `remote_project_id`, `remote_enabled`, editables desde `s`. El token
-**no** va aquí.
+**`config.py`** — `remote_kind` (`none` | `directory`) y `remote_path`. `none` por defecto: hay
+que activarlo a mano. `$MULTI_CLAUDE_REMOTE_DIR` gana sobre el fichero, para poder probar sin
+tocar estado compartido. Aún no son editables desde el modal de ajustes (`s`). Cuando exista
+backend de API, su token **no** irá aquí.
+
+**`app.py` / `app_protocol.py`** — el store vive en `app.remote` (`RemoteStore | None`) y se
+reconstruye en `update_prefs`, así que cambiar de remoto no exige reiniciar.
 
 ## Flujos
 
-**Publicar** (`u`): reunir artefactos → gzip → un commit con todo + manifest → marcar en el índice.
-Antes de confirmar se muestra el listado de ficheros que se van a subir (ver "Riesgos").
+**Publicar** (`u`): reunir artefactos → gzip → subir los blobs → escribir el manifest al final.
+Antes de confirmar se muestra el listado de ficheros que se van a subir (ver "Riesgos"). Corre en
+un worker, así que la TUI no se congela con una sesión de varios MB.
 
 **Descubrir** (`R`): lista los manifests remotos que no están en local, mezclados en la tabla y
 marcados con su autor. El flujo "un compañero me pega un uuid por Slack" ya funciona sin código
@@ -177,8 +179,10 @@ lanzar → `launch_claude`.
 
 ## Concurrencia
 
-En v1 **no hay merge**. Si dos empleados continúan la misma sesión, la segunda publicación crea una
-variante con uuid nuevo y `forked_from: <uuid-original>`, visible en el listado como bifurcación.
+En v1 **no hay merge**. El plan es que si dos empleados continúan la misma sesión, la segunda
+publicación cree una variante con uuid nuevo y `forked_from: <uuid-original>`, visible en el
+listado como bifurcación. **Todavía no está implementado**: hoy la segunda publicación sobrescribe
+(ver "Desviaciones del plan"). El campo `forked_from` ya viaja en el manifest.
 
 Esto es viable porque Claude Code ya soporta `--resume <id> --fork-session` de forma nativa
 (DESIGN.md lo listaba como pendiente): el fork no hay que fabricarlo reescribiendo `sessionId`,
@@ -199,15 +203,57 @@ es v1.1. Es una limitación inherente que se documenta, no se esconde.
 
 ## Fases
 
-| Fase | Qué | Estimación |
-|------|-----|------------|
-| 0 | ~~Spike bloqueante: `--resume` de un jsonl ajeno con `cwd` inexistente~~ **validado** | hecho |
-| 1 | `remote.py` + `DirectoryRemote` + tests | 1 día |
-| 2 | `GitLabRemote` + config + credenciales | 1 día |
-| 3 | Publicar (`u`) sobre selección múltiple | ½ día |
-| 4 | Listado remoto (`R`) + columnas de índice | 1 día |
-| 5 | Hidratar + `Enter` + aviso de divergencia | 1 día |
-| 6 | Fork en re-publicación (`--fork-session`) | ½ día |
+| Fase | Qué | Estado |
+|------|-----|--------|
+| 0 | Spike bloqueante: `--resume` de un jsonl ajeno con `cwd` inexistente | **validado** |
+| 1 | `remote.py` + `DirectoryRemote` + tests | **hecho** |
+| 2 | `GitLabRemote` + credenciales | pendiente |
+| 3 | Publicar (`u`) sobre selección múltiple | **hecho** |
+| 4 | Listado remoto (`R`) | **hecho** (sin columnas de índice, ver abajo) |
+| 5 | Hidratar + `Enter` + aviso de divergencia | **hecho** |
+| 6 | Fork en re-publicación (`--fork-session`) | pendiente |
+
+### Desviaciones del plan, y por qué
+
+**El orden se invirtió: la UI antes que `GitLabRemote`.** Con `DirectoryRemote` el MVP se
+puede probar apuntando a una carpeta, sin token ni repo ni servidor. Empezar por GitLab
+habría dejado la feature inservible hasta tener infraestructura.
+
+**Sin columnas en el índice SQLite.** La Fase 4 preveía `origin`/`remote_author`/
+`remote_updated` para cachear el listado remoto. No se han añadido: la lista se pide al
+store cada vez que se pulsa `R` y vive en memoria. Con manifests de unos cientos de bytes
+sobre un directorio, cachear era optimizar algo que no dolía, a cambio de una migración de
+esquema y un estado más que invalidar. Cuando el backend sea una API con latencia, esa
+caché vuelve a tener sentido.
+
+**Republicar sobrescribe, no bifurca.** La Fase 6 sigue pendiente, así que hoy
+`publish` sobre un uuid ya presente pisa los blobs y el manifest. En el caso lineal (uno
+hidrata, continúa y republica) no se pierde nada, porque su jsonl contiene la historia del
+otro más su continuación. Pero si dos personas continúan la misma sesión en paralelo, la
+segunda publicación pisa a la primera en el remoto. Es el riesgo conocido del MVP y está
+declarado como limitación en el README.
+
+## Cómo probarlo
+
+```bash
+mkdir -p /tmp/remoto-sesiones
+MULTI_CLAUDE_REMOTE_DIR=/tmp/remoto-sesiones uv run multi-claude
+```
+
+1. Entra en un proyecto, sitúate en una sesión y pulsa `u`. Confirma con `y` en el modal,
+   que lista los ficheros exactos que se van a subir.
+2. Pulsa `R`: no verás nada nuevo, porque una sesión que ya tienes en local no se ofrece
+   duplicada como compartida.
+3. Para simular a un compañero, publica desde otra máquina (o copia un `<uuid>.jsonl` a
+   otro directorio de proyecto y publícalo desde ahí). Al pulsar `R` aparecerá al final de
+   la lista con `☁` y su autor, y `Enter` la trae y la reanuda.
+
+El remoto queda inspeccionable a mano, que es parte de la gracia de este backend:
+
+```bash
+find /tmp/remoto-sesiones -type f | head
+python3 -c "import json;print(json.load(open('/tmp/remoto-sesiones/manifest/<uuid>.json')))"
+```
 
 ~6 días. El trabajo pesado ya existe: `transfer.py` resuelve el empaquetado y la extracción blindada
 contra path traversal, `launcher.py` lanza, `index.py` indexa, `filtering.py` filtra.
@@ -259,7 +305,7 @@ En `tests/test_remote.py`, con `tests/test_transfer.py` como modelo:
 | La Fase 0 falla | Reescribir `cwd`/`sessionId` al hidratar; sube la Fase 5, no rompe el diseño |
 | **Secretos en `tool-results/`** | Un `Bash` que imprimió un `.env` acaba en un `.txt` que se publica sin mirar. Mínimo imprescindible: confirmación con el listado de ficheros antes de subir. Escáner de patrones en v1.1 — no lanzar al equipo sin al menos el aviso |
 | Divergencia de código | Aviso al hidratar (ver arriba) |
-| Payload grande en la API | gzip; una sesión de 6 MB baja a ~700 KB |
+| Payload grande en la API | gzip; medido, una sesión de 4,6 MB sube como 1,26 MB |
 | El remoto como única copia | Si sustituye al histórico local (que Claude purga a los 30 días según `cleanupPeriodDays`), pasa a ser infra crítica y necesita backup |
 
 ## Fuera de alcance en v1

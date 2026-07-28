@@ -221,3 +221,30 @@ def test_save_then_load_round_trip_with_claude_args(tmp_path: Path) -> None:
     cfg = Config(default_mode="tab", claude_args=["--dangerously-skip-permissions"])
     save_config(cfg, p)
     assert load_config(p) == cfg
+
+
+def test_remote_settings_round_trip(tmp_path: Path) -> None:
+    path = tmp_path / "config.json"
+    save_config(Config(remote_kind="directory", remote_path="/srv/sesiones"), path)
+    loaded = load_config(path)
+    assert loaded.remote_kind == "directory"
+    assert loaded.remote_path == "/srv/sesiones"
+
+
+def test_remote_sharing_is_off_by_default() -> None:
+    assert Config().remote_kind == "none"
+    assert Config().remote_path == ""
+
+
+@pytest.mark.parametrize("bad", ["gitlab", "", None, 3, {"a": 1}])
+def test_unknown_remote_kind_falls_back_to_off(tmp_path: Path, bad: object) -> None:
+    """An unrecognised backend must disable sharing, never guess one."""
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({"remote_kind": bad}), encoding="utf-8")
+    assert load_config(path).remote_kind == "none"
+
+
+def test_non_string_remote_path_is_ignored(tmp_path: Path) -> None:
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({"remote_kind": "directory", "remote_path": 42}), encoding="utf-8")
+    assert load_config(path).remote_path == ""

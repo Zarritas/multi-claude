@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from multi_claude.names import NamesStore
     from multi_claude.project_folders import ProjectFoldersStore
     from multi_claude.project_names import ProjectNamesStore
+    from multi_claude.remote import RemoteStore
     from multi_claude.tags import TagsStore
 
 
@@ -24,5 +25,6 @@ class AppProtocol(Protocol):
     session_colors: SessionColorsStore
     project_folders: ProjectFoldersStore
     tags: TagsStore
+    remote: RemoteStore | None
 
     def update_prefs(self, prefs: Config) -> None: ...

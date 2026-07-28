@@ -7,6 +7,7 @@ Stored settings:
 - ``projects_sort`` / ``sessions_sort`` — column + direction for each screen.
 - ``preview_visible`` — whether the session preview panel is shown.
 - ``group_worktrees`` — whether to collapse multiple worktrees of the same repo.
+- ``remote_kind`` / ``remote_path`` — where shared sessions are published, if anywhere.
 """
 
 from __future__ import annotations
@@ -44,6 +45,12 @@ RESERVED_CLAUDE_FLAGS: frozenset[str] = frozenset(
         "--from-pr",
     }
 )
+
+# Where shared sessions live. ``none`` disables the feature entirely; ``directory`` points
+# at a path (a shared mount, a synced folder). Kept as a string rather than a bool so a
+# future API-backed backend is a new value, not a schema change.
+RemoteKind = Literal["none", "directory"]
+VALID_REMOTE_KINDS: tuple[RemoteKind, ...] = ("none", "directory")
 
 ProjectSortKey = Literal["name", "path", "session_count", "last_activity"]
 VALID_PROJECT_SORT: tuple[ProjectSortKey, ...] = (
@@ -85,6 +92,8 @@ class Config:
     preview_visible: bool = True
     group_worktrees: bool = True
     color_rules: list[ColorRule] = field(default_factory=list)
+    remote_kind: RemoteKind = "none"
+    remote_path: str = ""
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -95,6 +104,8 @@ class Config:
             "preview_visible": self.preview_visible,
             "group_worktrees": self.group_worktrees,
             "color_rules": [r.to_dict() for r in self.color_rules],
+            "remote_kind": self.remote_kind,
+            "remote_path": self.remote_path,
         }
 
 
@@ -150,6 +161,8 @@ def load_config(path: Path | None = None) -> Config:
         preview_visible=bool(raw.get("preview_visible", True)),
         group_worktrees=bool(raw.get("group_worktrees", True)),
         color_rules=_coerce_color_rules(raw.get("color_rules")),
+        remote_kind=_coerce_remote_kind(raw.get("remote_kind")),
+        remote_path=_coerce_remote_path(raw.get("remote_path")),
     )
 
 
@@ -199,6 +212,17 @@ def _coerce_claude_args(value: object) -> list[str]:
         return []
     args = [item for item in value if isinstance(item, str)]
     return [a for a in args if a.split("=", 1)[0] not in RESERVED_CLAUDE_FLAGS]
+
+
+def _coerce_remote_kind(value: object) -> RemoteKind:
+    for kind in VALID_REMOTE_KINDS:
+        if value == kind:
+            return kind
+    return "none"
+
+
+def _coerce_remote_path(value: object) -> str:
+    return value if isinstance(value, str) else ""
 
 
 def _coerce_color_rules(value: object) -> list[ColorRule]:

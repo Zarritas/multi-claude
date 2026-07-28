@@ -18,6 +18,7 @@ Claude Code guarda cada sesión como un `.jsonl` bajo `~/.claude/projects/<encod
 - **Etiquetas** (`t`) y **colores** por sesión (`c`), con reglas automáticas por branch, antigüedad o actividad (`C`).
 - **Nombres persistentes** (`e`) para sesiones y proyectos, incluido el `/rename` de Claude como fallback.
 - **Mover, exportar e importar** sesiones entre worktrees o hacia un `.zip` compartible (`m`, `x`, `i`).
+- **Sesiones compartidas** (`u`, `R`): publica una sesión en un remoto común y reanuda la de un compañero con `Enter`, sin exportar ni importar nada.
 - **Sin duplicados**: si una sesión ya está abierta en otra terminal, la trae al frente en vez de abrir una segunda.
 - **Borrado y limpieza** (`d`, `D`) que arrastran todos los artefactos en disco, no solo el jsonl.
 
@@ -96,6 +97,8 @@ Atajos:
 - `y` — copiar el **id** de la sesión al portapapeles.
 - `m` — **mover** la(s) sesión(es) seleccionada(s) a otro worktree del mismo repo (el checkout principal o un worktree hermano). Si no hay nada marcado, mueve la fila actual.
 - `x` — **exportar** la(s) sesión(es) seleccionada(s) a un único `.zip` compartible (para enviárselo a un compañero). Si no hay nada marcado, exporta la fila actual.
+- `u` — **publicar** la(s) sesión(es) en el remoto compartido, sin zip de por medio (ver [Sesiones compartidas](#sesiones-compartidas-u-y-r)). Pide confirmación mostrando qué ficheros se suben.
+- `R` — mostrar/ocultar las **sesiones compartidas** por otras personas; `Enter` sobre una de ellas la trae y la reanuda.
 - `d` — borrar la(s) sesión(es) seleccionada(s) y todos sus artefactos en disco.
 - `D` — **limpieza** por antigüedad: eliges un umbral y borra de golpe las sesiones más viejas (las sesiones vivas quedan protegidas).
 - `/` — filtrar la lista (ver [Filtro](#filtro-)).
@@ -169,6 +172,42 @@ Condiciones soportadas en una regla (un `when` por regla):
 | `prompt~=^/`          | regex sobre el prompt / nombre mostrado                            |
 | `active=true`         | la sesión está viva según `~/.claude/sessions`                     |
 | `age<1h`, `age<2d`    | la última actividad es más reciente que el umbral (`s`/`m`/`h`/`d`/`w`) |
+
+### Sesiones compartidas (`u` y `R`)
+
+Publicar una sesión en un sitio común y que un compañero la reanude con `Enter`, sin el
+viaje de ida y vuelta de `x` (exportar) → enviar el zip → `i` (importar).
+
+**Configuración.** Está desactivado por defecto. Para activarlo, en `config.json`:
+
+```json
+{ "remote_kind": "directory", "remote_path": "/ruta/al/remoto" }
+```
+
+O, para probarlo sin editar nada, `MULTI_CLAUDE_REMOTE_DIR=/ruta/al/remoto` — la variable
+de entorno gana sobre el fichero.
+
+**Qué hace cada tecla:**
+
+- `u` — publica la fila actual (o todas las marcadas). Antes de subir muestra **la lista
+  de ficheros exactos** que salen de la máquina: el transcript incluye los
+  `tool-results/`, así que una sesión que en su día imprimió un `.env` lo publicaría.
+- `R` — muestra las sesiones publicadas que **no** tienes en local, al final de la lista y
+  marcadas con `☁` y el autor. Las tuyas ya publicadas no reaparecen duplicadas.
+- `Enter` sobre una compartida — la descarga en el directorio de este proyecto
+  preservando su uuid y la reanuda. Si se grabó sobre otro commit, avisa antes de lanzar.
+
+Sobre una fila compartida las acciones locales (renombrar, etiquetar, borrar, mover) están
+ocultas: todavía no hay jsonl que tocar.
+
+**Qué viaja y qué no.** Sube el `<uuid>.jsonl`, los `subagents/` (en una sesión con fan-out
+son la mayor parte del trabajo) y los `tool-results/`. **No** sube el `memory/` del
+proyecto — esa es tu auto-memoria personal — ni nada llamado `session-env`.
+
+El código no viaja: tu compañero necesita el repo. El aviso de commit divergente es lo que
+lo hace visible en vez de sorprendente.
+
+Diseño completo y fases pendientes en [docs/REMOTE-SESSIONS.md](docs/REMOTE-SESSIONS.md).
 
 ## Cómo se lanza Claude
 
@@ -307,6 +346,8 @@ El nombre de la carpeta `~/.claude/projects/<encoded>/` es la ruta original con 
 - **No todos los emuladores saben abrir pestañas desde la CLI**: Ghostty (su CLI no expone `+new-tab`), Alacritty, foot y Terminal.app solo pueden abrir ventanas, así que en modo `tab` la sesión acaba en una ventana nueva y la TUI te lo dice. En kitty y WezTerm la pestaña exige tener el control remoto activado (`allow_remote_control` en `kitty.conf`); si está apagado, mismo fallback.
 - **zellij no puede lanzar un comando en una pestaña nueva**: `zellij action new-tab` solo acepta un layout, no un comando, así que el modo `tab` dentro de zellij abre un panel.
 - **Ordenar por tags no se persiste**: `3` ordena la tabla de sesiones por etiquetas en la sesión actual de la TUI, pero `tags` no está en `VALID_SESSION_SORT` (`config.py`), así que al reabrir vuelve al orden por última actividad.
+- **Republicar una sesión compartida sobrescribe la versión del remoto**: si dos personas reanudan la misma sesión compartida y ambas publican, la segunda publicación pisa la primera en el remoto (cada una conserva la suya en local). El fork explícito que lo resuelve está planificado, no implementado — ver [docs/REMOTE-SESSIONS.md](docs/REMOTE-SESSIONS.md).
+- **El único backend compartido es un directorio**: sirve un montaje de red o una carpeta sincronizada, pero no hay driver de GitLab todavía, así que los permisos son los del sistema de ficheros.
 
 ## Instalación
 

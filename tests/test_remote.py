@@ -10,6 +10,7 @@ import pytest
 
 from multi_claude.remote import (
     FORMAT,
+    REMOTE_DIR_ENV,
     VERSION,
     DirectoryRemote,
     RemoteError,
@@ -17,6 +18,7 @@ from multi_claude.remote import (
     collect_session_files,
     local_path_for,
     session_to_remote,
+    store_from_settings,
 )
 from multi_claude.session import Session
 from tests.conftest import write_session
@@ -273,3 +275,39 @@ def test_manifest_on_disk_declares_format_and_version(tmp_path: Path) -> None:
     assert raw["format"] == FORMAT
     assert raw["version"] == VERSION
     assert raw["id"] == "sid-1"
+
+
+# --- picking a backend from settings ------------------------------------------------
+
+
+def test_no_remote_configured_means_sharing_is_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(REMOTE_DIR_ENV, raising=False)
+    assert store_from_settings("none", "") is None
+    assert store_from_settings("directory", "") is None
+
+
+def test_a_configured_directory_becomes_a_store(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(REMOTE_DIR_ENV, raising=False)
+    store = store_from_settings("directory", "/srv/sesiones")
+    assert isinstance(store, DirectoryRemote)
+    assert store.root == Path("/srv/sesiones")
+
+
+def test_the_env_var_overrides_the_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """So trying a remote is a one-liner, and a test never writes shared state."""
+    monkeypatch.setenv(REMOTE_DIR_ENV, "/tmp/otro-remoto")
+    store = store_from_settings("directory", "/srv/sesiones")
+    assert isinstance(store, DirectoryRemote)
+    assert store.root == Path("/tmp/otro-remoto")
+
+
+def test_the_env_var_works_even_with_sharing_off_in_the_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(REMOTE_DIR_ENV, "/tmp/otro-remoto")
+    assert isinstance(store_from_settings("none", ""), DirectoryRemote)
+
+
+def test_a_store_names_its_destination(tmp_path: Path) -> None:
+    """The publish confirmation shows this, so it has to be the path, not a repr."""
+    assert str(DirectoryRemote(tmp_path / "remoto")) == str(tmp_path / "remoto")

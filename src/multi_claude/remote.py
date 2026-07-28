@@ -45,7 +45,8 @@ _MANIFEST_ROOT = "manifest"
 _BLOB_ROOT = "blobs"
 _MAIN_BLOB = "session.jsonl.gz"
 
-# Compressed on the way up: JSON-per-line and tool output are repetitive text (~8:1).
+# Compressed on the way up: JSON-per-line and tool output are repetitive text. Measured
+# ~3.7:1 on a real 4.6 MB session, so a big one lands near 1 MB.
 # ``.meta.json`` siblings are a few hundred bytes, so they travel as-is.
 _COMPRESS_SUFFIXES = (".jsonl", ".txt")
 
@@ -279,6 +280,10 @@ class DirectoryRemote:
     def __init__(self, root: Path) -> None:
         self.root = root
 
+    def __str__(self) -> str:
+        """Shown to the user when confirming a publish, so it must name the destination."""
+        return str(self.root)
+
     def list_sessions(self) -> tuple[RemoteSession, ...]:
         manifest_dir = self.root / _MANIFEST_ROOT
         if not manifest_dir.is_dir():
@@ -350,6 +355,24 @@ class DirectoryRemote:
             manifest,
             json.dumps(session.to_manifest(), indent=2, ensure_ascii=False).encode("utf-8"),
         )
+
+
+REMOTE_DIR_ENV = "MULTI_CLAUDE_REMOTE_DIR"
+
+
+def store_from_settings(kind: str, path: str) -> RemoteStore | None:
+    """Build the configured store, or None when session sharing is off.
+
+    ``$MULTI_CLAUDE_REMOTE_DIR`` wins over the config file. That makes trying a remote a
+    one-liner, and lets a second checkout or a test point somewhere else without editing
+    state shared with the running app.
+    """
+    env = os.environ.get(REMOTE_DIR_ENV)
+    if env:
+        return DirectoryRemote(Path(env).expanduser())
+    if kind == "directory" and path:
+        return DirectoryRemote(Path(path).expanduser())
+    return None
 
 
 def _atomic_write(target: Path, payload: bytes) -> None:
