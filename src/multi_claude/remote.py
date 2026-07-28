@@ -41,9 +41,9 @@ from multi_claude.session import Session
 FORMAT = "multi-claude/remote-session"
 VERSION = 1
 
-_MANIFEST_ROOT = "manifest"
-_BLOB_ROOT = "blobs"
-_MAIN_BLOB = "session.jsonl.gz"
+MANIFEST_ROOT = "manifest"
+BLOB_ROOT = "blobs"
+MAIN_BLOB = "session.jsonl.gz"
 
 # Compressed on the way up: JSON-per-line and tool output are repetitive text. Measured
 # ~3.7:1 on a real 4.6 MB session, so a big one lands near 1 MB.
@@ -196,7 +196,7 @@ def collect_session_files(project_dir: Path, session_id: str) -> list[Path]:
 def blob_name_for(project_dir: Path, session_id: str, path: Path) -> str:
     """Map a local session file to its blob name, relative to ``blobs/<id>/``."""
     if path == project_dir / f"{session_id}.jsonl":
-        return _MAIN_BLOB
+        return MAIN_BLOB
     rel = path.relative_to(project_dir / session_id).as_posix()
     return f"{rel}.gz" if path.suffix in _COMPRESS_SUFFIXES else rel
 
@@ -206,7 +206,7 @@ def local_path_for(dest_dir: Path, session_id: str, blob_name: str) -> Path:
 
     Rejects blob names that would escape the session's own tree.
     """
-    if blob_name == _MAIN_BLOB:
+    if blob_name == MAIN_BLOB:
         return dest_dir / f"{session_id}.jsonl"
     rel = blob_name[:-3] if blob_name.endswith(".gz") else blob_name
     root = (dest_dir / session_id).resolve()
@@ -216,7 +216,7 @@ def local_path_for(dest_dir: Path, session_id: str, blob_name: str) -> Path:
     return target
 
 
-def _is_compressed(blob_name: str) -> bool:
+def is_compressed_blob(blob_name: str) -> bool:
     return blob_name.endswith(".gz")
 
 
@@ -285,7 +285,7 @@ class DirectoryRemote:
         return str(self.root)
 
     def list_sessions(self) -> tuple[RemoteSession, ...]:
-        manifest_dir = self.root / _MANIFEST_ROOT
+        manifest_dir = self.root / MANIFEST_ROOT
         if not manifest_dir.is_dir():
             return ()
         sessions: list[RemoteSession] = []
@@ -302,7 +302,7 @@ class DirectoryRemote:
 
     def get_session(self, session_id: str) -> RemoteSession | None:
         """Read a single manifest, or None if it is absent or unusable."""
-        path = self.root / _MANIFEST_ROOT / f"{safe_session_id(session_id)}.json"
+        path = self.root / MANIFEST_ROOT / f"{safe_session_id(session_id)}.json"
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
@@ -314,10 +314,10 @@ class DirectoryRemote:
 
     def fetch(self, session_id: str, dest_dir: Path) -> FetchResult:
         safe_session_id(session_id)
-        blob_dir = self.root / _BLOB_ROOT / session_id
+        blob_dir = self.root / BLOB_ROOT / session_id
         if not blob_dir.is_dir():
             raise RemoteError(f"la sesión {session_id} no está en el remoto")
-        main = blob_dir / _MAIN_BLOB
+        main = blob_dir / MAIN_BLOB
         if not main.is_file():
             raise RemoteError(f"la sesión {session_id} no tiene transcript en el remoto")
         if (dest_dir / f"{session_id}.jsonl").exists():
@@ -331,7 +331,7 @@ class DirectoryRemote:
             target = local_path_for(dest_dir, session_id, name)
             target.parent.mkdir(parents=True, exist_ok=True)
             payload = blob.read_bytes()
-            target.write_bytes(gzip.decompress(payload) if _is_compressed(name) else payload)
+            target.write_bytes(gzip.decompress(payload) if is_compressed_blob(name) else payload)
             written.append(target)
         return FetchResult(session_id=session_id, written=tuple(written))
 
@@ -340,16 +340,16 @@ class DirectoryRemote:
         if not files:
             raise RemoteError(f"la sesión {session.session_id} no tiene transcript en disco")
 
-        blob_dir = self.root / _BLOB_ROOT / session.session_id
+        blob_dir = self.root / BLOB_ROOT / session.session_id
         for path in files:
             name = blob_name_for(project_dir, session.session_id, path)
             target = blob_dir / name
             target.parent.mkdir(parents=True, exist_ok=True)
             payload = path.read_bytes()
-            _atomic_write(target, gzip.compress(payload) if _is_compressed(name) else payload)
+            _atomic_write(target, gzip.compress(payload) if is_compressed_blob(name) else payload)
 
         # Last, so a half-finished upload is invisible rather than broken.
-        manifest = self.root / _MANIFEST_ROOT / f"{session.session_id}.json"
+        manifest = self.root / MANIFEST_ROOT / f"{session.session_id}.json"
         manifest.parent.mkdir(parents=True, exist_ok=True)
         _atomic_write(
             manifest,
@@ -358,20 +358,93 @@ class DirectoryRemote:
 
 
 REMOTE_DIR_ENV = "MULTI_CLAUDE_REMOTE_DIR"
+REMOTE_TOKEN_ENV = "MULTI_CLAUDE_REMOTE_TOKEN"
 
 
-def store_from_settings(kind: str, path: str) -> RemoteStore | None:
+def token_path() -> Path:
+    """Where the API token lives: next to the config, but in its own file."""
+    base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+    return Path(base) / "multi-claude" / "remote-token"
+
+
+class TokenStore:
+    """The API token for a hosted remote, kept out of ``config.json`` on purpose.
+
+    ``config.json`` gets pasted into issues and shared between machines, so a credential
+    in it leaks by accident. This is a separate file created ``0600``, and
+    ``$MULTI_CLAUDE_REMOTE_TOKEN`` overrides it so CI or a one-off run never has to write
+    a secret to disk at all.
+    """
+
+    def __init__(self, path: Path | None = None) -> None:
+        self.path = path or token_path()
+
+    def get(self) -> str | None:
+        env = os.environ.get(REMOTE_TOKEN_ENV)
+        if env:
+            return env
+        try:
+            token = self.path.read_text(encoding="utf-8").strip()
+        except (FileNotFoundError, OSError):
+            return None
+        return token or None
+
+    def has_token(self) -> bool:
+        """Whether a token is available, without handing the value out.
+
+        The settings screen needs to say "saved" without rendering the secret.
+        """
+        return self.get() is not None
+
+    def set(self, token: str) -> None:
+        """Write the token with owner-only permissions, atomically."""
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_str = tempfile.mkstemp(prefix=".token.", dir=str(self.path.parent))
+        tmp = Path(tmp_str)
+        try:
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(token.strip() + "\n")
+            os.replace(tmp, self.path)
+        except Exception:
+            tmp.unlink(missing_ok=True)
+            raise
+
+    def delete(self) -> None:
+        self.path.unlink(missing_ok=True)
+
+
+def store_from_settings(
+    kind: str,
+    path: str,
+    *,
+    host: str = "",
+    repo: str = "",
+    branch: str = "main",
+    token: str | None = None,
+) -> RemoteStore | None:
     """Build the configured store, or None when session sharing is off.
 
-    ``$MULTI_CLAUDE_REMOTE_DIR`` wins over the config file. That makes trying a remote a
+    ``$MULTI_CLAUDE_REMOTE_DIR`` wins over everything else. That makes trying a remote a
     one-liner, and lets a second checkout or a test point somewhere else without editing
     state shared with the running app.
+
+    A hosted provider with no ``repo`` yields None rather than a store that fails on every
+    call: half-configured is the same as off, and the settings screen says so.
+
+    The HTTP drivers are imported here rather than at module scope: they import this module
+    for the shared layout, so a top-level import would be circular.
     """
     env = os.environ.get(REMOTE_DIR_ENV)
     if env:
         return DirectoryRemote(Path(env).expanduser())
     if kind == "directory" and path:
         return DirectoryRemote(Path(path).expanduser())
+    if kind in ("gitlab", "github") and repo and host:
+        from multi_claude.remote_http import GitHubRemote, GitLabRemote
+
+        driver = GitLabRemote if kind == "gitlab" else GitHubRemote
+        return driver(host, repo, branch, token if token is not None else TokenStore().get())
     return None
 
 

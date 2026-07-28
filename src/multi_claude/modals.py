@@ -20,10 +20,13 @@ from textual.widgets import Button, Input, Label, RadioButton, RadioSet, Static
 
 from multi_claude.colors import PALETTE, ColorRule
 from multi_claude.config import (
+    DEFAULT_REMOTE_HOSTS,
     VALID_MODES,
+    VALID_REMOTE_KINDS,
     ClaudeArgsError,
     Config,
     LaunchMode,
+    RemoteKind,
     alternate_for,
     parse_claude_args,
 )
@@ -885,6 +888,12 @@ class SettingsModal(ModalScreen[Config | None]):
             )
             yield Label("", id="args-error", classes="error")
 
+            yield Label("Sesiones compartidas", classes="section")
+            yield Label(
+                self._initial.remote_summary(), id="remote-summary", classes="hint"
+            )
+            yield Button("Configurar remoto…", id="configure-remote", variant="default")
+
             yield Label("Enter guarda · Esc cancela", classes="hint")
             with Horizontal():
                 yield Button("Cancelar", id="cancel", variant="default")
@@ -907,6 +916,33 @@ class SettingsModal(ModalScreen[Config | None]):
     @on(Button.Pressed, "#save")
     def _save(self) -> None:
         self._try_dismiss()
+
+    @on(Button.Pressed, "#configure-remote")
+    def _configure_remote(self) -> None:
+        """Open the remote settings on top, and fold its result into our own.
+
+        Nested rather than inlined: the remote needs five fields plus a connection test,
+        which would bury the launch settings this modal exists for.
+        """
+        from multi_claude.remote import TokenStore
+
+        modal = RemoteSettingsModal(self._initial, has_token=TokenStore().has_token())
+        self.app.push_screen(modal, lambda result: self._on_remote_configured(modal, result))
+
+    def _on_remote_configured(
+        self, modal: RemoteSettingsModal, result: Config | None
+    ) -> None:
+        if result is None:
+            return  # cancelled: leave the remote settings untouched
+        from multi_claude.remote import TokenStore
+
+        token = modal.token_to_save()
+        if token:
+            TokenStore().set(token)
+        # ``_collect`` builds on ``_initial``, so updating it is what carries the remote
+        # fields into the config this modal eventually returns.
+        self._initial = result
+        self.query_one("#remote-summary", Label).update(result.remote_summary())
 
     @on(Input.Submitted, "#claude-args")
     def _submit_args(self) -> None:
@@ -953,6 +989,238 @@ class SettingsModal(ModalScreen[Config | None]):
     @staticmethod
     def _alt_preview_text(default: LaunchMode) -> str:
         return f"Shift+Enter → {_MODE_LABELS[alternate_for(default)]}"
+
+
+_REMOTE_KIND_LABELS: dict[str, str] = {
+    "none": "Desactivado",
+    "directory": "Carpeta compartida (montaje, Syncthing…)",
+    "gitlab": "GitLab (repo privado)",
+    "github": "GitHub (repo privado)",
+}
+
+
+class RemoteSettingsModal(ModalScreen["Config | None"]):
+    """Configure where shared sessions are published.
+
+    Returns the incoming config with only the ``remote_*`` fields replaced, so it composes
+    with :class:`SettingsModal` the same way that one composes with the rest of the prefs.
+
+    The token is the exception: it never enters ``Config``, because that gets written to
+    ``config.json``. It is saved straight to :class:`~multi_claude.remote.TokenStore`, and
+    the field shows whether one exists without ever rendering it.
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+        Binding("ctrl+t", "test", "Probar"),
+    ]
+
+    DEFAULT_CSS = """
+    RemoteSettingsModal {
+        align: center middle;
+    }
+    RemoteSettingsModal > Vertical {
+        background: $surface;
+        border: thick $primary;
+        padding: 1 2;
+        width: 86;
+        height: auto;
+    }
+    RemoteSettingsModal Label.title {
+        text-style: bold;
+    }
+    RemoteSettingsModal Label.section {
+        margin-top: 1;
+        text-style: bold;
+        color: $accent;
+    }
+    RemoteSettingsModal Label.hint {
+        color: $text-muted;
+    }
+    RemoteSettingsModal Label.error {
+        color: $error;
+    }
+    RemoteSettingsModal Label.ok {
+        color: $success;
+    }
+    RemoteSettingsModal Horizontal {
+        align: center middle;
+        height: auto;
+        margin-top: 1;
+    }
+    RemoteSettingsModal Button {
+        margin: 0 1;
+    }
+    """
+
+    def __init__(self, config: Config, *, has_token: bool = False) -> None:
+        super().__init__()
+        self._initial = config
+        self._has_token = has_token
+        self._token_value: str | None = None
+
+    def compose(self) -> ComposeResult:
+        from textual.containers import Horizontal
+
+        with Vertical():
+            yield Label("Ajustes — sesiones compartidas", classes="title")
+
+            yield Label("Dónde se publican", classes="section")
+            with RadioSet(id="remote-kind"):
+                for kind in VALID_REMOTE_KINDS:
+                    yield RadioButton(
+                        _REMOTE_KIND_LABELS[kind],
+                        value=(kind == self._initial.remote_kind),
+                        id=f"kind-{kind}",
+                    )
+
+            yield Label("Carpeta (solo para «carpeta compartida»)", classes="section")
+            yield Input(
+                value=self._initial.remote_path,
+                placeholder="/mnt/equipo/sesiones-claude",
+                id="remote-path",
+            )
+
+            yield Label("Servidor de la API (GitLab/GitHub)", classes="section")
+            yield Input(
+                value=self._initial.remote_host,
+                placeholder=DEFAULT_REMOTE_HOSTS["gitlab"],
+                id="remote-host",
+            )
+            yield Label(
+                "Vacío usa gitlab.com o api.github.com. Para GitLab self-hosted: "
+                "https://git.tuempresa.com",
+                classes="hint",
+            )
+
+            yield Label("Repositorio de sesiones", classes="section")
+            yield Input(
+                value=self._initial.remote_repo,
+                placeholder="grupo/sesiones-claude",
+                id="remote-repo",
+            )
+
+            yield Label("Rama", classes="section")
+            yield Input(value=self._initial.remote_branch, placeholder="main", id="remote-branch")
+
+            yield Label("Token de acceso", classes="section")
+            yield Input(
+                placeholder=("•••• guardado (escribe para reemplazarlo)" if self._has_token
+                             else "glpat-… / github_pat_…"),
+                password=True,
+                id="remote-token",
+            )
+            yield Label(
+                "Se guarda en remote-token con permisos 0600, nunca en config.json. "
+                "Necesita permiso de lectura y escritura sobre el repo.",
+                classes="hint",
+            )
+
+            yield Label("", id="remote-status", classes="hint")
+            yield Label("Ctrl+T prueba la conexión · Enter guarda · Esc cancela", classes="hint")
+            with Horizontal():
+                yield Button("Cancelar", id="cancel", variant="default")
+                yield Button("Probar", id="test", variant="default")
+                yield Button("Guardar", id="save", variant="primary")
+
+    def on_mount(self) -> None:
+        self.query_one("#remote-kind", RadioSet).focus()
+
+    @on(Button.Pressed, "#cancel")
+    def _cancel(self) -> None:
+        self.dismiss(None)
+
+    @on(Button.Pressed, "#save")
+    def _save(self) -> None:
+        self.dismiss(self.collect())
+
+    @on(Button.Pressed, "#test")
+    def _test(self) -> None:
+        self.action_test()
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def action_test(self) -> None:
+        """Check the settings as typed, before saving them.
+
+        Deliberately synchronous: it is a single API call the user just asked for, and a
+        worker here would need to survive the modal closing underneath it.
+        """
+        from multi_claude.remote import store_from_settings
+
+        status = self.query_one("#remote-status", Label)
+        candidate = self.collect()
+        if candidate.remote_kind == "none":
+            self._set_status(status, "Compartir está desactivado", ok=False)
+            return
+        store = store_from_settings(
+            candidate.remote_kind,
+            candidate.remote_path,
+            host=candidate.remote_api_host(),
+            repo=candidate.remote_repo,
+            branch=candidate.remote_branch,
+            token=self._typed_token(),
+        )
+        if store is None:
+            self._set_status(status, "Configuración incompleta (falta ruta o repo)", ok=False)
+            return
+        check = getattr(store, "check_connection", None)
+        if not callable(check):
+            # A directory has nothing to authenticate: existence is the whole check.
+            from pathlib import Path as _Path
+
+            exists = _Path(candidate.remote_path).expanduser().is_dir()
+            self._set_status(
+                status,
+                f"OK · carpeta accesible: {candidate.remote_path}"
+                if exists
+                else f"La carpeta no existe todavía: {candidate.remote_path}",
+                ok=exists,
+            )
+            return
+        from multi_claude.remote import RemoteError
+
+        try:
+            self._set_status(status, check(), ok=True)
+        except RemoteError as exc:
+            self._set_status(status, str(exc), ok=False)
+
+    @staticmethod
+    def _set_status(label: Label, message: str, *, ok: bool) -> None:
+        label.remove_class("error", "ok")
+        label.add_class("ok" if ok else "error")
+        label.update(message)
+
+    def _typed_token(self) -> str | None:
+        """The token as typed, or None to mean "keep whatever is already stored"."""
+        typed = self.query_one("#remote-token", Input).value.strip()
+        return typed or None
+
+    def token_to_save(self) -> str | None:
+        """The token the caller should persist, or None if the user left it untouched."""
+        return self._typed_token()
+
+    def collect(self) -> Config:
+        kind = self._kind_from_radio()
+        return replace(
+            self._initial,
+            remote_kind=kind,
+            remote_path=self.query_one("#remote-path", Input).value.strip(),
+            remote_host=self.query_one("#remote-host", Input).value.strip().rstrip("/"),
+            remote_repo=self.query_one("#remote-repo", Input).value.strip().strip("/"),
+            remote_branch=self.query_one("#remote-branch", Input).value.strip() or "main",
+        )
+
+    def _kind_from_radio(self) -> RemoteKind:
+        pressed = self.query_one("#remote-kind", RadioSet).pressed_button
+        radio_id = pressed.id if pressed is not None else None
+        if radio_id and radio_id.startswith("kind-"):
+            candidate = radio_id.split("-", 1)[1]
+            for kind in VALID_REMOTE_KINDS:
+                if candidate == kind:
+                    return kind
+        return self._initial.remote_kind
 
 
 class ConfirmDeleteModal(ModalScreen[bool]):

@@ -13,6 +13,17 @@ from multi_claude.remote import RemoteStore, store_from_settings
 from multi_claude.tags import TagsStore
 
 
+def _remote_from(prefs: Config) -> RemoteStore | None:
+    """Build the shared-session store described by ``prefs``, if any."""
+    return store_from_settings(
+        prefs.remote_kind,
+        prefs.remote_path,
+        host=prefs.remote_api_host(),
+        repo=prefs.remote_repo,
+        branch=prefs.remote_branch,
+    )
+
+
 class ClaudeBrowserApp(App[None]):
     """Root app. Pushes ProjectsScreen at startup; SessionsScreen is pushed on Enter."""
 
@@ -27,9 +38,7 @@ class ClaudeBrowserApp(App[None]):
         self.session_colors: SessionColorsStore = SessionColorsStore()
         self.project_folders: ProjectFoldersStore = ProjectFoldersStore()
         self.tags: TagsStore = TagsStore()
-        self.remote: RemoteStore | None = store_from_settings(
-            self.prefs.remote_kind, self.prefs.remote_path
-        )
+        self.remote: RemoteStore | None = _remote_from(self.prefs)
 
     def on_mount(self) -> None:
         from multi_claude.screens.projects import ProjectsScreen
@@ -44,4 +53,4 @@ class ClaudeBrowserApp(App[None]):
         """
         self.prefs = prefs
         save_config(prefs)
-        self.remote = store_from_settings(prefs.remote_kind, prefs.remote_path)
+        self.remote = _remote_from(prefs)

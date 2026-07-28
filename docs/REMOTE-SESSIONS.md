@@ -38,8 +38,8 @@ compañero y la carpeta de proyecto local.
 | Modelo | Local-first; el remoto es un almacén, nunca el directorio de trabajo |
 | uuid | Se preserva tal cual (uuid v4, no colisionan entre empleados) |
 | `cwd` embebido | No se reescribe: es histórico y Claude lo ignora (validado, ver Fase 0) |
-| Backend v1 | Directorio compartido (`DirectoryRemote`). GitLab vía API REST: pendiente |
-| Credenciales | Variable de entorno o fichero `600`; **nunca** en `config.json` |
+| Backends | Carpeta (`DirectoryRemote`), GitLab y GitHub (`remote_http.py`) |
+| Credenciales | Fichero `remote-token` con permisos `0600`, o `$MULTI_CLAUDE_REMOTE_TOKEN`; **nunca** en `config.json` |
 | Compresión | gzip de la stdlib (medido ~3,7:1 sobre una sesión real de 4,6 MB) |
 | Manifests | Uno por sesión, nunca un manifest global (evita conflictos de escritura) |
 | Concurrencia | Fork explícito, no merge (ver "Concurrencia") |
@@ -112,31 +112,51 @@ Un módulo nuevo:
 ```
 src/multi_claude/remote.py
     RemoteStore(Protocol)   list_sessions() / fetch() / publish()
-    DirectoryRemote         driver de carpeta (implementado)
-    GitLabRemote            driver de API REST (pendiente)
+    DirectoryRemote         driver de carpeta
     RemoteSession           dataclass de metadatos
+    TokenStore              token de API, fichero aparte con permisos 0600
     store_from_settings()   factoría; $MULTI_CLAUDE_REMOTE_DIR gana sobre el config
+
+src/multi_claude/remote_http.py
+    HttpRepoRemote          maquinaria común: listar / leer / escribir un fichero del repo
+    GitLabRemote            endpoints y auth de GitLab (gitlab.com y self-hosted)
+    GitHubRemote            endpoints y auth de GitHub
 ```
+
+El layout en el remoto, el gzip y el orden «manifest al final» viven en `remote.py`, así que una
+sesión publicada en una carpeta y otra publicada en GitLab son idénticas byte a byte. Un backend
+nuevo solo aporta cuatro operaciones: listar un directorio, leer un fichero, escribir un fichero
+y decir quién es el repo.
 
 `DirectoryRemote` no es solo un doble de test: da un segundo backend real (carpeta compartida,
 Syncthing, NFS de solo-lectura) sin código extra, y permite los tests sin red.
 
-### Driver de GitLab
+### Drivers de GitLab y GitHub
 
-Vía API REST, sin clonar el repo:
+Vía API REST, sin clonar el repo. Ambos proveedores se reducen a las mismas cuatro operaciones,
+con endpoints distintos:
 
-| Operación | Endpoint |
-|-----------|----------|
-| Listar | `GET /projects/:id/repository/tree?path=manifest&ref=main` |
-| Leer | `GET /projects/:id/repository/files/:path/raw?ref=main` |
-| Escribir | `POST /projects/:id/repository/commits` con varias `actions` |
+| Operación | GitLab | GitHub |
+|-----------|--------|--------|
+| Listar | `GET /projects/:id/repository/tree` (`recursive=true`) | `GET /repos/:o/:r/contents/:path` (no recursivo: se recorre a mano) |
+| Leer | `GET .../repository/files/:path/raw` | `GET .../contents/:path` con `Accept: vnd.github.raw` |
+| Escribir | `POST .../repository/files/:path`, y `PUT` si ya existe | `PUT .../contents/:path`, con `sha` si ya existe |
+| Identidad | `GET /projects/:id` → `path_with_namespace` | `GET /repos/:o/:r` → `full_name` |
+| Auth | cabecera `PRIVATE-TOKEN` | `Authorization: Bearer` + versión de API fijada |
 
-El endpoint de commits acepta múltiples ficheros por llamada, así que **publicar una sesión es un
-commit atómico** con el jsonl, sus subagentes, sus tool-results y su manifest. Autoría y auditoría
-salen del propio git.
+Dos asimetrías que el código absorbe: **GitLab no tiene upsert** (crear un fichero que ya existe
+es un 400, así que se reintenta como `PUT` — sin eso, republicar fallaría siempre), y **GitHub
+exige el `sha` del blob** para sobrescribir, lo que obliga a un `GET` previo.
 
-Listado incremental: se guarda el último commit sha visto; si no cambió, no se re-lista. Los
-manifests leídos se cachean en el índice local.
+**Un commit por fichero, no uno por sesión.** El plan original quería usar el endpoint de commits
+multi-`action` de GitLab para que publicar fuese atómico. Se descartó: GitHub no tiene equivalente
+directo, y mantener dos caminos distintos por proveedor duplicaba la parte más delicada. Con
+escritura fichero a fichero y el manifest al final, la invariante que importa —una publicación a
+medias es invisible, no rota— se conserva en ambos. El coste es un historial más ruidoso en el
+repo de sesiones.
+
+Tampoco hay listado incremental por commit sha: cada `R` relista los manifests. Ver
+"Desviaciones del plan".
 
 ### Cambios en módulos existentes
 
@@ -155,10 +175,18 @@ FTS global (`?`) hasta que se hidratan.
 **`screens/sessions.py`, acción `Enter`** — si la fila es remota: hidratar en `project_dir` y luego
 `launch_claude(cwd, session_id=...)`, cuya firma ya sirve sin cambios.
 
-**`config.py`** — `remote_kind` (`none` | `directory`) y `remote_path`. `none` por defecto: hay
-que activarlo a mano. `$MULTI_CLAUDE_REMOTE_DIR` gana sobre el fichero, para poder probar sin
-tocar estado compartido. Aún no son editables desde el modal de ajustes (`s`). Cuando exista
-backend de API, su token **no** irá aquí.
+**`config.py`** — `remote_kind` (`none` | `directory` | `gitlab` | `github`), `remote_path`,
+`remote_host`, `remote_repo` y `remote_branch`. `none` por defecto: hay que activarlo a mano.
+`remote_api_host()` cae al host por defecto del proveedor, para que en gitlab.com o github.com no
+haya que teclear URL. `$MULTI_CLAUDE_REMOTE_DIR` gana sobre todo, para probar sin tocar estado
+compartido. El token **no** está aquí: ver `TokenStore`.
+
+**`modals.py`** — `RemoteSettingsModal` con proveedor, servidor, repo, rama y token, más una
+prueba de conexión (`Ctrl+T`) que valida los campos *antes* de guardarlos. Se abre desde el modal
+de ajustes existente (`s` → «Configurar remoto…»), anidado en vez de en línea porque cinco campos
+más una prueba enterrarían los ajustes de lanzamiento que ese modal existe para editar. Devuelve
+el config con solo los campos `remote_*` reemplazados, igual que `SettingsModal` hace con el resto
+de preferencias.
 
 **`app.py` / `app_protocol.py`** — el store vive en `app.remote` (`RemoteStore | None`) y se
 reconstruye en `update_prefs`, así que cambiar de remoto no exige reiniciar.
@@ -207,7 +235,7 @@ es v1.1. Es una limitación inherente que se documenta, no se esconde.
 |------|-----|--------|
 | 0 | Spike bloqueante: `--resume` de un jsonl ajeno con `cwd` inexistente | **validado** |
 | 1 | `remote.py` + `DirectoryRemote` + tests | **hecho** |
-| 2 | `GitLabRemote` + credenciales | pendiente |
+| 2 | `GitLabRemote` + `GitHubRemote` + credenciales + UI de configuración | **hecho** |
 | 3 | Publicar (`u`) sobre selección múltiple | **hecho** |
 | 4 | Listado remoto (`R`) | **hecho** (sin columnas de índice, ver abajo) |
 | 5 | Hidratar + `Enter` + aviso de divergencia | **hecho** |
@@ -215,9 +243,17 @@ es v1.1. Es una limitación inherente que se documenta, no se esconde.
 
 ### Desviaciones del plan, y por qué
 
-**El orden se invirtió: la UI antes que `GitLabRemote`.** Con `DirectoryRemote` el MVP se
-puede probar apuntando a una carpeta, sin token ni repo ni servidor. Empezar por GitLab
-habría dejado la feature inservible hasta tener infraestructura.
+**El orden se invirtió: la UI antes que los drivers de API.** Con `DirectoryRemote` el MVP se
+pudo probar apuntando a una carpeta, sin token ni repo ni servidor. Empezar por GitLab habría
+dejado la feature inservible hasta tener infraestructura.
+
+**Un commit por fichero en vez de un commit atómico por sesión.** Ver "Drivers de GitLab y
+GitHub": mantener dos caminos distintos por proveedor duplicaba la parte más delicada, y la
+invariante que de verdad protege (publicación a medias = invisible) se conserva igual.
+
+**Sin listado incremental por commit sha.** Cada `R` relista los manifests. Es una llamada por
+manifest en los proveedores de API, así que con muchas sesiones publicadas convendrá cachear; con
+las decenas que tiene un equipo pequeño, no compensa la invalidación.
 
 **Sin columnas en el índice SQLite.** La Fase 4 preveía `origin`/`remote_author`/
 `remote_updated` para cachear el listado remoto. No se han añadido: la lista se pide al
@@ -235,10 +271,17 @@ declarado como limitación en el README.
 
 ## Cómo probarlo
 
+**Con una carpeta**, sin configurar nada:
+
 ```bash
 mkdir -p /tmp/remoto-sesiones
 MULTI_CLAUDE_REMOTE_DIR=/tmp/remoto-sesiones uv run multi-claude
 ```
+
+**Con GitLab o GitHub**: crea un repo privado vacío para las sesiones, y en la TUI pulsa `s` →
+«Configurar remoto…». Elige proveedor, rellena servidor (vacío para gitlab.com/github.com),
+`grupo/repo`, rama y token, y pulsa `Ctrl+T` para verificar antes de guardar. El token necesita
+permiso de lectura y escritura sobre ese repo (`api` en GitLab, `contents:write` en GitHub).
 
 1. Entra en un proyecto, sitúate en una sesión y pulsa `u`. Confirma con `y` en el modal,
    que lista los ficheros exactos que se van a subir.

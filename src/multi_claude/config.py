@@ -46,11 +46,17 @@ RESERVED_CLAUDE_FLAGS: frozenset[str] = frozenset(
     }
 )
 
-# Where shared sessions live. ``none`` disables the feature entirely; ``directory`` points
-# at a path (a shared mount, a synced folder). Kept as a string rather than a bool so a
-# future API-backed backend is a new value, not a schema change.
-RemoteKind = Literal["none", "directory"]
-VALID_REMOTE_KINDS: tuple[RemoteKind, ...] = ("none", "directory")
+# Where shared sessions live. ``none`` disables the feature entirely; ``directory`` points at
+# a path (a shared mount, a synced folder); ``gitlab``/``github`` push to a repo over its REST
+# API. The auth token is deliberately *not* part of this config — see ``remote.TokenStore``.
+RemoteKind = Literal["none", "directory", "gitlab", "github"]
+VALID_REMOTE_KINDS: tuple[RemoteKind, ...] = ("none", "directory", "gitlab", "github")
+
+# Default API hosts per provider, so the user only has to type one for self-hosted GitLab.
+DEFAULT_REMOTE_HOSTS: dict[str, str] = {
+    "gitlab": "https://gitlab.com",
+    "github": "https://api.github.com",
+}
 
 ProjectSortKey = Literal["name", "path", "session_count", "last_activity"]
 VALID_PROJECT_SORT: tuple[ProjectSortKey, ...] = (
@@ -94,6 +100,9 @@ class Config:
     color_rules: list[ColorRule] = field(default_factory=list)
     remote_kind: RemoteKind = "none"
     remote_path: str = ""
+    remote_host: str = ""
+    remote_repo: str = ""
+    remote_branch: str = "main"
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -106,7 +115,23 @@ class Config:
             "color_rules": [r.to_dict() for r in self.color_rules],
             "remote_kind": self.remote_kind,
             "remote_path": self.remote_path,
+            "remote_host": self.remote_host,
+            "remote_repo": self.remote_repo,
+            "remote_branch": self.remote_branch,
         }
+
+    def remote_api_host(self) -> str:
+        """The API base URL to use: the configured one, or the provider's default."""
+        return self.remote_host or DEFAULT_REMOTE_HOSTS.get(self.remote_kind, "")
+
+    def remote_summary(self) -> str:
+        """One-line description of the configured remote, for the settings screen."""
+        if self.remote_kind == "none":
+            return "desactivado"
+        if self.remote_kind == "directory":
+            return f"carpeta · {self.remote_path or '(sin ruta)'}"
+        host = self.remote_api_host().replace("https://", "").rstrip("/")
+        return f"{self.remote_kind} · {host}/{self.remote_repo or '(sin repo)'}"
 
 
 _OPPOSITE: dict[LaunchMode, LaunchMode] = {
@@ -162,7 +187,10 @@ def load_config(path: Path | None = None) -> Config:
         group_worktrees=bool(raw.get("group_worktrees", True)),
         color_rules=_coerce_color_rules(raw.get("color_rules")),
         remote_kind=_coerce_remote_kind(raw.get("remote_kind")),
-        remote_path=_coerce_remote_path(raw.get("remote_path")),
+        remote_path=_coerce_str(raw.get("remote_path")),
+        remote_host=_coerce_str(raw.get("remote_host")),
+        remote_repo=_coerce_str(raw.get("remote_repo")),
+        remote_branch=_coerce_str(raw.get("remote_branch")) or "main",
     )
 
 
@@ -221,7 +249,7 @@ def _coerce_remote_kind(value: object) -> RemoteKind:
     return "none"
 
 
-def _coerce_remote_path(value: object) -> str:
+def _coerce_str(value: object) -> str:
     return value if isinstance(value, str) else ""
 
 

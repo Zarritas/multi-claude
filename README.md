@@ -178,14 +178,27 @@ Condiciones soportadas en una regla (un `when` por regla):
 Publicar una sesión en un sitio común y que un compañero la reanude con `Enter`, sin el
 viaje de ida y vuelta de `x` (exportar) → enviar el zip → `i` (importar).
 
-**Configuración.** Está desactivado por defecto. Para activarlo, en `config.json`:
+**Configuración.** Está desactivado por defecto. Se configura desde **Ajustes (`s`) → botón
+«Configurar remoto…»**, que pide proveedor, servidor, repositorio, rama y token, y tiene un
+**`Ctrl+T` para probar la conexión** antes de guardar.
 
-```json
-{ "remote_kind": "directory", "remote_path": "/ruta/al/remoto" }
-```
+| Proveedor | Qué necesita | Notas |
+|-----------|--------------|-------|
+| Carpeta compartida | una ruta | Montaje de red, Syncthing, Dropbox. Los permisos son los del sistema de ficheros |
+| GitLab | servidor + `grupo/repo` + token | Funciona con `gitlab.com` y con self-hosted |
+| GitHub | `owner/repo` + token | El servidor por defecto es `api.github.com` |
 
-O, para probarlo sin editar nada, `MULTI_CLAUDE_REMOTE_DIR=/ruta/al/remoto` — la variable
-de entorno gana sobre el fichero.
+Con GitLab o GitHub los permisos, el SSO y la auditoría son los del propio repositorio: quien
+pueda leerlo puede leer las sesiones, y cada publicación es un commit con su autor. Es la razón
+principal para preferirlos a una carpeta.
+
+El **token nunca se guarda en `config.json`** (ese fichero se comparte y se pega en issues):
+va a `remote-token`, junto a la config, con permisos `0600`. `$MULTI_CLAUDE_REMOTE_TOKEN` lo
+sobreescribe, para que CI no tenga que escribir un secreto en disco.
+
+Los campos también se pueden editar a mano en `config.json` (`remote_kind`, `remote_host`,
+`remote_repo`, `remote_branch`, `remote_path`), y `MULTI_CLAUDE_REMOTE_DIR=/ruta` fuerza una
+carpeta por encima de todo lo demás — útil para probar sin tocar tu configuración real.
 
 **Qué hace cada tecla:**
 
@@ -347,7 +360,8 @@ El nombre de la carpeta `~/.claude/projects/<encoded>/` es la ruta original con 
 - **zellij no puede lanzar un comando en una pestaña nueva**: `zellij action new-tab` solo acepta un layout, no un comando, así que el modo `tab` dentro de zellij abre un panel.
 - **Ordenar por tags no se persiste**: `3` ordena la tabla de sesiones por etiquetas en la sesión actual de la TUI, pero `tags` no está en `VALID_SESSION_SORT` (`config.py`), así que al reabrir vuelve al orden por última actividad.
 - **Republicar una sesión compartida sobrescribe la versión del remoto**: si dos personas reanudan la misma sesión compartida y ambas publican, la segunda publicación pisa la primera en el remoto (cada una conserva la suya en local). El fork explícito que lo resuelve está planificado, no implementado — ver [docs/REMOTE-SESSIONS.md](docs/REMOTE-SESSIONS.md).
-- **El único backend compartido es un directorio**: sirve un montaje de red o una carpeta sincronizada, pero no hay driver de GitLab todavía, así que los permisos son los del sistema de ficheros.
+- **Publicar en GitLab/GitHub hace un commit por fichero**: una sesión con subagentes son varios commits en el repo de sesiones, no uno. El manifest siempre va el último, así que una publicación interrumpida queda invisible en vez de a medias, pero el historial del repo es más ruidoso de lo necesario.
+- **Las sesiones compartidas no entran en la búsqueda global (`?`)** hasta que las traes: el índice FTS solo indexa lo que hay en disco.
 
 ## Instalación
 

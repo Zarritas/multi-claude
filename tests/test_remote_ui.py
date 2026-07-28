@@ -7,6 +7,8 @@ under test, not a mock of it.
 
 from __future__ import annotations
 
+import json
+import stat
 from pathlib import Path
 from unittest.mock import patch
 
@@ -221,3 +223,116 @@ async def test_publish_is_unavailable_without_a_remote(
         screen = await _open_sessions(pilot)
         assert app.remote is None
         assert screen.check_action("publish", ()) is False
+
+
+# --- configuring the remote from the UI ---------------------------------------------
+
+
+async def test_remote_settings_modal_collects_every_field(world: Path) -> None:
+    from textual.widgets import Input, RadioButton
+
+    from multi_claude.config import Config
+    from multi_claude.modals import RemoteSettingsModal
+
+    app = ClaudeBrowserApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        modal = RemoteSettingsModal(Config())
+        app.push_screen(modal)
+        await pilot.pause()
+
+        modal.query_one("#kind-gitlab", RadioButton).value = True
+        modal.query_one("#remote-host", Input).value = "https://git.empresa.com/"
+        modal.query_one("#remote-repo", Input).value = "/grupo/sesiones/"
+        modal.query_one("#remote-branch", Input).value = "trunk"
+        await pilot.pause()
+
+        result = modal.collect()
+        assert result.remote_kind == "gitlab"
+        # Trailing slashes stripped: they would produce doubled-up URLs.
+        assert result.remote_host == "https://git.empresa.com"
+        assert result.remote_repo == "grupo/sesiones"
+        assert result.remote_branch == "trunk"
+
+
+async def test_the_token_never_reaches_the_config_file(
+    world: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """config.json gets shared and pasted into issues; a credential there leaks."""
+    from textual.widgets import Input
+
+    from multi_claude.config import Config, config_path
+    from multi_claude.modals import RemoteSettingsModal
+    from multi_claude.remote import TokenStore, token_path
+
+    monkeypatch.delenv("MULTI_CLAUDE_REMOTE_TOKEN", raising=False)
+    app = ClaudeBrowserApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        modal = RemoteSettingsModal(Config(remote_kind="gitlab", remote_repo="g/s"))
+        app.push_screen(modal)
+        await pilot.pause()
+        modal.query_one("#remote-token", Input).value = "glpat-muy-secreto"
+        await pilot.pause()
+
+        collected = modal.collect()
+        token = modal.token_to_save()
+        assert token == "glpat-muy-secreto"
+        # The token is absent from every field of the config that gets serialised.
+        assert "glpat-muy-secreto" not in json.dumps(collected.to_dict())
+
+        TokenStore().set(token or "")
+        app.update_prefs(collected)
+        await pilot.pause()
+
+        assert "glpat-muy-secreto" not in config_path().read_text(encoding="utf-8")
+        assert TokenStore().get() == "glpat-muy-secreto"
+        assert stat.S_IMODE(token_path().stat().st_mode) == 0o600
+
+
+async def test_an_empty_token_field_keeps_the_stored_one(world: Path) -> None:
+    """Reopening the modal must not wipe the saved token just by saving again."""
+    from multi_claude.config import Config
+    from multi_claude.modals import RemoteSettingsModal
+
+    app = ClaudeBrowserApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        modal = RemoteSettingsModal(Config(), has_token=True)
+        app.push_screen(modal)
+        await pilot.pause()
+        assert modal.token_to_save() is None  # None means "leave it alone"
+
+
+async def test_settings_shows_the_remote_summary_and_opens_the_remote_modal(world: Path) -> None:
+    from textual.widgets import Button, Label
+
+    from multi_claude.modals import RemoteSettingsModal, SettingsModal
+
+    app = ClaudeBrowserApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        settings = SettingsModal(app.prefs)
+        app.push_screen(settings)
+        await pilot.pause()
+
+        assert "desactivado" in str(settings.query_one("#remote-summary", Label).content)
+        settings.query_one("#configure-remote", Button).press()
+        await pilot.pause()
+        assert isinstance(app.screen, RemoteSettingsModal)
+
+
+async def test_changing_the_remote_rebuilds_the_store_without_a_restart(world: Path) -> None:
+    from dataclasses import replace
+
+    from multi_claude.remote import DirectoryRemote
+
+    app = ClaudeBrowserApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert isinstance(app.remote, DirectoryRemote)  # from the env var
+
+        app.update_prefs(replace(app.prefs, remote_kind="none", remote_path=""))
+        await pilot.pause()
+        # The env var still wins, which is what makes it a testing escape hatch.
+        assert isinstance(app.remote, DirectoryRemote)
