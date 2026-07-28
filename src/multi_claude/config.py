@@ -3,6 +3,7 @@
 Stored settings:
 
 - ``default_mode`` — launch mode for Enter. Shift+Enter uses :func:`alternate_for`.
+- ``claude_args`` — extra CLI flags prepended to every ``claude`` invocation.
 - ``projects_sort`` / ``sessions_sort`` — column + direction for each screen.
 - ``preview_visible`` — whether the session preview panel is shown.
 - ``group_worktrees`` — whether to collapse multiple worktrees of the same repo.
@@ -12,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -19,8 +21,29 @@ from typing import Literal
 
 from multi_claude.colors import ColorRule
 
-LaunchMode = Literal["auto", "window", "suspend"]
-VALID_MODES: tuple[LaunchMode, ...] = ("auto", "window", "suspend")
+# Where the session lands. ``split``/``tab`` reuse the current window, ``window``
+# opens a new one, ``suspend`` runs inline after suspending the TUI, ``auto``
+# walks the chain split > tab > window > suspend.
+LaunchMode = Literal["auto", "split", "tab", "window", "suspend"]
+VALID_MODES: tuple[LaunchMode, ...] = ("auto", "split", "tab", "window", "suspend")
+
+# Flags the TUI owns: allowing them in ``claude_args`` would either fight with the
+# session we're resuming or break the interactive launch entirely.
+RESERVED_CLAUDE_FLAGS: frozenset[str] = frozenset(
+    {
+        "-r",
+        "--resume",
+        "-c",
+        "--continue",
+        "-n",
+        "--name",
+        "-p",
+        "--print",
+        "--bg",
+        "--background",
+        "--from-pr",
+    }
+)
 
 ProjectSortKey = Literal["name", "path", "session_count", "last_activity"]
 VALID_PROJECT_SORT: tuple[ProjectSortKey, ...] = (
@@ -52,6 +75,7 @@ class SortSpec:
 @dataclass
 class Config:
     default_mode: LaunchMode = "auto"
+    claude_args: list[str] = field(default_factory=list)
     projects_sort: SortSpec = field(
         default_factory=lambda: SortSpec(key="last_activity", descending=True)
     )
@@ -65,6 +89,7 @@ class Config:
     def to_dict(self) -> dict[str, object]:
         return {
             "default_mode": self.default_mode,
+            "claude_args": list(self.claude_args),
             "projects_sort": self.projects_sort.to_dict(),
             "sessions_sort": self.sessions_sort.to_dict(),
             "preview_visible": self.preview_visible,
@@ -75,6 +100,8 @@ class Config:
 
 _OPPOSITE: dict[LaunchMode, LaunchMode] = {
     "auto": "suspend",
+    "split": "window",
+    "tab": "window",
     "window": "suspend",
     "suspend": "window",
 }
@@ -117,6 +144,7 @@ def load_config(path: Path | None = None) -> Config:
         return Config()
     return Config(
         default_mode=_coerce_mode(raw.get("default_mode"), "auto"),
+        claude_args=_coerce_claude_args(raw.get("claude_args")),
         projects_sort=_coerce_sort(raw.get("projects_sort"), VALID_PROJECT_SORT, "last_activity"),
         sessions_sort=_coerce_sort(raw.get("sessions_sort"), VALID_SESSION_SORT, "last_activity"),
         preview_visible=bool(raw.get("preview_visible", True)),
@@ -136,6 +164,41 @@ def _coerce_mode(value: object, fallback: LaunchMode) -> LaunchMode:
     if isinstance(value, str) and value in VALID_MODES:
         return value
     return fallback
+
+
+class ClaudeArgsError(ValueError):
+    """Raised when a user-supplied ``claude_args`` string can't be used."""
+
+
+def parse_claude_args(raw: str) -> list[str]:
+    """Split a user-typed flag string into argv, rejecting flags the TUI owns.
+
+    Raises :class:`ClaudeArgsError` on unbalanced quotes or on any flag in
+    :data:`RESERVED_CLAUDE_FLAGS` (``--resume`` and friends would collide with the
+    session multi-claude is actually launching).
+    """
+    try:
+        parts = shlex.split(raw)
+    except ValueError as exc:
+        raise ClaudeArgsError(f"No se pudo interpretar la línea: {exc}") from exc
+    for part in parts:
+        flag = part.split("=", 1)[0]
+        if flag in RESERVED_CLAUDE_FLAGS:
+            raise ClaudeArgsError(f"`{flag}` lo gestiona multi-claude; quítalo de los extras")
+    return parts
+
+
+def _coerce_claude_args(value: object) -> list[str]:
+    """Accept both the canonical list form and a hand-edited string in the JSON."""
+    if isinstance(value, str):
+        try:
+            return parse_claude_args(value)
+        except ClaudeArgsError:
+            return []
+    if not isinstance(value, list):
+        return []
+    args = [item for item in value if isinstance(item, str)]
+    return [a for a in args if a.split("=", 1)[0] not in RESERVED_CLAUDE_FLAGS]
 
 
 def _coerce_color_rules(value: object) -> list[ColorRule]:

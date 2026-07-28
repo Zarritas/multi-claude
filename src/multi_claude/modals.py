@@ -7,6 +7,7 @@ Each modal completes via ``self.dismiss(<result>)``. Callers use
 from __future__ import annotations
 
 import time
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -18,8 +19,16 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Label, RadioButton, RadioSet, Static
 
 from multi_claude.colors import PALETTE, ColorRule
-from multi_claude.config import VALID_MODES, Config, LaunchMode, alternate_for
+from multi_claude.config import (
+    VALID_MODES,
+    ClaudeArgsError,
+    Config,
+    LaunchMode,
+    alternate_for,
+    parse_claude_args,
+)
 from multi_claude.discovery import Project
+from multi_claude.launcher import PLACEMENT_LABELS, preview_dispatch
 from multi_claude.tags import parse_tag_list
 
 
@@ -674,14 +683,104 @@ class AddProjectModal(ModalScreen[Path | None]):
 
 
 _MODE_LABELS: dict[LaunchMode, str] = {
-    "auto": "Auto — multiplexer > ventana nueva > suspend",
-    "window": "Ventana nueva del emulador (suspend si no se detecta)",
+    "auto": "Auto — panel del multiplexer > pestaña > ventana > suspend",
+    "split": "Panel dividido del multiplexer (tmux/zellij)",
+    "tab": "Pestaña nueva en la ventana actual",
+    "window": "Ventana nueva del emulador",
     "suspend": "Suspender la TUI",
 }
 
+# Sketches of where the session lands, drawn from the point of view of the window
+# multi-claude is running in. Kept to 46 columns so they fit the modal.
+_MODE_SKETCHES: dict[LaunchMode, str] = {
+    "auto": (
+        "  panel  ▸  pestaña  ▸  ventana  ▸  aquí mismo\n"
+        "  ╰── se queda en la primera que esté disponible\n"
+        "\n"
+        "  Con tmux/zellij: panel. Sin ellos: pestaña de\n"
+        "  tu emulador, si sabe abrirlas."
+    ),
+    "split": (
+        "  ┌───────────────┬───────────────┐\n"
+        "  │ multi-claude  │ claude ▌      │\n"
+        "  │               │               │\n"
+        "  └───────────────┴───────────────┘\n"
+        "  Una ventana, dos paneles lado a lado."
+    ),
+    "tab": (
+        "  ┌ multi-claude │ claude ▌ ───────┐\n"
+        "  │ claude ▌                       │\n"
+        "  │                                │\n"
+        "  └────────────────────────────────┘\n"
+        "  La misma ventana, una pestaña más."
+    ),
+    "window": (
+        "  ┌ multi-claude ──┐\n"
+        "  │                │ ┌ claude ────────┐\n"
+        "  └────────────────┘ │ ▌              │\n"
+        "                     └────────────────┘\n"
+        "  Dos ventanas independientes."
+    ),
+    "suspend": (
+        "  ┌ esta misma terminal ───────────┐\n"
+        "  │ claude ▌                       │\n"
+        "  │                                │\n"
+        "  └────────────────────────────────┘\n"
+        "  La TUI se pausa y vuelve al salir de claude."
+    ),
+}
+
+
+def _dispatch_hint(mode: LaunchMode) -> str:
+    """One line describing what ``mode`` resolves to on this machine, right now."""
+    outcome = preview_dispatch(mode)
+    label = PLACEMENT_LABELS.get(outcome.placement, outcome.placement)
+    if outcome.target == "inline":
+        line = f"Aquí y ahora: {label.lower()}"
+    else:
+        line = f"Aquí y ahora: {label.lower()} vía {outcome.target}"
+    if outcome.fallback_reason:
+        line += f" — {outcome.fallback_reason}"
+    return line
+
+
+_SKIP_PERMISSIONS_FLAG = "--dangerously-skip-permissions"
+# Both spellings bypass permissions; we normalise on the flag above so the
+# checkbox and the free-text field can't end up disagreeing.
+_SKIP_PERMISSIONS_EQUIVALENTS = (
+    _SKIP_PERMISSIONS_FLAG,
+    "--permission-mode=bypassPermissions",
+)
+
+
+def _split_skip_permissions(args: list[str]) -> tuple[bool, list[str]]:
+    """Return (skip_enabled, remaining_args) by pulling bypass flags out of ``args``."""
+    remaining: list[str] = []
+    skip = False
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg in _SKIP_PERMISSIONS_EQUIVALENTS:
+            skip = True
+        elif arg == "--permission-mode" and i + 1 < len(args):
+            if args[i + 1] == "bypassPermissions":
+                skip = True
+            else:
+                remaining += [arg, args[i + 1]]
+            i += 1
+        else:
+            remaining.append(arg)
+        i += 1
+    return skip, remaining
+
 
 class SettingsModal(ModalScreen[Config | None]):
-    """Edit the default launch mode. Shift+Enter mode is derived (see alternate_for)."""
+    """Edit the launch mode and the extra ``claude`` flags.
+
+    Shift+Enter's mode is derived from the default (see alternate_for). The result
+    is the incoming config with only these fields replaced, so unrelated prefs
+    (sorts, preview, colour rules) survive a save.
+    """
 
     BINDINGS = [
         Binding("escape", "cancel", "Cancel"),
@@ -714,6 +813,14 @@ class SettingsModal(ModalScreen[Config | None]):
         color: $text-muted;
         margin-top: 1;
     }
+    SettingsModal Label.error {
+        color: $error;
+    }
+    SettingsModal Static.sketch {
+        margin-top: 1;
+        color: $text-muted;
+        height: auto;
+    }
     SettingsModal Horizontal {
         align: center middle;
         height: auto;
@@ -727,12 +834,14 @@ class SettingsModal(ModalScreen[Config | None]):
     def __init__(self, config: Config) -> None:
         super().__init__()
         self._initial = config
+        self._skip_initial, self._extra_initial = _split_skip_permissions(config.claude_args)
 
     def compose(self) -> ComposeResult:
         from textual.containers import Horizontal
+        from textual.widgets import Checkbox
 
         with Vertical():
-            yield Label("Ajustes — modo de lanzamiento", classes="title")
+            yield Label("Ajustes — lanzamiento de sesiones", classes="title")
 
             yield Label("Enter (predeterminado)", classes="section")
             with RadioSet(id="default-mode"):
@@ -743,11 +852,38 @@ class SettingsModal(ModalScreen[Config | None]):
                         id=f"default-{mode}",
                     )
 
+            yield Static(
+                _MODE_SKETCHES[self._initial.default_mode],
+                id="mode-sketch",
+                classes="sketch",
+                markup=False,
+            )
+            yield Label(
+                _dispatch_hint(self._initial.default_mode),
+                id="dispatch-hint",
+                classes="hint",
+            )
             yield Label(
                 self._alt_preview_text(self._initial.default_mode),
                 id="alt-preview",
                 classes="alt-preview",
             )
+
+            yield Label("Argumentos para `claude`", classes="section")
+            yield Checkbox(
+                f"Saltar permisos ({_SKIP_PERMISSIONS_FLAG})",
+                value=self._skip_initial,
+                id="skip-permissions",
+            )
+            yield Input(
+                value=" ".join(self._extra_initial),
+                placeholder="--model opus --effort high --add-dir ../shared",
+                id="claude-args",
+            )
+            yield Label(
+                "Se anteponen a --resume/-n en cada lanzamiento", classes="hint"
+            )
+            yield Label("", id="args-error", classes="error")
 
             yield Label("Enter guarda · Esc cancela", classes="hint")
             with Horizontal():
@@ -760,6 +896,8 @@ class SettingsModal(ModalScreen[Config | None]):
     @on(RadioSet.Changed, "#default-mode")
     def _on_default_changed(self, event: RadioSet.Changed) -> None:
         mode = self._mode_from_radio_id(event.pressed.id, self._initial.default_mode)
+        self.query_one("#mode-sketch", Static).update(_MODE_SKETCHES[mode])
+        self.query_one("#dispatch-hint", Label).update(_dispatch_hint(mode))
         self.query_one("#alt-preview", Label).update(self._alt_preview_text(mode))
 
     @on(Button.Pressed, "#cancel")
@@ -768,19 +906,41 @@ class SettingsModal(ModalScreen[Config | None]):
 
     @on(Button.Pressed, "#save")
     def _save(self) -> None:
-        self.dismiss(self._collect())
+        self._try_dismiss()
+
+    @on(Input.Submitted, "#claude-args")
+    def _submit_args(self) -> None:
+        self._try_dismiss()
 
     def action_cancel(self) -> None:
         self.dismiss(None)
 
+    def _try_dismiss(self) -> None:
+        """Dismiss with the new config, or stay open showing why the args are invalid."""
+        try:
+            result = self._collect()
+        except ClaudeArgsError as exc:
+            self.query_one("#args-error", Label).update(str(exc))
+            self.query_one("#claude-args", Input).focus()
+            return
+        self.dismiss(result)
+
     def _collect(self) -> Config:
+        from textual.widgets import Checkbox
+
         radio_set = self.query_one("#default-mode", RadioSet)
         pressed = radio_set.pressed_button
         mode = self._mode_from_radio_id(
             pressed.id if pressed is not None else None,
             self._initial.default_mode,
         )
-        return Config(default_mode=mode)
+        typed = parse_claude_args(self.query_one("#claude-args", Input).value)
+        # The checkbox is the single source of truth for bypassing permissions:
+        # drop any equivalent flag typed by hand, then re-add it if it's checked.
+        _, extras = _split_skip_permissions(typed)
+        if self.query_one("#skip-permissions", Checkbox).value:
+            extras.append(_SKIP_PERMISSIONS_FLAG)
+        return replace(self._initial, default_mode=mode, claude_args=extras)
 
     @staticmethod
     def _mode_from_radio_id(radio_id: str | None, fallback: LaunchMode) -> LaunchMode:

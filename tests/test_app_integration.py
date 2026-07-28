@@ -9,6 +9,7 @@ import pytest
 
 from multi_claude import discovery as discovery_module
 from multi_claude.app import ClaudeBrowserApp
+from multi_claude.launcher import LaunchOutcome
 from multi_claude.names import NamesStore
 from tests.conftest import write_session
 
@@ -355,10 +356,14 @@ async def test_add_project_invokes_launcher(synthetic_world: Path, tmp_path: Pat
 
     captured: dict = {}
 
-    def fake_launch(cwd, session_id, *, display_name=None, app=None, mode="auto"):
+    def fake_launch(
+        cwd, session_id, *, display_name=None, app=None, mode="auto", claude_args=None
+    ):
         captured["cwd"] = cwd
         captured["session_id"] = session_id
         captured["mode"] = mode
+        captured["claude_args"] = claude_args
+        return LaunchOutcome("window", "fake-emulator")
 
     with patch("multi_claude.screens.projects.launch_claude", side_effect=fake_launch):
         app = ClaudeBrowserApp()
@@ -421,8 +426,11 @@ async def test_enter_uses_default_mode_and_shift_enter_uses_opposite(
     """Enter → prefs.default_mode; Shift+Enter → alternate_for(default)."""
     captured: list[dict] = []
 
-    def fake_launch(cwd, session_id, *, display_name=None, app=None, mode="auto"):
+    def fake_launch(
+        cwd, session_id, *, display_name=None, app=None, mode="auto", claude_args=None
+    ):
         captured.append({"session_id": session_id, "mode": mode})
+        return LaunchOutcome("window", "fake-emulator")
 
     with patch("multi_claude.screens.sessions.launch_claude", side_effect=fake_launch):
         app = ClaudeBrowserApp()
@@ -481,3 +489,156 @@ async def test_settings_modal_persists_changes(synthetic_world: Path, tmp_path: 
     # And it was persisted to disk under XDG_CONFIG_HOME (set by the fixture).
     persisted = load_config()
     assert persisted.default_mode == "window"
+
+
+async def test_settings_modal_keeps_unrelated_prefs(synthetic_world: Path) -> None:
+    """Regression: saving the launch mode must not reset sorts, preview or colours."""
+    from dataclasses import replace
+
+    from multi_claude.colors import ColorRule
+    from multi_claude.config import SortSpec, load_config
+
+    app = ClaudeBrowserApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        rule = ColorRule(when="branch:hotfix", color="red")
+        app.update_prefs(
+            replace(
+                app.prefs,
+                projects_sort=SortSpec(key="name", descending=False),
+                preview_visible=False,
+                group_worktrees=False,
+                color_rules=[rule],
+            )
+        )
+
+        await pilot.press("s")
+        await pilot.pause()
+
+        from textual.widgets import Button, RadioButton
+
+        from multi_claude.modals import SettingsModal
+
+        assert isinstance(app.screen, SettingsModal)
+        app.screen.query_one("#default-tab", RadioButton).value = True
+        await pilot.pause()
+        app.screen.query_one("#save", Button).press()
+        await pilot.pause()
+
+    persisted = load_config()
+    assert persisted.default_mode == "tab"
+    assert persisted.projects_sort == SortSpec(key="name", descending=False)
+    assert persisted.preview_visible is False
+    assert persisted.group_worktrees is False
+    assert persisted.color_rules == [rule]
+
+
+async def test_settings_modal_stores_claude_args(synthetic_world: Path) -> None:
+    """The checkbox and the free-text field end up in prefs.claude_args."""
+    from multi_claude.config import load_config
+
+    app = ClaudeBrowserApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("s")
+        await pilot.pause()
+
+        from textual.widgets import Button, Checkbox, Input
+
+        from multi_claude.modals import SettingsModal
+
+        assert isinstance(app.screen, SettingsModal)
+        app.screen.query_one("#skip-permissions", Checkbox).value = True
+        app.screen.query_one("#claude-args", Input).value = "--model opus"
+        await pilot.pause()
+        app.screen.query_one("#save", Button).press()
+        await pilot.pause()
+
+    assert app.prefs.claude_args == ["--model", "opus", "--dangerously-skip-permissions"]
+    assert load_config().claude_args == ["--model", "opus", "--dangerously-skip-permissions"]
+
+
+async def test_settings_modal_rejects_reserved_flag(synthetic_world: Path) -> None:
+    """Typing `--resume` keeps the modal open with an error instead of saving."""
+    app = ClaudeBrowserApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("s")
+        await pilot.pause()
+
+        from textual.widgets import Button, Input, Label
+
+        from multi_claude.modals import SettingsModal
+
+        assert isinstance(app.screen, SettingsModal)
+        app.screen.query_one("#claude-args", Input).value = "--resume abc"
+        await pilot.pause()
+        app.screen.query_one("#save", Button).press()
+        await pilot.pause()
+
+        assert isinstance(app.screen, SettingsModal)  # still open
+        error = app.screen.query_one("#args-error", Label)
+        assert "--resume" in str(error.render())
+
+        await pilot.press("escape")
+        await pilot.pause()
+
+    assert app.prefs.claude_args == []
+
+
+async def test_settings_modal_checkbox_reflects_stored_flag(synthetic_world: Path) -> None:
+    """Reopening the modal shows the bypass flag as a checkbox, not as raw text."""
+    from dataclasses import replace
+
+    app = ClaudeBrowserApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.update_prefs(
+            replace(
+                app.prefs,
+                claude_args=["--permission-mode", "bypassPermissions", "--model", "opus"],
+            )
+        )
+        await pilot.press("s")
+        await pilot.pause()
+
+        from textual.widgets import Checkbox, Input
+
+        from multi_claude.modals import SettingsModal
+
+        assert isinstance(app.screen, SettingsModal)
+        assert app.screen.query_one("#skip-permissions", Checkbox).value is True
+        assert app.screen.query_one("#claude-args", Input).value == "--model opus"
+
+
+async def test_launch_passes_claude_args(synthetic_world: Path) -> None:
+    """Configured extras reach launch_claude when a session is resumed."""
+    from dataclasses import replace
+
+    captured: list[dict] = []
+
+    def fake_launch(
+        cwd, session_id, *, display_name=None, app=None, mode="auto", claude_args=None
+    ):
+        captured.append({"claude_args": claude_args})
+        return LaunchOutcome("tab", "fake-emulator")
+
+    with patch("multi_claude.screens.sessions.launch_claude", side_effect=fake_launch):
+        app = ClaudeBrowserApp()
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.update_prefs(replace(app.prefs, claude_args=["--dangerously-skip-permissions"]))
+
+            from textual.widgets import DataTable
+
+            from multi_claude.screens.sessions import SessionsScreen
+
+            app.screen.query_one("#projects", DataTable).action_select_cursor()
+            await pilot.pause()
+            assert isinstance(app.screen, SessionsScreen)
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            app.screen.query_one("#sessions", DataTable).action_select_cursor()
+            await pilot.pause()
+
+    assert captured == [{"claude_args": ["--dangerously-skip-permissions"]}]

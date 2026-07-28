@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -28,7 +29,7 @@ from multi_claude.discovery import Project, scan_projects
 from multi_claude.filtering import FilterQuery, matches_fuzzy, parse_query
 from multi_claude.focus import find_live_session, focus_terminal
 from multi_claude.formatting import format_relative_time, format_size
-from multi_claude.launcher import LauncherError, launch_claude
+from multi_claude.launcher import PLACEMENT_LABELS, LauncherError, launch_claude
 from multi_claude.modals import (
     CleanupModal,
     ColorPickerModal,
@@ -298,15 +299,23 @@ class SessionsScreen(Screen[None]):
                     )
                 return
         try:
-            launch_claude(
+            outcome = launch_claude(
                 self.project.path,
                 session_id,
                 display_name=display_name,
                 app=self.app,
                 mode=mode,
+                claude_args=self._prefs().claude_args,
             )
         except LauncherError as exc:
             self.notify(str(exc), severity="error")
+            return
+        if outcome.fallback_reason is not None:
+            self.notify(
+                f"{PLACEMENT_LABELS.get(outcome.placement, outcome.placement)} "
+                f"({outcome.target}) — {outcome.fallback_reason}",
+                severity="warning",
+            )
 
     def action_toggle_mark(self) -> None:
         session = self._selected_session()
@@ -592,13 +601,7 @@ class SessionsScreen(Screen[None]):
 
     def action_toggle_preview(self) -> None:
         prefs = self._claude_app.prefs
-        new_prefs = Config(
-            default_mode=prefs.default_mode,
-            projects_sort=prefs.projects_sort,
-            sessions_sort=prefs.sessions_sort,
-            preview_visible=not prefs.preview_visible,
-            group_worktrees=prefs.group_worktrees,
-        )
+        new_prefs = replace(prefs, preview_visible=not prefs.preview_visible)
         self._claude_app.update_prefs(new_prefs)
         self._apply_preview_visibility()
         if new_prefs.preview_visible:
@@ -617,15 +620,7 @@ class SessionsScreen(Screen[None]):
     def _apply_color_rules(self, result: list[ColorRule] | None) -> None:
         if result is None:
             return
-        prefs = self._claude_app.prefs
-        new_prefs = Config(
-            default_mode=prefs.default_mode,
-            projects_sort=prefs.projects_sort,
-            sessions_sort=prefs.sessions_sort,
-            preview_visible=prefs.preview_visible,
-            group_worktrees=prefs.group_worktrees,
-            color_rules=result,
-        )
+        new_prefs = replace(self._claude_app.prefs, color_rules=result)
         self._claude_app.update_prefs(new_prefs)
         self._repaint()
         self.notify(f"Reglas guardadas ({len(result)})")
@@ -690,13 +685,7 @@ class SessionsScreen(Screen[None]):
             new_spec = SortSpec(key=key, descending=not spec.descending)
         else:
             new_spec = SortSpec(key=key, descending=True)
-        new_prefs = Config(
-            default_mode=self._claude_app.prefs.default_mode,
-            projects_sort=self._claude_app.prefs.projects_sort,
-            sessions_sort=new_spec,
-            preview_visible=self._claude_app.prefs.preview_visible,
-            group_worktrees=self._claude_app.prefs.group_worktrees,
-        )
+        new_prefs = replace(self._claude_app.prefs, sessions_sort=new_spec)
         self._claude_app.update_prefs(new_prefs)
         self._apply_sort()
         self._repaint()

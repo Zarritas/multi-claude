@@ -10,10 +10,12 @@ import pytest
 
 from multi_claude.launcher import (
     LauncherError,
+    LaunchOutcome,
     _build_claude_argv,
     detect_multiplexer,
     detect_terminal_emulator,
     launch_claude,
+    preview_dispatch,
 )
 
 
@@ -393,7 +395,7 @@ def test_detect_emulator_ghostty_via_env_var(monkeypatch: pytest.MonkeyPatch) ->
         assert emu is not None and emu.id == "ghostty"
 
 
-def test_detect_emulator_vscode_unsupported_raises_in_window_mode(
+def test_detect_emulator_vscode_degrades_to_inline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """VS Code's integrated terminal is detectable but cannot spawn new windows."""
@@ -401,12 +403,23 @@ def test_detect_emulator_vscode_unsupported_raises_in_window_mode(
     _clear_emulator_envs(monkeypatch)
     monkeypatch.setenv("TERM_PROGRAM", "vscode")
 
-    with patch(
-        "multi_claude.launcher.shutil.which",
-        side_effect=lambda cmd: "/usr/bin/claude" if cmd == "claude" else None,
+    calls: list[tuple] = []
+
+    def fake_run(argv, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append((argv, kwargs.get("cwd")))
+
+    with (
+        patch(
+            "multi_claude.launcher.shutil.which",
+            side_effect=lambda cmd: "/usr/bin/claude" if cmd == "claude" else None,
+        ),
+        patch("multi_claude.launcher.subprocess.run", side_effect=fake_run),
     ):
-        with pytest.raises(LauncherError, match="vscode"):
-            launch_claude(Path("/work/v"), "sid-v", mode="window")
+        outcome = launch_claude(Path("/work/v"), "sid-v", mode="window")
+
+    assert calls == [(["claude", "--resume", "sid-v"], _p("/work/v"))]
+    assert outcome.placement == "suspend"
+    assert outcome.fallback_reason is not None and "vscode" in outcome.fallback_reason
 
 
 def test_launch_claude_window_mode_uses_ghostty(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -441,8 +454,8 @@ def test_launch_claude_window_mode_uses_ghostty(monkeypatch: pytest.MonkeyPatch)
     ]
 
 
-def test_launch_claude_auto_falls_through_to_window(monkeypatch: pytest.MonkeyPatch) -> None:
-    """No multiplexer + emulator detected → AUTO opens a window."""
+def test_launch_claude_auto_falls_through_to_tab(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No multiplexer + emulator with tabs → AUTO opens a tab, not a window."""
     _clear_mux_envs(monkeypatch)
     _clear_emulator_envs(monkeypatch)
     monkeypatch.setenv("WEZTERM_EXECUTABLE", "/usr/bin/wezterm")
@@ -450,7 +463,30 @@ def test_launch_claude_auto_falls_through_to_window(monkeypatch: pytest.MonkeyPa
     def fake_which(cmd: str) -> str | None:
         return f"/usr/bin/{cmd}" if cmd in ("claude", "wezterm") else None
 
-    popen_calls: list[tuple] = []
+    runner = _MuxRun()
+
+    with (
+        patch("multi_claude.launcher.shutil.which", side_effect=fake_which),
+        patch("multi_claude.launcher.subprocess.run", side_effect=runner),
+    ):
+        outcome = launch_claude(Path("/work/w"), None, mode="auto")
+
+    assert runner.calls == [["wezterm", "cli", "spawn", "--cwd", _p("/work/w"), "--", "claude"]]
+    assert outcome == LaunchOutcome("tab", "wezterm")
+
+
+def test_launch_claude_auto_falls_through_to_window_without_tabs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Emulator without CLI tabs (alacritty) → AUTO ends up opening a window."""
+    _clear_mux_envs(monkeypatch)
+    _clear_emulator_envs(monkeypatch)
+    monkeypatch.setenv("ALACRITTY_WINDOW_ID", "9")
+
+    def fake_which(cmd: str) -> str | None:
+        return f"/usr/bin/{cmd}" if cmd in ("claude", "alacritty") else None
+
+    popen_calls: list[list[str]] = []
 
     class FakePopen:
         def __init__(self, argv, **kwargs):  # type: ignore[no-untyped-def]
@@ -460,15 +496,17 @@ def test_launch_claude_auto_falls_through_to_window(monkeypatch: pytest.MonkeyPa
         patch("multi_claude.launcher.shutil.which", side_effect=fake_which),
         patch("multi_claude.launcher.subprocess.Popen", FakePopen),
     ):
-        launch_claude(Path("/work/w"), None, mode="auto")
+        outcome = launch_claude(Path("/work/a"), None, mode="tab")
 
-    assert popen_calls == [["wezterm", "start", "--cwd", _p("/work/w"), "--", "claude"]]
+    assert popen_calls == [["alacritty", "--working-directory", _p("/work/a"), "-e", "claude"]]
+    assert outcome.placement == "window"
+    assert outcome.fallback_reason is not None and "alacritty" in outcome.fallback_reason
 
 
 def test_launch_claude_window_mode_uses_windows_terminal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Inside Windows Terminal (WT_SESSION set), window mode spawns a new tab via wt.exe."""
+    """Inside Windows Terminal, window mode targets a brand new window (`-w -1`)."""
     _clear_mux_envs(monkeypatch)
     _clear_emulator_envs(monkeypatch)
     monkeypatch.setenv("WT_SESSION", "abc-123")
@@ -488,12 +526,12 @@ def test_launch_claude_window_mode_uses_windows_terminal(
     ):
         launch_claude(Path("/work/wt"), "sid-wt", mode="window")
 
-    assert popen_calls == [
-        ["wt.exe", "new-tab", "-d", _p("/work/wt"), "--", "claude", "--resume", "sid-wt"]
-    ]
+    expected = ["wt.exe", "-w", "-1", "new-tab", "-d", _p("/work/wt")]
+    expected += ["--", "claude", "--resume", "sid-wt"]
+    assert popen_calls == [expected]
 
 
-def test_detect_emulator_conemu_unsupported_raises_in_window_mode(
+def test_detect_emulator_conemu_degrades_to_inline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """ConEmu is detectable but not yet supported for spawning new windows."""
@@ -501,12 +539,23 @@ def test_detect_emulator_conemu_unsupported_raises_in_window_mode(
     _clear_emulator_envs(monkeypatch)
     monkeypatch.setenv("ConEmuPID", "4321")
 
-    with patch(
-        "multi_claude.launcher.shutil.which",
-        side_effect=lambda cmd: "/fake/claude" if cmd == "claude" else None,
+    calls: list[tuple] = []
+
+    def fake_run(argv, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append((argv, kwargs.get("cwd")))
+
+    with (
+        patch(
+            "multi_claude.launcher.shutil.which",
+            side_effect=lambda cmd: "/fake/claude" if cmd == "claude" else None,
+        ),
+        patch("multi_claude.launcher.subprocess.run", side_effect=fake_run),
     ):
-        with pytest.raises(LauncherError, match="conemu"):
-            launch_claude(Path("/work/c"), "sid-c", mode="window")
+        outcome = launch_claude(Path("/work/c"), "sid-c", mode="window")
+
+    assert calls == [(["claude", "--resume", "sid-c"], _p("/work/c"))]
+    assert outcome.placement == "suspend"
+    assert outcome.fallback_reason is not None and "conemu" in outcome.fallback_reason
 
 
 def test_launch_claude_window_mode_uses_apple_terminal(
@@ -616,3 +665,291 @@ def test_iterm_applescript_escapes_embedded_quotes(monkeypatch: pytest.MonkeyPat
     # AppleScript-level escapes — backslash escaped as \\, double quote as \"
     assert '\\"hi\\"' in write_text_line
     assert '\\\\n' in write_text_line
+
+
+# --------------------------------------------------------------------------- #
+# Tab placement                                                                #
+# --------------------------------------------------------------------------- #
+
+
+def test_tab_mode_uses_gnome_terminal_tab(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The reported case: GNOME Terminal must reuse the current window."""
+    _clear_mux_envs(monkeypatch)
+    _clear_emulator_envs(monkeypatch)
+    monkeypatch.setenv("GNOME_TERMINAL_SCREEN", "/org/gnome/Terminal/screen/x")
+
+    def fake_which(cmd: str) -> str | None:
+        return f"/usr/bin/{cmd}" if cmd in ("claude", "gnome-terminal") else None
+
+    popen_calls: list[list[str]] = []
+
+    class FakePopen:
+        def __init__(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+            popen_calls.append(argv)
+
+    with (
+        patch("multi_claude.launcher.shutil.which", side_effect=fake_which),
+        patch("multi_claude.launcher.subprocess.Popen", FakePopen),
+    ):
+        outcome = launch_claude(Path("/work/g"), "sid-g", mode="tab")
+
+    assert popen_calls == [
+        [
+            "gnome-terminal",
+            "--tab",
+            f"--working-directory={_p('/work/g')}",
+            "--",
+            "claude",
+            "--resume",
+            "sid-g",
+        ]
+    ]
+    assert outcome == LaunchOutcome("tab", "gnome-terminal")
+
+
+def test_window_mode_uses_gnome_terminal_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`window` must be explicit about wanting a window, not the server's default."""
+    _clear_mux_envs(monkeypatch)
+    _clear_emulator_envs(monkeypatch)
+    monkeypatch.setenv("GNOME_TERMINAL_SCREEN", "/org/gnome/Terminal/screen/x")
+
+    def fake_which(cmd: str) -> str | None:
+        return f"/usr/bin/{cmd}" if cmd in ("claude", "gnome-terminal") else None
+
+    popen_calls: list[list[str]] = []
+
+    class FakePopen:
+        def __init__(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+            popen_calls.append(argv)
+
+    with (
+        patch("multi_claude.launcher.shutil.which", side_effect=fake_which),
+        patch("multi_claude.launcher.subprocess.Popen", FakePopen),
+    ):
+        launch_claude(Path("/work/g"), None, mode="window")
+
+    assert popen_calls == [
+        ["gnome-terminal", "--window", f"--working-directory={_p('/work/g')}", "--", "claude"]
+    ]
+
+
+def test_tab_mode_uses_konsole_new_tab(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clear_mux_envs(monkeypatch)
+    _clear_emulator_envs(monkeypatch)
+    monkeypatch.setenv("KONSOLE_VERSION", "230800")
+
+    def fake_which(cmd: str) -> str | None:
+        return f"/usr/bin/{cmd}" if cmd in ("claude", "konsole") else None
+
+    popen_calls: list[list[str]] = []
+
+    class FakePopen:
+        def __init__(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+            popen_calls.append(argv)
+
+    with (
+        patch("multi_claude.launcher.shutil.which", side_effect=fake_which),
+        patch("multi_claude.launcher.subprocess.Popen", FakePopen),
+    ):
+        launch_claude(Path("/work/k"), None, mode="tab")
+
+    assert popen_calls == [
+        ["konsole", "--new-tab", "--workdir", _p("/work/k"), "-e", "claude"]
+    ]
+
+
+def test_tab_mode_kitty_without_remote_control_falls_back_to_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`kitty @` exits non-zero when remote control is off → open a window instead."""
+    _clear_mux_envs(monkeypatch)
+    _clear_emulator_envs(monkeypatch)
+    monkeypatch.setenv("KITTY_PID", "1234")
+
+    def fake_which(cmd: str) -> str | None:
+        return f"/usr/bin/{cmd}" if cmd in ("claude", "kitty") else None
+
+    def failing_run(argv, **kwargs):  # type: ignore[no-untyped-def]
+        class _Result:
+            returncode = 1
+            stderr = "Remote control is disabled\n"
+
+        return _Result()
+
+    popen_calls: list[list[str]] = []
+
+    class FakePopen:
+        def __init__(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+            popen_calls.append(argv)
+
+    with (
+        patch("multi_claude.launcher.shutil.which", side_effect=fake_which),
+        patch("multi_claude.launcher.subprocess.run", side_effect=failing_run),
+        patch("multi_claude.launcher.subprocess.Popen", FakePopen),
+    ):
+        outcome = launch_claude(Path("/work/k"), None, mode="tab")
+
+    assert popen_calls == [["kitty", "--directory", _p("/work/k"), "claude"]]
+    assert outcome.placement == "window"
+    assert outcome.fallback_reason is not None
+    assert "Remote control is disabled" in outcome.fallback_reason
+
+
+def test_tab_mode_uses_tmux_new_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TMUX", "x")
+    monkeypatch.delenv("ZELLIJ", raising=False)
+    monkeypatch.delenv("TERMINATOR_UUID", raising=False)
+
+    runner = _MuxRun()
+
+    with (
+        patch("multi_claude.launcher.shutil.which", side_effect=lambda c: f"/usr/bin/{c}"),
+        patch("multi_claude.launcher.subprocess.run", side_effect=runner),
+    ):
+        outcome = launch_claude(Path("/work/t"), "sid-t", mode="tab")
+
+    assert runner.calls == [
+        ["tmux", "new-window", "-c", _p("/work/t"), "claude", "--resume", "sid-t"]
+    ]
+    assert outcome == LaunchOutcome("tab", "tmux")
+
+
+def test_tab_mode_zellij_degrades_to_pane(monkeypatch: pytest.MonkeyPatch) -> None:
+    """zellij can't run a command in a new tab, so it reports the degradation."""
+    monkeypatch.delenv("TMUX", raising=False)
+    monkeypatch.setenv("ZELLIJ", "x")
+    monkeypatch.delenv("TERMINATOR_UUID", raising=False)
+
+    runner = _MuxRun()
+
+    with (
+        patch("multi_claude.launcher.shutil.which", side_effect=lambda c: f"/usr/bin/{c}"),
+        patch("multi_claude.launcher.subprocess.run", side_effect=runner),
+    ):
+        outcome = launch_claude(Path("/work/z"), None, mode="tab")
+
+    assert runner.calls == [
+        ["zellij", "action", "new-pane", "--cwd", _p("/work/z"), "--", "claude"]
+    ]
+    assert outcome.placement == "split"
+    assert outcome.fallback_reason is not None and "zellij" in outcome.fallback_reason
+
+
+def test_split_mode_without_multiplexer_reports_and_degrades(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_mux_envs(monkeypatch)
+    _clear_emulator_envs(monkeypatch)
+    monkeypatch.setenv("GNOME_TERMINAL_SCREEN", "/screen/x")
+
+    def fake_which(cmd: str) -> str | None:
+        return f"/usr/bin/{cmd}" if cmd in ("claude", "gnome-terminal") else None
+
+    class FakePopen:
+        def __init__(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+            pass
+
+    with (
+        patch("multi_claude.launcher.shutil.which", side_effect=fake_which),
+        patch("multi_claude.launcher.subprocess.Popen", FakePopen),
+    ):
+        outcome = launch_claude(Path("/work/s"), None, mode="split")
+
+    assert outcome.placement == "tab"
+    assert outcome.fallback_reason == "sin multiplexer activo"
+
+
+# --------------------------------------------------------------------------- #
+# Extra claude args                                                            #
+# --------------------------------------------------------------------------- #
+
+
+def test_build_argv_prepends_extra_args() -> None:
+    argv = _build_claude_argv("abc", "X", ["--dangerously-skip-permissions", "--model", "opus"])
+    assert argv == [
+        "claude",
+        "--dangerously-skip-permissions",
+        "--model",
+        "opus",
+        "--resume",
+        "abc",
+        "-n",
+        "X",
+    ]
+
+
+def test_extra_args_reach_the_spawned_command(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TMUX", "x")
+    monkeypatch.delenv("ZELLIJ", raising=False)
+    monkeypatch.delenv("TERMINATOR_UUID", raising=False)
+
+    runner = _MuxRun()
+
+    with (
+        patch("multi_claude.launcher.shutil.which", side_effect=lambda c: f"/usr/bin/{c}"),
+        patch("multi_claude.launcher.subprocess.run", side_effect=runner),
+    ):
+        launch_claude(
+            Path("/work/x"),
+            "sid",
+            mode="split",
+            claude_args=["--dangerously-skip-permissions"],
+        )
+
+    assert runner.calls == [
+        [
+            "tmux",
+            "split-window",
+            "-h",
+            "-c",
+            _p("/work/x"),
+            "claude",
+            "--dangerously-skip-permissions",
+            "--resume",
+            "sid",
+        ]
+    ]
+
+
+# --------------------------------------------------------------------------- #
+# Dry-run preview                                                              #
+# --------------------------------------------------------------------------- #
+
+
+def test_preview_dispatch_matches_tab_launch(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clear_mux_envs(monkeypatch)
+    _clear_emulator_envs(monkeypatch)
+    monkeypatch.setenv("GNOME_TERMINAL_SCREEN", "/screen/x")
+
+    with patch(
+        "multi_claude.launcher.shutil.which",
+        side_effect=lambda c: f"/usr/bin/{c}" if c == "gnome-terminal" else None,
+    ):
+        assert preview_dispatch("tab") == LaunchOutcome("tab", "gnome-terminal")
+        assert preview_dispatch("auto") == LaunchOutcome("tab", "gnome-terminal")
+        assert preview_dispatch("window") == LaunchOutcome("window", "gnome-terminal")
+
+
+def test_preview_dispatch_reports_missing_tab_support(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clear_mux_envs(monkeypatch)
+    _clear_emulator_envs(monkeypatch)
+    monkeypatch.setenv("TERM_PROGRAM", "ghostty")
+
+    with patch(
+        "multi_claude.launcher.shutil.which",
+        side_effect=lambda c: f"/usr/bin/{c}" if c == "ghostty" else None,
+    ):
+        outcome = preview_dispatch("tab")
+
+    assert outcome.placement == "window"
+    assert outcome.fallback_reason is not None and "ghostty" in outcome.fallback_reason
+
+
+def test_preview_dispatch_suspends_without_anything(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clear_mux_envs(monkeypatch)
+    _clear_emulator_envs(monkeypatch)
+
+    with patch("multi_claude.launcher.shutil.which", return_value=None):
+        assert preview_dispatch("auto") == LaunchOutcome(
+            "suspend", "inline", "no se detectó ningún emulador"
+        )

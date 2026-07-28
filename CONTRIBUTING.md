@@ -48,7 +48,7 @@ A wheel installed from the tagged commit will report `0.2.0`. An install from a 
 - `src/multi_claude/app.py` — root Textual app, owns prefs and the names store.
 - `src/multi_claude/discovery.py` — scans `~/.claude/projects/`, resolves real cwds.
 - `src/multi_claude/session.py` — parses headers from `.jsonl` files cheaply.
-- `src/multi_claude/launcher.py` — dispatches `claude --resume` into a multiplexer / new window / suspended TUI.
+- `src/multi_claude/launcher.py` — dispatches `claude --resume` into a multiplexer pane, a tab of the current window, a new emulator window, or the suspended TUI. Adding an emulator = one entry in `EMULATORS`.
 - `src/multi_claude/index.py` — SQLite cache + FTS5 search.
 - `src/multi_claude/screens/` — Textual screens (projects, sessions, search, worktrees).
 - `src/multi_claude/widgets/` — reusable widgets (preview panel).

@@ -7,7 +7,8 @@ Este documento extiende el README con detalles que no caben en una visión gener
 | Tema                          | Decisión                                                                 |
 |-------------------------------|--------------------------------------------------------------------------|
 | Stack                         | Python 3.10+ con Textual                                                 |
-| Lanzamiento de `claude`       | Modo configurable: auto (mux→window→suspend) / window / suspend           |
+| Lanzamiento de `claude`       | Placement configurable: auto / split / tab / window / suspend, degradando en cadena |
+| Flags de `claude`             | `claude_args` del usuario delante de las que gestiona la TUI; las reservadas se rechazan |
 | Metadatos por sesión          | primer prompt, fecha, branch, tags, nº mensajes, tamaño                  |
 | Búsqueda                      | índice SQLite + FTS5 como caché reconstruible, nunca fuente de verdad    |
 | Huérfanos                     | visibles, estilo dim, acciones bloqueadas (salvo merge y borrado)        |
@@ -59,23 +60,50 @@ Si la sesión tenía `--name`, ese display name gana al primer prompt en la colu
 
 ## Launcher: modos y matriz
 
-`launch_claude(cwd, session_id, *, mode)` acepta tres modos:
+`launch_claude(cwd, session_id, *, mode, claude_args)` separa el **dónde** (placement) del **cómo**.
+Cada modo degrada al siguiente eslabón cuando su destino no existe:
 
-| Modo       | Cadena de despacho                                                                           |
-|------------|----------------------------------------------------------------------------------------------|
-| `auto`     | tmux split → zellij split → terminator tab → ventana nueva del emulador → suspend            |
-| `window`   | ventana nueva del emulador → suspend                                                         |
-| `suspend`  | siempre `app.suspend()` + `subprocess.run([...], cwd=cwd)`                                   |
+| Modo       | Cadena de despacho                                                        |
+|------------|---------------------------------------------------------------------------|
+| `auto`     | panel del multiplexer → pestaña → ventana nueva → suspend                 |
+| `split`    | panel del multiplexer → pestaña → ventana nueva → suspend                 |
+| `tab`      | pestaña de la ventana actual → ventana nueva → suspend                    |
+| `window`   | ventana nueva del emulador → suspend                                      |
+| `suspend`  | siempre `app.suspend()` + `subprocess.run([...], cwd=cwd)`                |
 
-**Despacho de multiplexer** (modo `auto`):
+Devuelve un `LaunchOutcome(placement, target, fallback_reason)`. `fallback_reason` no es `None`
+cuando el destino pedido no estaba disponible; las pantallas lo convierten en una notificación
+`warning` para que la degradación nunca sea silenciosa. `preview_dispatch(mode)` recorre la misma
+cadena **sin lanzar nada**, y es lo que alimenta la línea "Aquí y ahora" del modal de ajustes.
 
-| Entorno                 | Acción                                                                            |
-|-------------------------|-----------------------------------------------------------------------------------|
-| `$TMUX` set             | `tmux split-window -h -c <cwd> claude [--resume <id>]`                            |
-| `$ZELLIJ` set           | `zellij action new-pane --cwd <cwd> -- claude [--resume <id>]`                    |
-| `$TERMINATOR_UUID` set  | `terminator --new-tab --working-directory=<cwd> -x claude [--resume <id>]`        |
+**Despacho de multiplexer** (tiene prioridad: tmux/zellij/terminator anidan dentro del emulador):
 
-**Despacho de ventana** (modo `window`, o `auto` cuando no hay multiplexer).
+| Entorno                 | `split`                                                | `tab`                                    |
+|-------------------------|--------------------------------------------------------|-------------------------------------------|
+| `$TMUX` set             | `tmux split-window -h -c <cwd> claude [...]`           | `tmux new-window -c <cwd> claude [...]`   |
+| `$ZELLIJ` set           | `zellij action new-pane --cwd <cwd> -- claude [...]`   | igual que `split`, con motivo declarado ¹ |
+| `$TERMINATOR_UUID` set  | `terminator --new-tab --working-directory=<cwd> -x`    | idéntico (Terminator solo hace pestañas)  |
+
+¹ `zellij action new-tab` solo acepta layout, no un comando, así que una petición de pestaña
+aterriza en un panel y `fallback_reason` lo explica.
+
+**Despacho de pestaña** (`Emulator.tab_argv`). `Emulator.tab_rpc` marca los clientes de control
+remoto (`kitty @`, `wezterm cli`): salen inmediatamente y devuelven código ≠ 0 cuando la función
+está deshabilitada, así que se ejecutan con `subprocess.run` y su fallo degrada a ventana. El resto
+se lanzan detached como las ventanas.
+
+| Emulador          | Pestaña                                                  |
+|-------------------|-----------------------------------------------------------|
+| kitty             | `kitty @ launch --type=tab --cwd <cwd> -- claude ...` (rpc) |
+| WezTerm           | `wezterm cli spawn --cwd <cwd> -- claude ...` (rpc)        |
+| GNOME Terminal    | `gnome-terminal --tab --working-directory=<cwd> -- ...`    |
+| Konsole           | `konsole --new-tab --workdir <cwd> -e claude ...`          |
+| Terminator        | `terminator --new-tab --working-directory=<cwd> -x ...`    |
+| Windows Terminal  | `wt.exe -w 0 new-tab -d <cwd> -- claude ...`               |
+| iTerm2            | `osascript` → `create tab with default profile`            |
+| Ghostty, Alacritty, foot, Apple Terminal | `tab_argv=None` → degradan a ventana |
+
+**Despacho de ventana** (modo `window`, o eslabón siguiente cuando no hay pestaña).
 
 Detección en este orden:
 
@@ -90,7 +118,7 @@ Detección en este orden:
 | Ghostty           | `$TERM_PROGRAM=ghostty` o `$GHOSTTY_RESOURCES_DIR`  | `ghostty --working-directory=<cwd> -e claude ...`        |
 | Alacritty         | `$ALACRITTY_WINDOW_ID` / `$ALACRITTY_LOG`           | `alacritty --working-directory <cwd> -e claude ...`      |
 | Konsole           | `$KONSOLE_VERSION`                                  | `konsole --workdir <cwd> -e claude ...`                  |
-| GNOME Terminal    | `$GNOME_TERMINAL_SCREEN`                            | `gnome-terminal --working-directory=<cwd> -- claude ...` |
+| GNOME Terminal    | `$GNOME_TERMINAL_SCREEN`                            | `gnome-terminal --window --working-directory=<cwd> -- claude ...` |
 | foot              | `$FOOT_VERSION`                                     | `foot --working-directory=<cwd> claude ...`              |
 | Terminator        | `$TERMINATOR_UUID`                                  | `terminator --working-directory=<cwd> -x claude ...`     |
 | x-terminal-emulator / xterm | (fallback genérico)                       | `<term> -e sh -c "cd <cwd> && exec claude ..."`          |
@@ -103,9 +131,11 @@ La ventana se lanza con `subprocess.Popen(..., start_new_session=True, stdin/out
 |-----------------------|-----------------------------------------------------------------------------|
 | `claude` no en PATH   | `LauncherError("claude no encontrado en PATH")` y `self.notify(...)`        |
 | Env var set, binario ausente | se ignora esa opción y se cae al siguiente eslabón                   |
-| `mode="window"` sin emulador detectable | fallback a `suspend`                                      |
+| Multiplexer presente que falla | `LauncherError` con su stderr (no se degrada: algo está roto)      |
+| Sin emulador detectable | fallback a `suspend` con `fallback_reason`                                |
+| Emulador detectado sin CLI (VS Code, Warp, Tabby, ConEmu) | fallback a `suspend` con el motivo        |
 
-Prioridad dentro de `auto`: `tmux` > `zellij` > `terminator-tab` > `window` > `suspend`. tmux/zellij/Terminator anidan unos dentro de otros, así que respetar la jerarquía mantiene el nuevo pane lo más cerca posible del pane actual del usuario.
+Prioridad dentro de `auto`: `tmux` > `zellij` > `terminator` > pestaña del emulador > ventana > `suspend`. tmux/zellij/Terminator anidan unos dentro de otros, así que respetar la jerarquía mantiene la sesión nueva lo más cerca posible de donde está el usuario.
 
 ## Configuración persistente
 
@@ -113,7 +143,8 @@ Prioridad dentro de `auto`: `tmux` > `zellij` > `terminator-tab` > `window` > `s
 
 ```json
 {
-  "default_mode": "auto"
+  "default_mode": "auto",
+  "claude_args": ["--dangerously-skip-permissions"]
 }
 ```
 
@@ -123,12 +154,15 @@ Prioridad dentro de `auto`: `tmux` > `zellij` > `terminator-tab` > `window` > `s
   | Default   | Shift+Enter |
   |-----------|-------------|
   | `auto`    | `suspend`   |
+  | `split`   | `window`    |
+  | `tab`     | `window`    |
   | `window`  | `suspend`   |
   | `suspend` | `window`    |
 
-  Diseño: si el default ya evita suspender la TUI, el alternativo fuerza suspend; si el default suspende, el alternativo abre ventana nueva. No hay configuración independiente del alternativo (regla, no preferencia).
-- Modos válidos: `auto`, `window`, `suspend`. Cualquier otro valor cae al default seguro.
-- El modal `SettingsModal` (atajo `s`) edita `default_mode` y muestra en vivo cuál será el alternativo. Persiste vía `app.update_prefs()`.
+  Diseño: si el default ya evita suspender la TUI, el alternativo fuerza suspend o ventana aparte; si el default suspende, el alternativo abre ventana nueva. No hay configuración independiente del alternativo (regla, no preferencia).
+- Modos válidos: `auto`, `split`, `tab`, `window`, `suspend`. Cualquier otro valor cae al default seguro; los ficheros con los tres modos antiguos siguen cargando sin migración.
+- `claude_args` son flags extra que se anteponen a `--resume`/`-n` en cada lanzamiento. Se guardan como lista, pero un `config.json` editado a mano puede traer un string: `parse_claude_args` lo trocea con `shlex`. Las flags de `RESERVED_CLAUDE_FLAGS` (`--resume`, `-c`, `-n`, `-p`, `--bg`, `--from-pr`) se rechazan porque colisionan con la sesión que la TUI está reanudando.
+- El modal `SettingsModal` (atajo `s`) edita `default_mode` y `claude_args`, dibuja un esquema ASCII del modo elegido, muestra qué haría ese modo en la terminal actual (`preview_dispatch`) y qué hará Shift+Enter. Devuelve `dataclasses.replace(initial, ...)` — nunca un `Config` nuevo — para no pisar el resto de preferencias.
 - Claves legacy (`alternate_mode`) en `config.json` se ignoran al cargar — forward-compat sin romper instalaciones existentes.
 
 ## Layout Textual
@@ -158,12 +192,11 @@ ClaudeBrowserApp
 7. Manejo de huérfanos (estilos + bloqueo de actions).
 8. Pruebas end-to-end manuales con `uv run multi-claude`.
 
-## Lo que queda fuera (v2+)
+## Lo que queda fuera
 
-- Preview de la sesión seleccionada (panel a la derecha con últimos mensajes).
-- Búsqueda full-text sobre el contenido de los jsonl.
-- Borrar / renombrar sesiones.
-- Fork de sesión (`claude --resume <id> --fork-session`).
-- Filtrado por branch o por fecha.
-- Agrupación de worktrees bajo su repo raíz.
-- Reconciliación de proyectos movidos vía remote URL del `.git`.
+- Fork de sesión (`claude --resume <id> --fork-session`) como acción propia — de momento se puede
+  conseguir metiendo `--fork-session` en `claude_args`, pero afectaría a todos los lanzamientos.
+- Reconciliación automática de proyectos movidos vía remote URL del `.git` (hoy: merge manual con `m`).
+- `claude_args` por proyecto: la configuración es global, no por proyecto ni por sesión.
+- Pestañas en Ghostty, Alacritty, foot y Terminal.app: sus CLIs no lo permiten (ver la matriz de
+  despacho más arriba). Si Ghostty acaba exponiendo `+new-tab`, es una entrada más en `EMULATORS`.

@@ -9,11 +9,13 @@ from pathlib import Path
 import pytest
 
 from multi_claude.config import (
+    ClaudeArgsError,
     Config,
     SortSpec,
     alternate_for,
     config_path,
     load_config,
+    parse_claude_args,
     save_config,
 )
 
@@ -138,5 +140,84 @@ def test_save_then_load_round_trip_with_sort(tmp_path: Path) -> None:
         preview_visible=False,
         group_worktrees=False,
     )
+    save_config(cfg, p)
+    assert load_config(p) == cfg
+
+
+# --------------------------------------------------------------------------- #
+# Launch modes                                                                 #
+# --------------------------------------------------------------------------- #
+
+
+def test_alternate_for_covers_every_mode() -> None:
+    assert alternate_for("split") == "window"
+    assert alternate_for("tab") == "window"
+
+
+def test_load_accepts_new_placement_modes(tmp_path: Path) -> None:
+    p = tmp_path / "tab.json"
+    p.write_text(json.dumps({"default_mode": "tab"}), encoding="utf-8")
+    assert load_config(p).default_mode == "tab"
+
+
+# --------------------------------------------------------------------------- #
+# Extra claude args                                                            #
+# --------------------------------------------------------------------------- #
+
+
+def test_parse_claude_args_splits_shell_style() -> None:
+    assert parse_claude_args("  --model opus --append-system-prompt 'be brief' ") == [
+        "--model",
+        "opus",
+        "--append-system-prompt",
+        "be brief",
+    ]
+
+
+def test_parse_claude_args_empty_is_empty_list() -> None:
+    assert parse_claude_args("") == []
+
+
+def test_parse_claude_args_rejects_reserved_flags() -> None:
+    with pytest.raises(ClaudeArgsError, match="--resume"):
+        parse_claude_args("--resume abc")
+    with pytest.raises(ClaudeArgsError, match="-n"):
+        parse_claude_args("--model opus -n mine")
+
+
+def test_parse_claude_args_rejects_unbalanced_quotes() -> None:
+    with pytest.raises(ClaudeArgsError):
+        parse_claude_args("--append-system-prompt 'unterminated")
+
+
+def test_load_coerces_claude_args_from_string(tmp_path: Path) -> None:
+    """A hand-edited config may hold a plain string instead of a list."""
+    p = tmp_path / "args.json"
+    p.write_text(
+        json.dumps({"claude_args": "--dangerously-skip-permissions --model opus"}),
+        encoding="utf-8",
+    )
+    assert load_config(p).claude_args == ["--dangerously-skip-permissions", "--model", "opus"]
+
+
+def test_load_drops_reserved_flags_from_claude_args(tmp_path: Path) -> None:
+    p = tmp_path / "reserved.json"
+    p.write_text(
+        json.dumps({"claude_args": ["--resume", "abc", "--model", "opus"]}),
+        encoding="utf-8",
+    )
+    # `--resume` is dropped; its value is left alone (it isn't a flag we own).
+    assert load_config(p).claude_args == ["abc", "--model", "opus"]
+
+
+def test_load_ignores_non_list_claude_args(tmp_path: Path) -> None:
+    p = tmp_path / "weird.json"
+    p.write_text(json.dumps({"claude_args": {"nope": 1}}), encoding="utf-8")
+    assert load_config(p).claude_args == []
+
+
+def test_save_then_load_round_trip_with_claude_args(tmp_path: Path) -> None:
+    p = tmp_path / "rt-args.json"
+    cfg = Config(default_mode="tab", claude_args=["--dangerously-skip-permissions"])
     save_config(cfg, p)
     assert load_config(p) == cfg

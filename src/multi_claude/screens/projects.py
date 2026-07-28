@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -27,7 +28,7 @@ from multi_claude.discovery import (
 )
 from multi_claude.filtering import FilterQuery, matches_fuzzy, parse_query
 from multi_claude.formatting import format_relative_time
-from multi_claude.launcher import LauncherError, launch_claude
+from multi_claude.launcher import PLACEMENT_LABELS, LauncherError, launch_claude
 from multi_claude.modals import (
     AddProjectModal,
     AssignFolderModal,
@@ -267,16 +268,24 @@ class ProjectsScreen(Screen[None]):
     def _apply_add_project(self, path: Path | None) -> None:
         if path is None:
             return
+        prefs = self._claude_app.prefs
         try:
-            launch_claude(
+            outcome = launch_claude(
                 path,
                 None,
                 app=self.app,
-                mode=self._claude_app.prefs.default_mode,
+                mode=prefs.default_mode,
+                claude_args=prefs.claude_args,
             )
         except LauncherError as exc:
             self.notify(str(exc), severity="error")
             return
+        if outcome.fallback_reason is not None:
+            self.notify(
+                f"{PLACEMENT_LABELS.get(outcome.placement, outcome.placement)} "
+                f"({outcome.target}) — {outcome.fallback_reason}",
+                severity="warning",
+            )
         self.notify(f"Claude lanzado en {path}. Pulsa `r` para refrescar.")
 
     def action_settings(self) -> None:
@@ -374,13 +383,7 @@ class ProjectsScreen(Screen[None]):
             new_spec = SortSpec(key=key, descending=not spec.descending)
         else:
             new_spec = SortSpec(key=key, descending=True)
-        new_prefs = Config(
-            default_mode=self._claude_app.prefs.default_mode,
-            projects_sort=new_spec,
-            sessions_sort=self._claude_app.prefs.sessions_sort,
-            preview_visible=self._claude_app.prefs.preview_visible,
-            group_worktrees=self._claude_app.prefs.group_worktrees,
-        )
+        new_prefs = replace(self._claude_app.prefs, projects_sort=new_spec)
         self._claude_app.update_prefs(new_prefs)
         self._apply_sort()
         self._repaint()
@@ -392,13 +395,7 @@ class ProjectsScreen(Screen[None]):
 
     def action_toggle_groups(self) -> None:
         prefs = self._claude_app.prefs
-        new_prefs = Config(
-            default_mode=prefs.default_mode,
-            projects_sort=prefs.projects_sort,
-            sessions_sort=prefs.sessions_sort,
-            preview_visible=prefs.preview_visible,
-            group_worktrees=not prefs.group_worktrees,
-        )
+        new_prefs = replace(prefs, group_worktrees=not prefs.group_worktrees)
         self._claude_app.update_prefs(new_prefs)
         self._apply_sort()
         self._repaint()
@@ -419,15 +416,7 @@ class ProjectsScreen(Screen[None]):
     def _apply_color_rules(self, result: list[ColorRule] | None) -> None:
         if result is None:
             return
-        prefs = self._claude_app.prefs
-        new_prefs = Config(
-            default_mode=prefs.default_mode,
-            projects_sort=prefs.projects_sort,
-            sessions_sort=prefs.sessions_sort,
-            preview_visible=prefs.preview_visible,
-            group_worktrees=prefs.group_worktrees,
-            color_rules=result,
-        )
+        new_prefs = replace(self._claude_app.prefs, color_rules=result)
         self._claude_app.update_prefs(new_prefs)
         self.notify(f"Reglas guardadas ({len(result)})")
 

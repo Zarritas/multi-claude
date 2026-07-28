@@ -83,8 +83,8 @@ Atajos:
 - Si la sesión tiene un nombre puesto con `e` (o con el `/rename` de Claude), ese nombre sustituye al primer prompt en la columna **Prompt**.
 
 Atajos:
-- `Enter` — reanudar esta sesión con el **modo de lanzamiento predeterminado**.
-- `Shift+Enter` — reanudar esta sesión con el **modo alternativo**.
+- `Enter` — reanudar esta sesión con el **modo de lanzamiento predeterminado** (por defecto `auto`: panel del multiplexer, o pestaña de la ventana actual si no hay).
+- `Shift+Enter` — reanudar esta sesión con el **modo alternativo**, derivado del predeterminado (ver [Ajustes](#ajustes-s)).
 
 > **Sesiones ya abiertas**: si la sesión ya está corriendo en otra terminal (registrada como viva en `~/.claude/sessions/`), `Enter`/`Shift+Enter` **no abren un duplicado** — multi-claude intenta traer al frente la terminal existente (tmux → X11/XWayland vía `xdotool`/`wmctrl` → GNOME Wayland vía la extensión [Window Calls](https://github.com/ickyicky/window-calls) → macOS vía System Events). Si ninguna estrategia aplica en tu entorno (p.ej. GNOME Wayland sin esa extensión), se bloquea el lanzamiento con un aviso en lugar de abrir una segunda terminal sobre el mismo jsonl.
 - `n` — nueva sesión en este proyecto (modo predeterminado).
@@ -101,7 +101,7 @@ Atajos:
 - `/` — filtrar la lista (ver [Filtro](#filtro-)).
 - `1`…`6` — ordenar por prompt / branch / tags / msgs / tamaño / última actividad.
 - `Shift+S` — invertir la dirección del orden.
-- `s` — abrir el modal de **Ajustes** para cambiar predeterminado/alternativo.
+- `s` — abrir el modal de **Ajustes**: modo de lanzamiento (con vista previa) y flags extra para `claude`.
 - `Esc` / `←` — limpiar el filtro, o volver a la pantalla de proyectos.
 - `r` — re-escanear las sesiones del proyecto.
 - `Ctrl+Q` — salir.
@@ -172,38 +172,46 @@ Condiciones soportadas en una regla (un `when` por regla):
 
 ## Cómo se lanza Claude
 
-`launcher.launch_claude(cwd, session_id=None, *, mode="auto")` despacha según el modo elegido:
+`launcher.launch_claude(cwd, session_id=None, *, mode="auto", claude_args=None)` decide **dónde**
+aterriza la sesión. Cada modo degrada al siguiente cuando su destino no está disponible:
 
-| Modo       | Estrategia                                                                                              |
-|------------|---------------------------------------------------------------------------------------------------------|
-| `auto`     | multiplexer split → ventana nueva del emulador → suspender la TUI                                       |
-| `window`   | ventana nueva del emulador → suspender la TUI                                                           |
-| `suspend`  | suspender la TUI siempre (`app.suspend()` + `subprocess.run`)                                           |
+| Modo       | Cadena de despacho                                                        |
+|------------|---------------------------------------------------------------------------|
+| `auto`     | panel del multiplexer → pestaña → ventana nueva → suspender la TUI        |
+| `split`    | panel del multiplexer → pestaña → ventana nueva → suspender               |
+| `tab`      | pestaña en la ventana actual → ventana nueva → suspender                  |
+| `window`   | ventana nueva del emulador → suspender                                    |
+| `suspend`  | suspender la TUI siempre (`app.suspend()` + `subprocess.run`)             |
 
-**Cadena `auto` (en orden):**
+Cuando hay degradación, la TUI lo notifica con el motivo (`kitty` sin control remoto, emulador sin
+pestañas por CLI, etc.) en vez de hacerlo en silencio.
 
-1. `$TMUX` → `tmux split-window -h -c <cwd> claude [--resume <id>]`.
-2. `$ZELLIJ` → `zellij action new-pane --cwd <cwd> -- claude [--resume <id>]`.
-3. `$TERMINATOR_UUID` → `terminator --new-tab --working-directory=<cwd> -x claude [...]`.
-4. **Ventana nueva del emulador detectado** (ver tabla más abajo).
-5. `app.suspend()` + `subprocess.run(["claude", ...], cwd=cwd)`.
+**Multiplexers** (tienen prioridad porque anidan dentro del emulador):
 
-**Emuladores soportados en modo `window`** (detectados vía env vars + binario en PATH):
+| Entorno                | Panel (`split`)                              | Pestaña (`tab`)                    |
+|------------------------|-----------------------------------------------|-------------------------------------|
+| `$TMUX`                | `tmux split-window -h -c <cwd> claude ...`    | `tmux new-window -c <cwd> claude ...` |
+| `$ZELLIJ`              | `zellij action new-pane --cwd <cwd> -- ...`   | panel (zellij no admite comando en pestaña) |
+| `$TERMINATOR_UUID`     | `terminator --new-tab ...`                    | `terminator --new-tab ...`          |
 
-| Emulador          | Comando lanzado                                                       |
-|-------------------|-----------------------------------------------------------------------|
-| kitty             | `kitty --directory <cwd> claude ...`                                  |
-| WezTerm           | `wezterm start --cwd <cwd> -- claude ...`                             |
-| Ghostty           | `ghostty --working-directory=<cwd> -e claude ...`                     |
-| Alacritty         | `alacritty --working-directory <cwd> -e claude ...`                   |
-| Konsole           | `konsole --workdir <cwd> -e claude ...`                               |
-| GNOME Terminal    | `gnome-terminal --working-directory=<cwd> -- claude ...`              |
-| foot              | `foot --working-directory=<cwd> claude ...`                           |
-| Terminator        | `terminator --working-directory=<cwd> -x claude ...` (ventana nueva)  |
-| Windows Terminal  | `wt.exe new-tab -d <cwd> -- claude ...`                               |
-| iTerm2 (macOS)    | `osascript` → `tell application "iTerm" ... write text "cd <cwd> && exec claude ..."` |
-| Apple Terminal (macOS) | `osascript` → `tell application "Terminal" to do script "cd <cwd> && exec claude ..."` |
-| x-terminal-emulator / xterm | `<term> -e sh -c "cd <cwd> && exec claude ..."`             |
+**Emuladores** (detectados vía `$TERM_PROGRAM`, env vars y binario en PATH):
+
+| Emulador          | Ventana nueva                                              | Pestaña en la ventana actual                          |
+|-------------------|-------------------------------------------------------------|--------------------------------------------------------|
+| kitty             | `kitty --directory <cwd> claude ...`                        | `kitty @ launch --type=tab --cwd <cwd> -- claude ...` ¹ |
+| WezTerm           | `wezterm start --cwd <cwd> -- claude ...`                   | `wezterm cli spawn --cwd <cwd> -- claude ...`          |
+| GNOME Terminal    | `gnome-terminal --window --working-directory=<cwd> -- ...`  | `gnome-terminal --tab --working-directory=<cwd> -- ...` |
+| Konsole           | `konsole --workdir <cwd> -e claude ...`                     | `konsole --new-tab --workdir <cwd> -e claude ...`      |
+| Terminator        | `terminator --working-directory=<cwd> -x claude ...`        | `terminator --new-tab ...`                             |
+| Windows Terminal  | `wt.exe -w -1 new-tab -d <cwd> -- claude ...`               | `wt.exe -w 0 new-tab -d <cwd> -- claude ...`           |
+| iTerm2 (macOS)    | `osascript` → `create window with default profile`          | `osascript` → `create tab with default profile`        |
+| Ghostty           | `ghostty --working-directory=<cwd> -e claude ...`           | — (su CLI no expone `+new-tab`)                        |
+| Alacritty         | `alacritty --working-directory <cwd> -e claude ...`         | — (no tiene pestañas)                                  |
+| foot              | `foot --working-directory=<cwd> claude ...`                 | — (no tiene pestañas)                                  |
+| Apple Terminal    | `osascript` → `do script "cd <cwd> && exec claude ..."`     | — (requeriría sintetizar ⌘T con System Events)         |
+| x-terminal-emulator / xterm | `<term> -e sh -c "cd <cwd> && exec claude ..."`   | —                                                      |
+
+¹ Requiere `allow_remote_control` en `kitty.conf`. Si falla, se abre ventana nueva y se avisa.
 
 Detección del emulador (en orden):
 
@@ -211,20 +219,38 @@ Detección del emulador (en orden):
 2. Env var específica del emulador (`$KITTY_PID`, `$GHOSTTY_RESOURCES_DIR`, `$ALACRITTY_LOG`, `$WT_SESSION`, etc.).
 3. Fallback genérico: `x-terminal-emulator` o `xterm` si están en PATH (POSIX).
 
-Si ninguno se detecta en modo `window`, la TUI se suspende como último recurso.
+Emuladores detectables pero no controlables desde la CLI (VS Code, Warp, Tabby, ConEmu) caen a
+ejecución inline con el motivo indicado. Si no se detecta nada, la TUI se suspende como último recurso.
+
+### Argumentos extra para `claude`
+
+`claude_args` (configurable en Ajustes) se antepone a las flags que gestiona la TUI:
+
+```
+claude <tus flags> --resume <id> -n <nombre>
+```
+
+Sirve para `--dangerously-skip-permissions`, `--model`, `--effort`, `--add-dir`, `--ide`… Las flags
+que multi-claude necesita controlar (`--resume`, `-c`, `-n`, `-p`, `--bg`, `--from-pr`) se rechazan
+con un error en el modal en vez de colisionar con la sesión que se está reanudando.
 
 ## Ajustes (`s`)
 
-Modal en la TUI con dos selectores:
+Modal en la TUI con:
 
-- **Enter (predeterminado)** — modo por defecto (recomendado: `auto`).
-- **Shift+Enter (alternativo)** — modo del atajo alternativo (recomendado: `window`).
+- **Enter (predeterminado)** — dónde se abre la sesión (`auto`, `split`, `tab`, `window`, `suspend`).
+  Debajo se dibuja un esquema del modo seleccionado y una línea *"Aquí y ahora: …"* que resuelve en
+  seco lo que haría ese modo en tu terminal concreta.
+- **Saltar permisos** — checkbox para `--dangerously-skip-permissions`.
+- **Argumentos para `claude`** — resto de flags extra, en formato línea de comandos.
 
 Solo se configura el **predeterminado**. El **alternativo** (Shift+Enter) se deriva automáticamente:
 
 | Predeterminado | Alternativo (Shift+Enter) |
 |----------------|---------------------------|
 | `auto`         | `suspend`                 |
+| `split`        | `window`                  |
+| `tab`          | `window`                  |
 | `window`       | `suspend`                 |
 | `suspend`      | `window`                  |
 
@@ -237,6 +263,7 @@ El fichero guarda, además del modo, el estado de la UI que se recuerda entre ar
 ```json
 {
   "default_mode": "auto",
+  "claude_args": ["--dangerously-skip-permissions"],
   "projects_sort": { "key": "last_activity", "descending": true },
   "sessions_sort": { "key": "last_activity", "descending": true },
   "preview_visible": true,
@@ -277,6 +304,8 @@ El nombre de la carpeta `~/.claude/projects/<encoded>/` es la ruta original con 
 - **La búsqueda global solo ve lo indexado**: el índice FTS se puebla en `scan_sessions`, es decir al **entrar** a la pantalla de sesiones de un proyecto. Un proyecto que nunca has abierto en la TUI no aparece en los resultados de `?`. Si `?` te devuelve menos de lo esperado, entra una vez en los proyectos que te falten.
 - **Payload FTS acotado por sesión**: se indexan como máximo las primeras 2.000 líneas del jsonl y 64 KB de texto (`FTS_REINDEX_SCAN_LINES` / `FTS_CONTENT_MAX_CHARS` en `session.py`). En sesiones muy largas, el final de la conversación no es buscable.
 - **Proyecto movido de path**: si renombras la carpeta de un proyecto, las sesiones viejas y nuevas siguen siendo dos entradas distintas en `~/.claude/projects/`. No se reconcilian solas — la vieja queda como huérfana y la unes a mano con `m` (merge).
+- **No todos los emuladores saben abrir pestañas desde la CLI**: Ghostty (su CLI no expone `+new-tab`), Alacritty, foot y Terminal.app solo pueden abrir ventanas, así que en modo `tab` la sesión acaba en una ventana nueva y la TUI te lo dice. En kitty y WezTerm la pestaña exige tener el control remoto activado (`allow_remote_control` en `kitty.conf`); si está apagado, mismo fallback.
+- **zellij no puede lanzar un comando en una pestaña nueva**: `zellij action new-tab` solo acepta un layout, no un comando, así que el modo `tab` dentro de zellij abre un panel.
 - **Ordenar por tags no se persiste**: `3` ordena la tabla de sesiones por etiquetas en la sesión actual de la TUI, pero `tags` no está en `VALID_SESSION_SORT` (`config.py`), así que al reabrir vuelve al orden por última actividad.
 
 ## Instalación
@@ -286,11 +315,11 @@ El nombre de la carpeta `~/.claude/projects/<encoded>/` es la ruta original con 
 - **Linux** (Ubuntu/Debian/Fedora/Arch testados), **macOS** o **Windows 10/11**.
 - **Python 3.10+** (la mayoría de distros modernas lo traen; en macOS `brew install python@3.13`; en Windows usa el instalador oficial o `winget install Python.Python.3.13`).
 - **`claude`** (Claude Code CLI) en `PATH`. Sin él, `multi-claude` arranca pero no podrá reanudar sesiones — la propia TUI te lo dirá.
-- *(Opcional, Linux/macOS)* **`tmux`** o **`zellij`** (o **`terminator`** sólo en Linux) para que Claude se abra en un split/pestaña sin perder la TUI.
+- *(Opcional, Linux/macOS)* **`tmux`** o **`zellij`** (o **`terminator`** sólo en Linux) para que Claude se abra en un panel sin perder la TUI. Sin multiplexer, la mayoría de emuladores abren pestaña en la misma ventana (ver [Cómo se lanza Claude](#cómo-se-lanza-claude)).
 - *(Opcional)* Un emulador soportado:
   - **Linux**: kitty, WezTerm, Ghostty, Alacritty, Konsole, GNOME Terminal, foot, Terminator, xterm.
-  - **macOS**: **iTerm2** o **Terminal.app** (modo `window` invoca AppleScript vía `osascript`, que viene de serie en macOS). kitty, WezTerm, Ghostty y Alacritty también funcionan si los usas.
-  - **Windows**: **Windows Terminal** (modo `window` abre `claude` en una pestaña nueva vía `wt.exe`).
+  - **macOS**: **iTerm2** (pestañas y ventanas) o **Terminal.app** (solo ventanas); ambos vía AppleScript con `osascript`, que viene de serie en macOS. kitty, WezTerm, Ghostty y Alacritty también funcionan si los usas.
+  - **Windows**: **Windows Terminal** (`wt.exe`: pestaña de la ventana actual en modo `auto`/`tab`, ventana aparte en modo `window`).
 
   Sin nada de esto, la TUI se suspende y vuelve cuando cierras Claude.
 
@@ -343,7 +372,7 @@ Deberías ver la lista de tus proyectos de Claude. Pulsa `Enter` para entrar en 
 
 > **macOS**: si es la primera vez que multi-claude lanza una sesión en una ventana nueva de iTerm2 / Terminal.app, macOS te pedirá permiso para que `osascript` controle esas apps (System Settings → Privacy & Security → Automation). Acepta una vez y queda persistido.
 >
-> **Windows**: en modo `auto` o `window`, las sesiones se abren en una pestaña nueva de Windows Terminal vía `wt.exe`. Si no estás en Windows Terminal (p.ej. `cmd.exe` o ConEmu), la TUI se suspende y `claude` corre inline.
+> **Windows**: en modo `auto` o `tab` las sesiones se abren en una pestaña de la ventana actual de Windows Terminal (`wt.exe -w 0`); en modo `window`, en una ventana aparte (`wt.exe -w -1`). Si no estás en Windows Terminal (p.ej. `cmd.exe` o ConEmu), la TUI se suspende y `claude` corre inline.
 
 ### Actualizar a la última versión
 
@@ -404,7 +433,7 @@ src/multi_claude/
   discovery.py       # scan_projects() → list[Project], WorktreeGroup, ProjectFolder
   session.py         # scan_sessions(project) → list[Session], parsers, payload FTS
   index.py           # SessionIndex — SQLite + tabla FTS5 (caché reconstruible)
-  launcher.py        # launch_claude(cwd, session_id) con detección de multiplexer
+  launcher.py        # launch_claude(): panel/pestaña/ventana/inline según emulador y multiplexer
   focus.py           # traer al frente la terminal de una sesión ya viva
   deletion.py        # borrado de sesiones/proyectos y sus artefactos en disco
   transfer.py        # export/import de sesiones en .zip
