@@ -895,6 +895,55 @@ class SessionsScreen(Screen[None]):
         self._launch(remote.session_id, remote.display_name, mode)
         self._populate()
 
+    def _confirm_unpublish(self, remote: RemoteSession) -> None:
+        """Ask before removing a published session from its repo."""
+        link = self._active_link()
+        if link is None:
+            return
+        state = self._local_state(remote)
+        details = [
+            f"Repositorio: {link.tab_label()} — {link.summary()}",
+            f"Publicada por: {remote.published_by or '?'}",
+            f"Prompt: {(remote.display_name or remote.first_prompt or remote.session_id)[:70]}",
+        ]
+        if state != "absent":
+            # Worth stating plainly: people expect a delete to take the local copy with it.
+            details.append("")
+            details.append("Tu copia local NO se borra, solo deja de estar compartida.")
+        modal = ConfirmDeleteModal(
+            title=f"Despublicar {remote.session_id[:8]}… de «{link.tab_label()}»",
+            details=details,
+            warning="Los demás dejarán de verla. Si nadie la tiene en local, se pierde.",
+        )
+        self.app.push_screen(modal, lambda ok: self._apply_unpublish(remote, link, ok))
+
+    def _apply_unpublish(
+        self, remote: RemoteSession, link: RemoteLink, confirmed: bool | None
+    ) -> None:
+        if not confirmed:
+            return
+        self.notify(f"Despublicando {remote.session_id[:8]}…")
+        self._unpublish_worker(remote, link)
+
+    @work(thread=True, exclusive=True, group="unpublish-session")
+    def _unpublish_worker(self, remote: RemoteSession, link: RemoteLink) -> None:
+        store = self._claude_app.store_for_link(link)
+        if store is None:
+            return
+        try:
+            store.unpublish(remote.session_id)
+        except (RemoteError, OSError) as exc:
+            self.app.call_from_thread(self._notify_error, f"No se pudo despublicar: {exc}")
+            return
+        self.app.call_from_thread(self._on_unpublished, remote.session_id)
+
+    def _on_unpublished(self, session_id: str) -> None:
+        self.notify(f"{session_id[:8]}… ya no está publicada")
+        if self._active_remote is not None:
+            self._load_remote_worker(self._active_remote)
+        # The local tab's marks came from the published index, which just changed.
+        self._load_published_index_worker()
+
     def action_link_remotes(self) -> None:
         """Manage which sessions repos this project publishes to."""
         self.app.push_screen(
@@ -973,6 +1022,10 @@ class SessionsScreen(Screen[None]):
         self._populate()
 
     def action_delete(self) -> None:
+        remote = self._selected_remote()
+        if remote is not None:
+            self._confirm_unpublish(remote)
+            return
         session = self._selected_session()
         if session is None:
             return
@@ -1139,7 +1192,6 @@ class SessionsScreen(Screen[None]):
         """Hide row-dependent bindings when no row is selected; hide cleanup if empty."""
         row_dependent = {
             "rename",
-            "delete",
             "launch_alternate",
             "yank_id",
             "set_color",
@@ -1149,6 +1201,10 @@ class SessionsScreen(Screen[None]):
         # A remote row has no local jsonl yet, so every local action is hidden on it —
         # ``_selected_session`` already returns None there, which handles the set above.
         if action in row_dependent and self._selected_session() is None:
+            return False
+        # ``delete`` works on both kinds of row: locally it deletes, on a published row it
+        # unpublishes. Hidden only when there is no row at all.
+        if action == "delete" and self._current_row() is None:
             return False
         if action in ("move", "export", "publish") and not self._selected_sessions():
             return False

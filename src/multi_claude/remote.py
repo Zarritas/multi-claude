@@ -30,6 +30,7 @@ import gzip
 import json
 import os
 import re
+import shutil
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -267,6 +268,10 @@ class RemoteStore(Protocol):
         """Upload the session described by ``session``, reading its files from disk."""
         ...
 
+    def unpublish(self, session_id: str) -> None:
+        """Remove a published session from the remote. The local copy is untouched."""
+        ...
+
 
 class DirectoryRemote:
     """A remote that is just a directory.
@@ -356,6 +361,21 @@ class DirectoryRemote:
             manifest,
             json.dumps(session.to_manifest(), indent=2, ensure_ascii=False).encode("utf-8"),
         )
+
+    def unpublish(self, session_id: str) -> None:
+        """Remove the manifest first, then the blobs.
+
+        The reverse of publishing, and for the same reason: the manifest is what makes a
+        session visible, so dropping it first means an interrupted delete leaves unreferenced
+        blobs (invisible, harmless) rather than a manifest pointing at missing payload.
+        """
+        safe_session_id(session_id)
+        manifest = self.root / MANIFEST_ROOT / f"{session_id}.json"
+        blob_dir = self.root / BLOB_ROOT / session_id
+        if not manifest.exists() and not blob_dir.exists():
+            raise RemoteError(f"la sesión {session_id} no está publicada aquí")
+        manifest.unlink(missing_ok=True)
+        shutil.rmtree(blob_dir, ignore_errors=True)
 
 
 REMOTE_DIR_ENV = "MULTI_CLAUDE_REMOTE_DIR"

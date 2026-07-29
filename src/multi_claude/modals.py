@@ -972,6 +972,7 @@ class SettingsModal(ModalScreen[Config | None]):
             self._initial.remote_link(),
             servers=list(self._initial.remote_servers),
             title="Remoto global (para proyectos sin enlaces propios)",
+            allow_none=True,
         )
         self.app.push_screen(modal, self._on_remote_configured)
 
@@ -1547,19 +1548,31 @@ class RepoLinkModal(ModalScreen["RemoteLink | None"]):
     RepoLinkModal Label.error { color: $error; }
     RepoLinkModal Horizontal { align: center middle; height: auto; margin-top: 1; }
     RepoLinkModal Button { margin: 0 1; }
-    RepoLinkModal #fields-folder, RepoLinkModal #fields-repo { height: auto; }
+    RepoLinkModal #fields-folder,
+    RepoLinkModal #fields-repo,
+    RepoLinkModal #fields-common { height: auto; }
     """
 
-    # Radio index of the "shared folder" option, which needs a path instead of a repo.
+    # Radio ids that are not a server: a folder needs a path instead of a repo, and "none"
+    # is how a configured remote gets switched off — without it there was no way back.
     FOLDER = "target-folder"
+    NONE = "target-none"
 
     def __init__(
-        self, link: RemoteLink, *, servers: list[RemoteServer], title: str | None = None
+        self,
+        link: RemoteLink,
+        *,
+        servers: list[RemoteServer],
+        title: str | None = None,
+        allow_none: bool = False,
     ) -> None:
         super().__init__()
         self._initial = link
         self._servers = servers
         self._title_text = title or "Repositorio de sesiones"
+        # Only the global remote can be switched off; a project link is removed from its list
+        # instead, where "Quitar" already says exactly that.
+        self._allow_none = allow_none
 
     def compose(self) -> ComposeResult:
         from textual.containers import Horizontal, VerticalScroll
@@ -1585,9 +1598,15 @@ class RepoLinkModal(ModalScreen["RemoteLink | None"]):
                         )
                     yield RadioButton(
                         "Carpeta compartida",
-                        value=(self._initial.kind == "directory" or not self._servers),
+                        value=(self._initial.kind == "directory"),
                         id=self.FOLDER,
                     )
+                    if self._allow_none:
+                        yield RadioButton(
+                            "Desactivado",
+                            value=not self._initial.is_configured,
+                            id=self.NONE,
+                        )
 
                 with Vertical(id="fields-folder"):
                     yield Label("Ruta de la carpeta", classes="section")
@@ -1607,12 +1626,13 @@ class RepoLinkModal(ModalScreen["RemoteLink | None"]):
                     yield Label("Rama", classes="section")
                     yield Input(value=self._initial.branch, placeholder="main", id="link-branch")
 
-                yield Label("Nombre de la pestaña (opcional)", classes="section")
-                yield Input(
-                    value=self._initial.label,
-                    placeholder=self._initial.tab_label(),
-                    id="link-label",
-                )
+                with Vertical(id="fields-common"):
+                    yield Label("Nombre de la pestaña (opcional)", classes="section")
+                    yield Input(
+                        value=self._initial.label,
+                        placeholder=self._initial.tab_label(),
+                        id="link-label",
+                    )
 
             yield Label("", id="link-error", classes="error")
             with Horizontal():
@@ -1632,9 +1652,11 @@ class RepoLinkModal(ModalScreen["RemoteLink | None"]):
         self._sync_visible_fields()
 
     def _sync_visible_fields(self) -> None:
-        folder = self._chosen_server() is None
+        disabled = self._is_none_selected()
+        folder = not disabled and self._chosen_server() is None
         self.query_one("#fields-folder").display = folder
-        self.query_one("#fields-repo").display = not folder
+        self.query_one("#fields-repo").display = not folder and not disabled
+        self.query_one("#fields-common").display = not disabled
 
     @on(Button.Pressed, "#cancel")
     def _cancel(self) -> None:
@@ -1651,7 +1673,14 @@ class RepoLinkModal(ModalScreen["RemoteLink | None"]):
     def action_cancel(self) -> None:
         self.dismiss(None)
 
+    def _is_none_selected(self) -> bool:
+        pressed = self.query_one("#link-target", RadioSet).pressed_button
+        return pressed is not None and pressed.id == self.NONE
+
     def _try_save(self) -> None:
+        if self._is_none_selected():
+            self.dismiss(RemoteLink())  # kind="none": sharing off
+            return
         link = self.collect()
         server = self._chosen_server()
         missing = (

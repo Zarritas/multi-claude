@@ -304,6 +304,26 @@ Dos detalles del driver de git que no son obvios:
   un worker de la TUI es invisible y parece que la aplicación se ha congelado; fallar con un
   mensaje es estrictamente mejor.
 
+## Despublicar
+
+`unpublish(session_id)` completa el ciclo: hasta ahora se podía publicar y no había forma de
+deshacerlo. Está en los tres backends y **nunca toca la copia local** — nadie espera que «dejar de
+compartir» borre su propio transcript, así que el diálogo lo dice de forma explícita cuando la
+sesión está descargada.
+
+El orden es el inverso al de publicar, y por el mismo motivo: **primero el manifest**, luego los
+blobs. El manifest es lo que hace visible una sesión, así que un borrado interrumpido deja blobs
+sin referenciar (invisibles, inocuos) en vez de una entrada que apunta a payload que ya no está.
+En el backend de git eso da igual porque un commit es atómico: desaparece todo junto o nada.
+
+En la UI es `d` sobre una fila publicada. Reutilizar `d` es deliberado: significa «borra donde
+estás» — en la pestaña local borra tu sesión, en la de un repo la despublica — y no hay ambigüedad
+porque son filas de listas distintas.
+
+Un detalle del backend de git que costó un test: `git add -- manifest blobs` falla en cuanto un
+borrado ha eliminado ambos directorios («pathspec did not match any files»), así que el staging
+usa `git add -A`, que además registra borrados igual que altas.
+
 ## Estado de la copia local
 
 La pestaña de un repo lista **todo** lo publicado, no solo lo que no tienes. Ocultar lo que ya

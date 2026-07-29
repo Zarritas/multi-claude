@@ -159,6 +159,9 @@ class FakeApi:
         for fragment, code in self.fail_with.items():
             if fragment in url:
                 raise RemoteError(f"{code}: forzado por el test")
+        if method == "DELETE":
+            self.files.pop(self._path_from_url(url), None)
+            return b"{}"
         if method in ("POST", "PUT"):
             return self._write(url, body or {})
         return self._read(url, extra_headers or {})
@@ -432,3 +435,56 @@ def test_a_half_configured_provider_is_treated_as_off(
     monkeypatch.delenv("MULTI_CLAUDE_REMOTE_DIR", raising=False)
     assert store_from_settings("gitlab", "", host="https://git.example.com", repo="") is None
     assert store_from_settings("gitlab", "", host="", repo="g/s") is None
+
+
+# --- unpublishing over the APIs -------------------------------------------------------
+
+
+@pytest.mark.parametrize("provider", ["gitlab", "github"])
+def test_unpublish_deletes_the_manifest_and_the_blobs(
+    provider: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = tmp_path / "project"
+    write_session(project, session_id="sid-1")
+    (project / "sid-1" / "subagents").mkdir(parents=True)
+    (project / "sid-1" / "subagents" / "agent-a.jsonl").write_text("{}\n", encoding="utf-8")
+
+    remote, api = _remote_and_api(provider, monkeypatch)
+    remote.publish(
+        RemoteSession(session_id="sid-1", published_at="2026-07-28T10:00:00+00:00"), project
+    )
+    assert api.files
+
+    remote.unpublish("sid-1")
+
+    assert not [path for path in api.files if "sid-1" in path]
+    assert remote.list_sessions() == ()
+
+
+@pytest.mark.parametrize("provider", ["gitlab", "github"])
+def test_the_manifest_is_deleted_before_the_blobs(
+    provider: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reverse of publishing: an interrupted delete leaves invisible blobs, not a broken entry."""
+    project = tmp_path / "project"
+    write_session(project, session_id="sid-1")
+    remote, api = _remote_and_api(provider, monkeypatch)
+    remote.publish(
+        RemoteSession(session_id="sid-1", published_at="2026-07-28T10:00:00+00:00"), project
+    )
+    api.calls.clear()
+
+    remote.unpublish("sid-1")
+
+    deletes = [url for method, url in api.calls if method == "DELETE"]
+    assert deletes, "no se envió ningún DELETE"
+    assert "manifest" in deletes[0]
+
+
+@pytest.mark.parametrize("provider", ["gitlab", "github"])
+def test_unpublishing_something_absent_fails(
+    provider: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    remote, _ = _remote_and_api(provider, monkeypatch)
+    with pytest.raises(RemoteError, match="no está publicada aquí"):
+        remote.unpublish("sid-nope")

@@ -48,6 +48,7 @@ _TIMEOUT = 120
 PROBE_TIMEOUT = 15
 _PUSH_ATTEMPTS = 3
 _COMMIT_MESSAGE = "multi-claude: publish session"
+_DELETE_MESSAGE = "multi-claude: unpublish session"
 
 
 def cache_root() -> Path:
@@ -215,17 +216,36 @@ class GitSshRemote:
 
         self._commit_and_push(session.session_id)
 
-    def _commit_and_push(self, session_id: str) -> None:
+    def unpublish(self, session_id: str) -> None:
+        """Remove a published session with ``git rm`` and push the removal.
+
+        Same ordering rationale as the other backends is unnecessary here: a commit is atomic,
+        so the manifest and the blobs disappear together or not at all.
+        """
+        safe_session_id(session_id)
+        self._fetch()
+        manifest = self.work / MANIFEST_ROOT / f"{session_id}.json"
+        blob_dir = self.work / BLOB_ROOT / session_id
+        if not manifest.exists() and not blob_dir.exists():
+            raise RemoteError(f"la sesión {session_id} no está publicada aquí")
+        for target in (manifest, blob_dir):
+            if target.exists():
+                self._git("rm", "-r", "--quiet", "--", str(target), cwd=self.work)
+        self._commit_and_push(session_id, message=_DELETE_MESSAGE)
+
+    def _commit_and_push(self, session_id: str, *, message: str = _COMMIT_MESSAGE) -> None:
         """Commit the staged session and push, rebasing if someone else got there first.
 
         This is what SSH buys over the REST drivers: a concurrent publish is a rejected push,
         and retrying on top of their commit keeps both sessions instead of overwriting one.
         """
-        self._git("add", "--", MANIFEST_ROOT, BLOB_ROOT, cwd=self.work)
+        # ``-A`` with no pathspec: it stages deletions as well as additions, and naming
+        # manifest/blobs explicitly fails outright once an unpublish has removed both.
+        self._git("add", "-A", cwd=self.work)
         status = self._git("status", "--porcelain", cwd=self.work)
         if not status.strip():
             return  # already published, byte for byte
-        self._git("commit", "--quiet", "-m", f"{_COMMIT_MESSAGE} {session_id}", cwd=self.work)
+        self._git("commit", "--quiet", "-m", f"{message} {session_id}", cwd=self.work)
 
         last: RemoteError | None = None
         for attempt in range(_PUSH_ATTEMPTS):

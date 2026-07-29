@@ -1085,3 +1085,136 @@ async def test_editing_without_a_selection_says_so(world: Path) -> None:
         # Nothing to edit and nothing crashed.
         assert isinstance(app.screen, ServersModal)
         assert servers._servers == []
+
+
+# --- unpublishing from the UI ---------------------------------------------------------
+
+
+async def test_d_on_a_published_row_unpublishes_it(world: Path) -> None:
+    """`d` means delete-where-you-are: locally it deletes, on a published row it unpublishes."""
+    app = ClaudeBrowserApp()
+    async with app.run_test() as pilot:
+        screen = await _open_sessions(pilot)
+        store = await _remote_store(app)
+        await _publish(pilot)
+        for _ in range(20):
+            await pilot.pause()
+        await _open_remote_tab(pilot, screen)
+        assert len(store.list_sessions()) == 1
+
+        from textual.widgets import DataTable
+
+        table = screen.query_one("#sessions", DataTable)
+        table.move_cursor(row=0)
+        await pilot.pause()
+        await pilot.press("d")
+        for _ in range(6):
+            await pilot.pause()
+        await pilot.press("y")  # confirm
+        for _ in range(25):
+            await pilot.pause()
+
+        assert store.list_sessions() == ()
+        # The local transcript is untouched.
+        assert (screen.project.encoded_path / "ses-1.jsonl").is_file()
+
+
+async def test_unpublishing_can_be_cancelled(world: Path) -> None:
+    app = ClaudeBrowserApp()
+    async with app.run_test() as pilot:
+        screen = await _open_sessions(pilot)
+        store = await _remote_store(app)
+        await _publish(pilot)
+        for _ in range(20):
+            await pilot.pause()
+        await _open_remote_tab(pilot, screen)
+
+        from textual.widgets import DataTable
+
+        screen.query_one("#sessions", DataTable).move_cursor(row=0)
+        await pilot.pause()
+        await pilot.press("d")
+        for _ in range(6):
+            await pilot.pause()
+        await pilot.press("n")  # decline
+        for _ in range(10):
+            await pilot.pause()
+
+        assert len(store.list_sessions()) == 1
+
+
+async def test_the_unpublish_dialogue_says_the_local_copy_survives(world: Path) -> None:
+    """People expect a delete to take their own copy with it; it must say otherwise."""
+    import re as _re
+
+    app = ClaudeBrowserApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await _open_sessions(pilot)
+        await _publish(pilot)
+        for _ in range(20):
+            await pilot.pause()
+        await _open_remote_tab(pilot, screen)
+
+        from textual.widgets import DataTable
+
+        screen.query_one("#sessions", DataTable).move_cursor(row=0)
+        await pilot.pause()
+        await pilot.press("d")
+        for _ in range(10):
+            await pilot.pause()
+
+        painted = "\n".join(
+            "".join(s.text for s in strip)
+            for strip in app.screen._compositor.render_strips()
+        )
+        flat = _re.sub(r"\s+", " ", _re.sub(r"[█▀▄▔▁▊▎▆▃]", " ", painted))
+        assert "Despublicar" in flat
+        assert "copia local NO se borra" in flat
+
+
+async def test_the_global_remote_can_be_switched_off(world: Path) -> None:
+    """Once configured there was no way back: the dialogue offered no "off"."""
+    from dataclasses import replace
+
+    from textual.widgets import RadioButton
+
+    from multi_claude.modals import RepoLinkModal
+
+    app = ClaudeBrowserApp()
+    async with app.run_test(size=(100, 34)) as pilot:
+        await pilot.pause()
+        configured = replace(
+            app.prefs, remote_kind="directory", remote_path=str(world / "global")
+        )
+        modal = RepoLinkModal(configured.remote_link(), servers=[], allow_none=True)
+        app.push_screen(modal)
+        for _ in range(8):
+            await pilot.pause()
+
+        modal.query_one("#target-none", RadioButton).value = True
+        await pilot.pause()
+        modal._try_save()
+        for _ in range(6):
+            await pilot.pause()
+
+        # What it returns switches sharing off in the config.
+        from multi_claude.project_remotes import RemoteLink
+
+        off = configured.with_remote_link(RemoteLink())
+        assert off.remote_kind == "none"
+        assert not off.remote_link().is_configured
+
+
+async def test_a_project_link_dialogue_offers_no_off_switch(world: Path) -> None:
+    """A project link is removed from its list instead, where "Quitar" says exactly that."""
+    from multi_claude.modals import RepoLinkModal
+    from multi_claude.project_remotes import RemoteLink
+
+    app = ClaudeBrowserApp()
+    async with app.run_test(size=(100, 34)) as pilot:
+        await pilot.pause()
+        modal = RepoLinkModal(RemoteLink(), servers=[])
+        app.push_screen(modal)
+        for _ in range(8):
+            await pilot.pause()
+        assert not modal.query("#target-none")

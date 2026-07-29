@@ -194,7 +194,9 @@ que sirve de *fallback* para los proyectos sin enlaces propios. Los enlaces del 
 por completo: un proyecto enlazado al repo de un cliente no publica además al global.
 
 El diálogo de configuración pide proveedor, servidor, repositorio, rama, token y nombre de la
-pestaña, y tiene **`Ctrl+T` para probar la conexión** antes de guardar.
+pestaña, y tiene **`Ctrl+T` para probar la conexión** antes de guardar. El remoto global se puede
+**desactivar** eligiendo «Desactivado»; los enlaces de un proyecto se quitan con su botón
+**Quitar**.
 
 **Servidores.** En Ajustes defines los servidores una vez (nombre, proveedor, URL y
 autenticación) y luego, al enlazar un repositorio a un proyecto, los eliges por nombre: solo
@@ -279,6 +281,9 @@ carpeta por encima de todo lo demás — útil para probar sin tocar tu configur
   proyecto preservando su uuid y la reanuda; si ya la tienes, reanuda tu copia local. Avisa antes
   de lanzar cuando se grabó sobre otro commit, o cuando tu copia está por detrás de la publicada
   (traer los turnos nuevos de una sesión ya descargada todavía no está implementado).
+- `d` sobre una compartida — **despublicarla**: la quita del repositorio para todos. Tu copia
+  local no se toca, y el diálogo lo dice explícitamente. En la pestaña `Locales`, `d` sigue
+  borrando la sesión de tu disco.
 
 Sobre una fila compartida las acciones locales (renombrar, etiquetar, borrar, mover) están
 ocultas: todavía no hay jsonl que tocar.

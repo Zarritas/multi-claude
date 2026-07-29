@@ -17,6 +17,7 @@ No new dependency: ``urllib`` from the stdlib, in keeping with the rest of the p
 from __future__ import annotations
 
 import base64
+import contextlib
 import gzip
 import json
 import urllib.error
@@ -41,6 +42,7 @@ from multi_claude.remote import (
 _TIMEOUT = 15
 _PER_PAGE = 100
 _COMMIT_MESSAGE = "multi-claude: publish session"
+_DELETE_MESSAGE = "multi-claude: unpublish session"
 
 
 class HttpRepoRemote:
@@ -72,6 +74,9 @@ class HttpRepoRemote:
 
     def describe(self) -> str:
         """Human-readable identity of the repo, used by the connection test."""
+        raise NotImplementedError
+
+    def _delete_file(self, file_path: str) -> None:
         raise NotImplementedError
 
     # --- shared HTTP ----------------------------------------------------------------
@@ -197,6 +202,25 @@ class HttpRepoRemote:
             json.dumps(session.to_manifest(), indent=2, ensure_ascii=False).encode("utf-8"),
         )
 
+    def unpublish(self, session_id: str) -> None:
+        """Delete the manifest first, then every blob.
+
+        The reverse order of publishing, for the same reason: the manifest is what makes the
+        session visible, so an interrupted delete leaves invisible blobs rather than a manifest
+        with no payload behind it.
+        """
+        safe_session_id(session_id)
+        prefix = f"{BLOB_ROOT}/{session_id}"
+        blobs = self._safe_list(prefix, recursive=True)
+        manifest = f"{MANIFEST_ROOT}/{session_id}.json"
+        if not blobs and manifest not in self._safe_list(MANIFEST_ROOT, recursive=False):
+            raise RemoteError(f"la sesión {session_id} no está publicada aquí")
+        with contextlib.suppress(RemoteError):
+            self._delete_file(manifest)
+        for path in blobs:
+            with contextlib.suppress(RemoteError):
+                self._delete_file(path)
+
 
 class GitLabRemote(HttpRepoRemote):
     """Sessions in a GitLab repo. Works against gitlab.com and self-hosted alike."""
@@ -245,6 +269,12 @@ class GitLabRemote(HttpRepoRemote):
 
     def _read_file(self, file_path: str) -> bytes:
         return self._request(f"{self._file_url(file_path)}/raw?ref={self.branch}")
+
+    def _delete_file(self, file_path: str) -> None:
+        query = urllib.parse.urlencode(
+            {"branch": self.branch, "commit_message": _DELETE_MESSAGE}
+        )
+        self._request(f"{self._file_url(file_path)}?{query}", method="DELETE")
 
     def _write_file(self, file_path: str, payload: bytes) -> None:
         body: dict[str, object] = {
@@ -320,6 +350,16 @@ class GitHubRemote(HttpRepoRemote):
         if isinstance(data, dict) and isinstance(data.get("sha"), str):
             return str(data["sha"])
         return None
+
+    def _delete_file(self, file_path: str) -> None:
+        existing = self._file_sha(file_path)
+        if existing is None:
+            return  # already gone
+        self._request(
+            self._contents_url(file_path),
+            method="DELETE",
+            body={"message": _DELETE_MESSAGE, "sha": existing, "branch": self.branch},
+        )
 
     def _write_file(self, file_path: str, payload: bytes) -> None:
         body: dict[str, object] = {

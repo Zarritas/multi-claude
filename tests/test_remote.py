@@ -311,3 +311,58 @@ def test_the_env_var_works_even_with_sharing_off_in_the_config(
 def test_a_store_names_its_destination(tmp_path: Path) -> None:
     """The publish confirmation shows this, so it has to be the path, not a repr."""
     assert str(DirectoryRemote(tmp_path / "remoto")) == str(tmp_path / "remoto")
+
+
+# --- unpublishing -------------------------------------------------------------------
+
+
+def test_unpublish_removes_the_session_from_the_remote(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    write_session(project, session_id="sid-1")
+    (project / "sid-1" / "subagents").mkdir(parents=True)
+    (project / "sid-1" / "subagents" / "agent-a.jsonl").write_text("{}\n", encoding="utf-8")
+    remote = DirectoryRemote(tmp_path / "remote")
+    _publish(remote, project, "sid-1")
+    assert len(remote.list_sessions()) == 1
+
+    remote.unpublish("sid-1")
+
+    assert remote.list_sessions() == ()
+    assert not (tmp_path / "remote" / "manifest" / "sid-1.json").exists()
+    assert not (tmp_path / "remote" / "blobs" / "sid-1").exists()
+
+
+def test_unpublish_leaves_the_local_copy_alone(tmp_path: Path) -> None:
+    """Nobody expects "stop sharing" to delete their own transcript."""
+    project = tmp_path / "project"
+    jsonl = write_session(project, session_id="sid-1")
+    remote = DirectoryRemote(tmp_path / "remote")
+    _publish(remote, project, "sid-1")
+
+    remote.unpublish("sid-1")
+
+    assert jsonl.is_file()
+
+
+def test_unpublishing_something_that_is_not_there_fails_clearly(tmp_path: Path) -> None:
+    remote = DirectoryRemote(tmp_path / "remote")
+    with pytest.raises(RemoteError, match="no está publicada aquí"):
+        remote.unpublish("sid-nope")
+
+
+def test_unpublish_refuses_an_unsafe_id(tmp_path: Path) -> None:
+    remote = DirectoryRemote(tmp_path / "remote")
+    with pytest.raises(RemoteError, match="id de sesión no válido"):
+        remote.unpublish("../../etc")
+
+
+def test_republishing_after_unpublishing_works(tmp_path: Path) -> None:
+    """The delete must not leave anything behind that blocks a later publish."""
+    project = tmp_path / "project"
+    write_session(project, session_id="sid-1")
+    remote = DirectoryRemote(tmp_path / "remote")
+    _publish(remote, project, "sid-1")
+    remote.unpublish("sid-1")
+    _publish(remote, project, "sid-1")
+
+    assert [s.session_id for s in remote.list_sessions()] == ["sid-1"]

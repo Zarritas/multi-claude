@@ -465,3 +465,32 @@ def test_silence_on_a_custom_port_does_not_repeat_the_port_hint(
     with pytest.raises(RemoteError) as excinfo:
         probe_ssh_access("git.empresa.com", "git", 2211)
     assert "el puerto SSH es otro" not in str(excinfo.value)
+
+
+# --- unpublishing over git ------------------------------------------------------------
+
+
+def test_unpublish_over_git_removes_it_for_everyone(bare_repo: Path, tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    write_session(project, session_id="sid-1")
+    ana = _remote(bare_repo, tmp_path, name="ana")
+    ana.publish(_meta("sid-1"), project)
+
+    ana.unpublish("sid-1")
+
+    # A fresh clone, i.e. a colleague, no longer sees it.
+    assert _remote(bare_repo, tmp_path, name="carlos").list_sessions() == ()
+
+
+def test_unpublish_over_git_leaves_the_local_copy(bare_repo: Path, tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    jsonl = write_session(project, session_id="sid-1")
+    remote = _remote(bare_repo, tmp_path)
+    remote.publish(_meta("sid-1"), project)
+    remote.unpublish("sid-1")
+    assert jsonl.is_file()
+
+
+def test_unpublishing_over_git_what_is_not_published_fails(bare_repo: Path, tmp_path: Path) -> None:
+    with pytest.raises(RemoteError, match="no está publicada aquí"):
+        _remote(bare_repo, tmp_path).unpublish("sid-nope")
