@@ -30,51 +30,92 @@ from tests.conftest import write_session
 # --- token store --------------------------------------------------------------------
 
 
-def test_token_is_stored_readable_only_by_its_owner(tmp_path: Path) -> None:
-    """It is a credential on disk; group/other must not be able to read it."""
-    store = TokenStore(tmp_path / "remote-token")
-    store.set("glpat-secreto")
+def _store(tmp_path: Path) -> TokenStore:
+    """A store isolated from the real one, legacy fallback included.
 
-    assert store.get() == "glpat-secreto"
-    mode = stat.S_IMODE((tmp_path / "remote-token").stat().st_mode)
+    Both paths are pinned: without that the fallback would read the developer's actual
+    ``~/.config/multi-claude/remote-token`` and the tests would depend on their machine.
+    """
+    return TokenStore(tmp_path / "remote-tokens.json", legacy=tmp_path / "remote-token")
+
+
+def test_tokens_are_stored_readable_only_by_their_owner(tmp_path: Path) -> None:
+    """They are credentials on disk; group/other must not be able to read them."""
+    store = _store(tmp_path)
+    store.set("glpat-secreto", "FactorLibre")
+
+    assert store.get("FactorLibre") == "glpat-secreto"
+    mode = stat.S_IMODE((tmp_path / "remote-tokens.json").stat().st_mode)
     assert mode == 0o600
 
 
+def test_each_server_keeps_its_own_token(tmp_path: Path) -> None:
+    """Two hosts do not share credentials, so one token per server."""
+    store = _store(tmp_path)
+    store.set("glpat-empresa", "FactorLibre")
+    store.set("github_pat_x", "GitHub")
+
+    assert store.get("FactorLibre") == "glpat-empresa"
+    assert store.get("GitHub") == "github_pat_x"
+    assert store.get("NoConfigurado") is None
+
+
 def test_missing_token_reads_as_none(tmp_path: Path) -> None:
-    assert TokenStore(tmp_path / "nope").get() is None
-    assert TokenStore(tmp_path / "nope").has_token() is False
+    store = _store(tmp_path)
+    assert store.get("cualquiera") is None
+    assert store.has_token("cualquiera") is False
 
 
-def test_blank_token_file_reads_as_none(tmp_path: Path) -> None:
-    path = tmp_path / "remote-token"
-    path.write_text("   \n", encoding="utf-8")
-    assert TokenStore(path).get() is None
+def test_a_corrupt_token_file_reads_as_none(tmp_path: Path) -> None:
+    path = tmp_path / "remote-tokens.json"
+    path.write_text("{no es json", encoding="utf-8")
+    assert TokenStore(path, legacy=tmp_path / "nada").get("x") is None
 
 
-def test_env_var_overrides_the_stored_token(
+def test_the_old_single_token_file_still_works(tmp_path: Path) -> None:
+    """An existing setup must keep publishing after tokens became per-server."""
+    legacy = tmp_path / "remote-token"
+    legacy.write_text("glpat-de-antes\n", encoding="utf-8")
+    store = TokenStore(tmp_path / "remote-tokens.json", legacy=legacy)
+
+    assert store.get("CualquierServidor") == "glpat-de-antes"
+    assert store.get() == "glpat-de-antes"
+
+
+def test_a_server_token_wins_over_the_legacy_one(tmp_path: Path) -> None:
+    legacy = tmp_path / "remote-token"
+    legacy.write_text("viejo\n", encoding="utf-8")
+    store = TokenStore(tmp_path / "remote-tokens.json", legacy=legacy)
+    store.set("nuevo", "FactorLibre")
+
+    assert store.get("FactorLibre") == "nuevo"
+    assert store.get("OtroServidor") == "viejo"
+
+
+def test_env_var_overrides_every_stored_token(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """So CI never has to write a secret to disk."""
-    store = TokenStore(tmp_path / "remote-token")
-    store.set("el-de-disco")
+    store = _store(tmp_path)
+    store.set("el-de-disco", "FactorLibre")
     monkeypatch.setenv(REMOTE_TOKEN_ENV, "el-del-entorno")
-    assert store.get() == "el-del-entorno"
+    assert store.get("FactorLibre") == "el-del-entorno"
 
 
-def test_token_can_be_deleted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_token_can_be_deleted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(REMOTE_TOKEN_ENV, raising=False)
-    store = TokenStore(tmp_path / "remote-token")
-    store.set("x")
-    store.delete()
-    assert store.get() is None
-    store.delete()  # idempotent
+    store = _store(tmp_path)
+    store.set("x", "FactorLibre")
+    store.delete("FactorLibre")
+    assert store.get("FactorLibre") is None
+    store.delete("FactorLibre")  # idempotent
 
 
-def test_token_lives_beside_the_config_not_inside_it(
+def test_tokens_live_beside_the_config_not_inside_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
-    assert token_path() == tmp_path / "multi-claude" / "remote-token"
+    assert token_path() == tmp_path / "multi-claude" / "remote-tokens.json"
     assert token_path().name != "config.json"
 
 

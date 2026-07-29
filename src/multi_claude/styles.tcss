@@ -45,12 +45,14 @@ ModalScreen Label {
  * container and take the buttons with it. A fixed height (rather than auto + max-height) is
  * what lets the middle claim 1fr.
  */
-RemoteSettingsModal > Vertical,
+ServerEditModal > Vertical,
+RepoLinkModal > Vertical,
 PublishModal > Vertical {
     height: 90%;
     overflow-y: hidden;
 }
-RemoteSettingsModal #remote-body,
+ServerEditModal #server-body,
+RepoLinkModal #link-body,
 PublishModal #publish-body {
     height: 1fr;
     overflow-y: auto;

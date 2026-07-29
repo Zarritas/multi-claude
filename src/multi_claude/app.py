@@ -65,7 +65,9 @@ class ClaudeBrowserApp(App[None]):
             return (RemoteLink(kind="directory", path=env),)
         own = self.project_remotes.get(project_remote_key(project.path))
         if own:
-            return own
+            # Resolved here so every consumer sees a complete link: a stored link only names
+            # its server, and the server's provider and host live in the config.
+            return tuple(link.resolved(self.prefs.remote_servers) for link in own)
         fallback = self.prefs.remote_link()
         return (fallback,) if fallback.is_configured else ()
 

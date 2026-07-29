@@ -902,6 +902,7 @@ class SessionsScreen(Screen[None]):
                 project_name=self.project.name,
                 links=list(self._remote_links),
                 inherited=not self._claude_app.project_remotes.get(self._remote_key()),
+                servers=list(self._claude_app.prefs.remote_servers),
             ),
             self._apply_links,
         )

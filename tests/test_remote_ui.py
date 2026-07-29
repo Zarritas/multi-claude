@@ -391,101 +391,162 @@ async def test_publish_is_unavailable_without_a_remote(
 # --- configuring the remote from the UI ---------------------------------------------
 
 
-async def test_remote_settings_modal_collects_every_field(world: Path) -> None:
+async def test_linking_a_repo_only_asks_what_is_repo_specific(world: Path) -> None:
+    """The server supplies provider and host, so the link only needs repo, branch and label."""
     from textual.widgets import Input, RadioButton
 
-    from multi_claude.modals import RemoteSettingsModal
-    from multi_claude.project_remotes import RemoteLink
+    from multi_claude.modals import RepoLinkModal
+    from multi_claude.project_remotes import RemoteLink, RemoteServer
 
+    servers = [RemoteServer(name="FactorLibre", kind="gitlab", host="https://git.empresa.com")]
     app = ClaudeBrowserApp()
     async with app.run_test() as pilot:
         await pilot.pause()
-        modal = RemoteSettingsModal(RemoteLink())
+        modal = RepoLinkModal(RemoteLink(), servers=servers)
         app.push_screen(modal)
-        await pilot.pause()
+        for _ in range(6):
+            await pilot.pause()
 
-        modal.query_one("#kind-gitlab", RadioButton).value = True
-        modal.query_one("#remote-host", Input).value = "https://git.empresa.com/"
-        modal.query_one("#remote-repo", Input).value = "/grupo/sesiones/"
-        modal.query_one("#remote-branch", Input).value = "trunk"
+        modal.query_one("#target-0", RadioButton).value = True
+        modal.query_one("#link-repo", Input).value = "/grupo/sesiones/"
+        modal.query_one("#link-branch", Input).value = "trunk"
         await pilot.pause()
 
         result = modal.collect()
+        assert result.server == "FactorLibre"
         assert result.kind == "gitlab"
-        # Trailing slashes stripped: they would produce doubled-up URLs.
         assert result.host == "https://git.empresa.com"
-        assert result.repo == "grupo/sesiones"
+        assert result.repo == "grupo/sesiones"  # trailing slashes stripped
         assert result.branch == "trunk"
-        # The tab falls back to the repo's last segment when no label is typed.
         assert result.tab_label() == "sesiones"
+
+
+async def test_a_configured_server_appears_when_linking_a_repo(world: Path) -> None:
+    """The whole point: servers set up in Ajustes are offered here by name."""
+    from dataclasses import replace
+
+    from textual.widgets import Button, RadioButton
+
+    from multi_claude.modals import ProjectRemotesModal, RepoLinkModal
+    from multi_claude.project_remotes import RemoteServer
+
+    app = ClaudeBrowserApp()
+    async with app.run_test() as pilot:
+        await _open_sessions(pilot)
+        app.update_prefs(
+            replace(
+                app.prefs,
+                remote_servers=[
+                    RemoteServer(name="FactorLibre", host="https://git.factorlibre.com"),
+                    RemoteServer(name="GitHub propio", kind="github"),
+                ],
+            )
+        )
+
+        await pilot.press("L")
+        for _ in range(8):
+            await pilot.pause()
+        manage = app.screen
+        assert isinstance(manage, ProjectRemotesModal)
+        manage.query_one("#add", Button).press()
+        for _ in range(8):
+            await pilot.pause()
+
+        link_modal = app.screen
+        assert isinstance(link_modal, RepoLinkModal)
+        offered = [
+            str(button.label) for button in link_modal.query(RadioButton)
+        ]
+        assert any("FactorLibre" in text for text in offered)
+        assert any("GitHub propio" in text for text in offered)
+        assert any("Carpeta compartida" in text for text in offered)
 
 
 async def test_the_token_never_reaches_the_config_file(
     world: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """config.json gets shared and pasted into issues; a credential there leaks."""
+    from dataclasses import replace
+
     from textual.widgets import Input
 
     from multi_claude.config import config_path
-    from multi_claude.modals import RemoteSettingsModal
-    from multi_claude.project_remotes import RemoteLink
+    from multi_claude.modals import ServerEditModal
+    from multi_claude.project_remotes import RemoteServer
     from multi_claude.remote import TokenStore, token_path
 
     monkeypatch.delenv("MULTI_CLAUDE_REMOTE_TOKEN", raising=False)
     app = ClaudeBrowserApp()
     async with app.run_test() as pilot:
         await pilot.pause()
-        modal = RemoteSettingsModal(RemoteLink(kind="gitlab", repo="g/s"))
+        modal = ServerEditModal(RemoteServer(name="FactorLibre"))
         app.push_screen(modal)
-        await pilot.pause()
-        modal.query_one("#remote-token", Input).value = "glpat-muy-secreto"
+        for _ in range(6):
+            await pilot.pause()
+        modal.query_one("#server-token", Input).value = "glpat-muy-secreto"
         await pilot.pause()
 
-        collected = modal.collect()
-        token = modal.token_to_save()
+        server = modal.collect()
+        token = modal.typed_token()
         assert token == "glpat-muy-secreto"
-        # The token is absent from every field of the config that gets serialised.
-        assert "glpat-muy-secreto" not in json.dumps(collected.to_dict())
+        # Absent from the server object and from the config it gets stored in.
+        assert "glpat-muy-secreto" not in json.dumps(server.to_dict())
+        assert "glpat-muy-secreto" not in json.dumps(
+            replace(app.prefs, remote_servers=[server]).to_dict()
+        )
 
-        TokenStore().set(token or "")
-        app.update_prefs(collected)
+        TokenStore().set(token or "", server.name)
+        app.update_prefs(replace(app.prefs, remote_servers=[server]))
         await pilot.pause()
 
         assert "glpat-muy-secreto" not in config_path().read_text(encoding="utf-8")
-        assert TokenStore().get() == "glpat-muy-secreto"
+        assert TokenStore().get("FactorLibre") == "glpat-muy-secreto"
         assert stat.S_IMODE(token_path().stat().st_mode) == 0o600
 
 
 async def test_an_empty_token_field_keeps_the_stored_one(world: Path) -> None:
     """Reopening the modal must not wipe the saved token just by saving again."""
-    from multi_claude.modals import RemoteSettingsModal
-    from multi_claude.project_remotes import RemoteLink
+    from multi_claude.modals import ServerEditModal
+    from multi_claude.project_remotes import RemoteServer
 
     app = ClaudeBrowserApp()
     async with app.run_test() as pilot:
         await pilot.pause()
-        modal = RemoteSettingsModal(RemoteLink(), has_token=True)
+        modal = ServerEditModal(RemoteServer(name="FactorLibre"), has_token=True)
         app.push_screen(modal)
-        await pilot.pause()
-        assert modal.token_to_save() is None  # None means "leave it alone"
+        for _ in range(6):
+            await pilot.pause()
+        assert modal.typed_token() is None  # None means "leave it alone"
 
 
-async def test_settings_shows_the_remote_summary_and_opens_the_remote_modal(world: Path) -> None:
+async def test_settings_opens_the_server_list_and_the_global_remote(world: Path) -> None:
     from textual.widgets import Button, Label
 
-    from multi_claude.modals import RemoteSettingsModal, SettingsModal
+    from multi_claude.modals import RepoLinkModal, ServersModal, SettingsModal
 
     app = ClaudeBrowserApp()
-    async with app.run_test() as pilot:
+    async with app.run_test(size=(100, 34)) as pilot:
         await pilot.pause()
         settings = SettingsModal(app.prefs)
         app.push_screen(settings)
-        await pilot.pause()
+        for _ in range(6):
+            await pilot.pause()
 
         assert "desactivado" in str(settings.query_one("#remote-summary", Label).content)
+        assert "ninguno" in str(settings.query_one("#servers-summary", Label).content)
+
+        settings.query_one("#configure-servers", Button).press()
+        for _ in range(6):
+            await pilot.pause()
+        assert isinstance(app.screen, ServersModal)
+        app.pop_screen()
+        for _ in range(6):
+            await pilot.pause()
+
         settings.query_one("#configure-remote", Button).press()
-        await pilot.pause()
-        assert isinstance(app.screen, RemoteSettingsModal)
+        for _ in range(6):
+            await pilot.pause()
+        assert isinstance(app.screen, RepoLinkModal)
 
 
 async def test_the_env_var_overrides_every_configured_remote(world: Path) -> None:

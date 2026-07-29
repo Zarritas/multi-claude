@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Literal
 
 from multi_claude.colors import ColorRule
-from multi_claude.project_remotes import RemoteLink
+from multi_claude.project_remotes import RemoteLink, RemoteServer
 
 # Where the session lands. ``split``/``tab`` reuse the current window, ``window``
 # opens a new one, ``suspend`` runs inline after suspending the TUI, ``auto``
@@ -95,11 +95,15 @@ class Config:
     preview_visible: bool = True
     group_worktrees: bool = True
     color_rules: list[ColorRule] = field(default_factory=list)
+    # Preconfigured hosts, so a repo only needs its own name and branch. Their tokens live
+    # in remote-tokens.json, never here.
+    remote_servers: list[RemoteServer] = field(default_factory=list)
     remote_kind: RemoteKind = "none"
     remote_path: str = ""
     remote_host: str = ""
     remote_repo: str = ""
     remote_branch: str = "main"
+    remote_server: str = ""
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -115,16 +119,23 @@ class Config:
             "remote_host": self.remote_host,
             "remote_repo": self.remote_repo,
             "remote_branch": self.remote_branch,
+            "remote_server": self.remote_server,
+            "remote_servers": [s.to_dict() for s in self.remote_servers],
         }
 
     def remote_link(self) -> RemoteLink:
-        """The global remote as a :class:`RemoteLink`, the shape everything else speaks."""
+        """The global remote as a :class:`RemoteLink`, resolved against the servers."""
+        return self._raw_remote_link().resolved(self.remote_servers)
+
+    def _raw_remote_link(self) -> RemoteLink:
+        """The stored global link, before a server fills in its kind and host."""
         return RemoteLink(
             kind=self.remote_kind,
             path=self.remote_path,
             host=self.remote_host,
             repo=self.remote_repo,
             branch=self.remote_branch,
+            server=self.remote_server,
         )
 
     def with_remote_link(self, link: RemoteLink) -> Config:
@@ -137,6 +148,7 @@ class Config:
             remote_host=clean.host,
             remote_repo=clean.repo,
             remote_branch=clean.branch,
+            remote_server=clean.server,
         )
 
     def remote_api_host(self) -> str:
@@ -205,6 +217,8 @@ def load_config(path: Path | None = None) -> Config:
         remote_host=_coerce_str(raw.get("remote_host")),
         remote_repo=_coerce_str(raw.get("remote_repo")),
         remote_branch=_coerce_str(raw.get("remote_branch")) or "main",
+        remote_server=_coerce_str(raw.get("remote_server")),
+        remote_servers=_coerce_servers(raw.get("remote_servers")),
     )
 
 
@@ -261,6 +275,21 @@ def _coerce_remote_kind(value: object) -> RemoteKind:
         if value == kind:
             return kind
     return "none"
+
+
+def _coerce_servers(value: object) -> list[RemoteServer]:
+    if not isinstance(value, list):
+        return []
+    servers = [RemoteServer.from_dict(item) for item in value]
+    # Names identify a server, so a duplicate would make links ambiguous: first one wins.
+    seen: set[str] = set()
+    unique: list[RemoteServer] = []
+    for server in servers:
+        if server is None or server.name in seen:
+            continue
+        seen.add(server.name)
+        unique.append(server)
+    return unique
 
 
 def _coerce_str(value: object) -> str:

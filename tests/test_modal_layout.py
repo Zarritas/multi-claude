@@ -21,7 +21,7 @@ from multi_claude import modals as M
 from multi_claude.app import ClaudeBrowserApp
 from multi_claude.colors import ColorRule
 from multi_claude.config import Config
-from multi_claude.project_remotes import RemoteLink
+from multi_claude.project_remotes import RemoteLink, RemoteServer
 
 # Box-drawing and scrollbar glyphs that sit between words once the screen is flattened.
 _CHROME = re.compile(r"[█▀▄▔▁▊▎▆▃▂▅▇░▒▓│─┌┐└┘├┤┬┴┼]")
@@ -52,15 +52,33 @@ CASES: dict[str, tuple[Callable[[], ModalScreen], list[str], list[str]]] = {
         ["Ajustes", "Guardar", "Cancelar"],
         ["Enter (predeterminado)", "Argumentos para"],
     ),
-    "remote-settings-gitlab": (
-        lambda: M.RemoteSettingsModal(RemoteLink(kind="gitlab")),
-        ["Ctrl+T prueba la conexión", "Guardar", "Probar", "Cancelar"],
-        ["Dónde se publican", "Repositorio de sesiones", "permisos 0600"],
+    "server-edit": (
+        lambda: M.ServerEditModal(RemoteServer(name="FactorLibre", kind="gitlab")),
+        ["Servidor de sesiones", "Ctrl+T prueba la conexión", "Guardar", "Probar", "Cancelar"],
+        ["Nombre", "Proveedor", "permisos 0600"],
     ),
-    "remote-settings-directory": (
-        lambda: M.RemoteSettingsModal(RemoteLink(kind="directory")),
+    "servers-list": (
+        lambda: M.ServersModal(
+            [
+                RemoteServer(name="FactorLibre", host="https://git.factorlibre.com"),
+                RemoteServer(name="GitHub", kind="github"),
+            ]
+        ),
+        ["Servidores de sesiones", "Añadir…", "Guardar", "Cancelar"],
+        ["FactorLibre", "GitHub"],
+    ),
+    "repo-link": (
+        lambda: M.RepoLinkModal(
+            RemoteLink(),
+            servers=[RemoteServer(name="FactorLibre", host="https://git.factorlibre.com")],
+        ),
+        ["Repositorio de sesiones", "Guardar", "Cancelar"],
+        ["Dónde", "Carpeta compartida", "Nombre de la pestaña"],
+    ),
+    "repo-link-no-servers": (
+        lambda: M.RepoLinkModal(RemoteLink(), servers=[]),
         ["Guardar", "Cancelar"],
-        ["Carpeta compartida", "Nombre de la pestaña"],
+        ["No hay servidores configurados"],
     ),
     "project-remotes": (
         lambda: M.ProjectRemotesModal(

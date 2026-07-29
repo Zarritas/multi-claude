@@ -24,6 +24,7 @@ import json
 import os
 import re
 import tempfile
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -34,6 +35,51 @@ DEFAULT_REMOTE_HOSTS: dict[str, str] = {
 }
 
 _SCHEME_RE = re.compile(r"\A[a-zA-Z][a-zA-Z0-9+.-]*://")
+
+_LINK_KINDS = ("directory", "gitlab", "github")
+
+
+@dataclass(frozen=True)
+class RemoteServer:
+    """A configured host you can publish to: provider, URL and (elsewhere) its token.
+
+    Split out from :class:`RemoteLink` because the two change at different rates. A company
+    has one or two servers and a repo per client, so typing the host and pasting a token for
+    every repo was busywork — and it meant the same credential lived in several places.
+
+    Links refer to a server **by name** rather than copying its host, so correcting a URL or
+    rotating a token fixes every repo pointing at it at once.
+    """
+
+    name: str
+    kind: str = "gitlab"
+    host: str = ""
+
+    @property
+    def api_host(self) -> str:
+        return self.host or DEFAULT_REMOTE_HOSTS.get(self.kind, "")
+
+    @property
+    def is_configured(self) -> bool:
+        return bool(self.name and self.kind in ("gitlab", "github") and self.api_host)
+
+    def summary(self) -> str:
+        host = self.api_host.replace("https://", "").replace("http://", "").rstrip("/")
+        return f"{self.kind} · {host}"
+
+    def to_dict(self) -> dict[str, str]:
+        return {"name": self.name, "kind": self.kind, "host": self.host}
+
+    @classmethod
+    def from_dict(cls, raw: object) -> RemoteServer | None:
+        if not isinstance(raw, dict):
+            return None
+        name, kind = raw.get("name"), raw.get("kind")
+        if not isinstance(name, str) or not name.strip():
+            return None
+        if not isinstance(kind, str) or kind not in ("gitlab", "github"):
+            return None
+        return cls(name=name.strip(), kind=kind, host=_as_str(raw.get("host")).rstrip("/"))
 
 
 @dataclass(frozen=True)
@@ -54,6 +100,9 @@ class RemoteLink:
     repo: str = ""
     branch: str = "main"
     label: str = ""
+    # Name of a configured RemoteServer. When set, it supplies kind and host, and the link
+    # only carries what is specific to the repo.
+    server: str = ""
 
     def tab_label(self) -> str:
         """Short name for the tab: the explicit label, or one derived from the target."""
@@ -64,6 +113,19 @@ class RemoteLink:
         if self.repo:
             return self.repo.rstrip("/").rsplit("/", 1)[-1]
         return self.kind or "remoto"
+
+    def resolved(self, servers: Sequence[RemoteServer]) -> RemoteLink:
+        """This link with ``kind`` and ``host`` filled in from the server it names.
+
+        A link naming a server that no longer exists resolves to ``kind="none"``: better
+        inert, and visibly so, than silently publishing somewhere else.
+        """
+        if not self.server:
+            return self
+        for server in servers:
+            if server.name == self.server:
+                return replace(self, kind=server.kind, host=server.api_host)
+        return replace(self, kind="none")
 
     def same_target(self, other: RemoteLink) -> bool:
         """Whether two links point at the same place, ignoring the label.
@@ -111,6 +173,7 @@ class RemoteLink:
             "repo": self.repo,
             "branch": self.branch,
             "label": self.label,
+            "server": self.server,
         }
 
     @classmethod
@@ -119,15 +182,19 @@ class RemoteLink:
         if not isinstance(raw, dict):
             return None
         kind = raw.get("kind")
-        if not isinstance(kind, str) or kind not in ("directory", "gitlab", "github"):
+        server = _as_str(raw.get("server"))
+        # A link that names a server does not carry its own kind: that comes from the server
+        # when the link is resolved, so an empty kind here is expected rather than broken.
+        if not server and (not isinstance(kind, str) or kind not in _LINK_KINDS):
             return None
         return cls(
-            kind=kind,
+            kind=kind if isinstance(kind, str) else "",
             path=_as_str(raw.get("path")),
             host=_as_str(raw.get("host")),
             repo=_as_str(raw.get("repo")),
             branch=_as_str(raw.get("branch")) or "main",
             label=_as_str(raw.get("label")),
+            server=_as_str(raw.get("server")),
         )
 
     def normalised(self) -> RemoteLink:
@@ -139,6 +206,7 @@ class RemoteLink:
             repo=self.repo.strip().strip("/"),
             branch=self.branch.strip() or "main",
             label=self.label.strip(),
+            server=self.server.strip(),
         )
 
 

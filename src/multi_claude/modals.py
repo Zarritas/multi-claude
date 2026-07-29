@@ -21,7 +21,6 @@ from textual.widgets import Button, Input, Label, RadioButton, RadioSet, Static
 from multi_claude.colors import PALETTE, ColorRule
 from multi_claude.config import (
     VALID_MODES,
-    VALID_REMOTE_KINDS,
     ClaudeArgsError,
     Config,
     LaunchMode,
@@ -30,7 +29,7 @@ from multi_claude.config import (
 )
 from multi_claude.discovery import Project
 from multi_claude.launcher import PLACEMENT_LABELS, preview_dispatch
-from multi_claude.project_remotes import RemoteLink
+from multi_claude.project_remotes import RemoteLink, RemoteServer
 from multi_claude.tags import parse_tag_list
 
 
@@ -894,6 +893,19 @@ class SettingsModal(ModalScreen[Config | None]):
                     yield Label("", id="args-error", classes="error")
 
                 with TabPane("Sesiones compartidas", id="tab-remote"):
+                    yield Label("Servidores", classes="section")
+                    yield Label(
+                        _servers_summary(self._initial.remote_servers),
+                        id="servers-summary",
+                        classes="hint",
+                    )
+                    yield Label(
+                        "Se configuran una vez y se eligen por nombre al enlazar un "
+                        "repositorio a un proyecto (L).",
+                        classes="hint",
+                    )
+                    yield Button("Servidores…", id="configure-servers", variant="default")
+
                     yield Label("Remoto global", classes="section")
                     yield Label(self._initial.remote_summary(), id="remote-summary", classes="hint")
                     yield Label(
@@ -938,6 +950,17 @@ class SettingsModal(ModalScreen[Config | None]):
     def _save(self) -> None:
         self._try_dismiss()
 
+    @on(Button.Pressed, "#configure-servers")
+    def _configure_servers(self) -> None:
+        """Manage the configured servers, nested on top of these settings."""
+        self.app.push_screen(ServersModal(list(self._initial.remote_servers)), self._on_servers)
+
+    def _on_servers(self, servers: list[RemoteServer] | None) -> None:
+        if servers is None:
+            return  # cancelled
+        self._initial = replace(self._initial, remote_servers=servers)
+        self.query_one("#servers-summary", Label).update(_servers_summary(servers))
+
     @on(Button.Pressed, "#configure-remote")
     def _configure_remote(self) -> None:
         """Open the remote settings on top, and fold its result into our own.
@@ -945,23 +968,16 @@ class SettingsModal(ModalScreen[Config | None]):
         Nested rather than inlined: the remote needs five fields plus a connection test,
         which would bury the launch settings this modal exists for.
         """
-        from multi_claude.remote import TokenStore
-
-        modal = RemoteSettingsModal(
+        modal = RepoLinkModal(
             self._initial.remote_link(),
-            has_token=TokenStore().has_token(),
-            title="Remoto global (fallback de proyectos sin enlace)",
+            servers=list(self._initial.remote_servers),
+            title="Remoto global (para proyectos sin enlaces propios)",
         )
-        self.app.push_screen(modal, lambda result: self._on_remote_configured(modal, result))
+        self.app.push_screen(modal, self._on_remote_configured)
 
-    def _on_remote_configured(self, modal: RemoteSettingsModal, result: RemoteLink | None) -> None:
+    def _on_remote_configured(self, result: RemoteLink | None) -> None:
         if result is None:
             return  # cancelled: leave the remote settings untouched
-        from multi_claude.remote import TokenStore
-
-        token = modal.token_to_save()
-        if token:
-            TokenStore().set(token)
         # ``_collect`` builds on ``_initial``, so updating it is what carries the remote
         # fields into the config this modal eventually returns.
         self._initial = self._initial.with_remote_link(result)
@@ -1027,6 +1043,13 @@ class SettingsModal(ModalScreen[Config | None]):
         return f"Shift+Enter → {_MODE_LABELS[alternate_for(default)]}"
 
 
+def _servers_summary(servers: list[RemoteServer]) -> str:
+    """One line naming the configured servers, for the settings tab."""
+    if not servers:
+        return "ninguno configurado"
+    return f"{len(servers)}: " + ", ".join(s.name for s in servers)
+
+
 _REMOTE_KIND_LABELS: dict[str, str] = {
     "none": "Desactivado",
     "directory": "Carpeta compartida (montaje, Syncthing…)",
@@ -1035,17 +1058,15 @@ _REMOTE_KIND_LABELS: dict[str, str] = {
 }
 
 
-class RemoteSettingsModal(ModalScreen["RemoteLink | None"]):
-    """Configure one sessions remote: provider, host, repo, branch, token and tab name.
+class ServerEditModal(ModalScreen["RemoteServer | None"]):
+    """Define a server you can publish to: name, provider, host and token.
 
-    Speaks :class:`RemoteLink` rather than ``Config`` so the same screen serves both the
-    global remote and each per-project link — a project can be linked to several, and they
-    all need exactly these fields.
+    Servers are configured once in Ajustes and then picked by name when linking a repo, so a
+    host and a token get typed once instead of once per repository.
 
-    The token is the exception: it never enters the returned value, because that may be
-    written to ``config.json``. It is saved straight to
-    :class:`~multi_claude.remote.TokenStore`, and the field shows whether one exists without
-    ever rendering it.
+    The token never enters the returned value, because servers are stored in ``config.json``.
+    It goes straight to :class:`~multi_claude.remote.TokenStore` keyed by server name, and the
+    field shows whether one exists without ever rendering it.
     """
 
     BINDINGS = [
@@ -1054,150 +1075,85 @@ class RemoteSettingsModal(ModalScreen["RemoteLink | None"]):
     ]
 
     DEFAULT_CSS = """
-    RemoteSettingsModal {
+    ServerEditModal {
         align: center middle;
     }
-    RemoteSettingsModal > Vertical {
+    ServerEditModal > Vertical {
         background: $surface;
         border: thick $primary;
         padding: 1 2;
-        width: 86;
+        width: 80;
         height: auto;
     }
-    RemoteSettingsModal Label.title {
-        text-style: bold;
-    }
-    RemoteSettingsModal Label.section {
-        text-style: bold;
-        color: $accent;
-    }
-    RemoteSettingsModal Label.hint {
-        color: $text-muted;
-    }
-    RemoteSettingsModal Label.error {
-        color: $error;
-    }
-    RemoteSettingsModal Label.ok {
-        color: $success;
-    }
-    RemoteSettingsModal #fields-directory,
-    RemoteSettingsModal #fields-repo,
-    RemoteSettingsModal #fields-common {
-        height: auto;
-    }
-    RemoteSettingsModal Horizontal {
-        align: center middle;
-        height: auto;
-        margin-top: 1;
-    }
-    RemoteSettingsModal Button {
-        margin: 0 1;
-    }
+    ServerEditModal Label.title { text-style: bold; }
+    ServerEditModal Label.section { text-style: bold; color: $accent; }
+    ServerEditModal Label.hint { color: $text-muted; }
+    ServerEditModal Label.error { color: $error; }
+    ServerEditModal Label.ok { color: $success; }
+    ServerEditModal Horizontal { align: center middle; height: auto; margin-top: 1; }
+    ServerEditModal Button { margin: 0 1; }
     """
 
-    def __init__(
-        self, link: RemoteLink, *, has_token: bool = False, title: str | None = None
-    ) -> None:
+    def __init__(self, server: RemoteServer, *, has_token: bool = False) -> None:
         super().__init__()
-        self._initial = link
+        self._initial = server
         self._has_token = has_token
-        self._title_text = title or "Ajustes — sesiones compartidas"
 
     def compose(self) -> ComposeResult:
         from textual.containers import Horizontal, VerticalScroll
 
         with Vertical():
-            yield Label(self._title_text, classes="title")
+            yield Label("Servidor de sesiones", classes="title")
             yield Label("Ctrl+T prueba la conexión · Enter guarda · Esc cancela", classes="hint")
 
-            # Only the fields scroll. Title and buttons stay pinned, so on a short terminal
-            # the modal never hides how to accept or dismiss it.
-            with VerticalScroll(id="remote-body"):
-              yield Label("Dónde se publican", classes="section")
-              with RadioSet(id="remote-kind"):
-                  for kind in VALID_REMOTE_KINDS:
-                      yield RadioButton(
-                          _REMOTE_KIND_LABELS[kind],
-                          value=(kind == self._initial.kind),
-                          id=f"kind-{kind}",
-                      )
+            # Fields in a scrollable body so the title, the keys and the buttons stay put on a
+            # short terminal — the same shape the other long forms use.
+            with VerticalScroll(id="server-body"):
+                yield Label("Nombre", classes="section")
+                yield Input(
+                    value=self._initial.name, placeholder="FactorLibre GitLab", id="server-name"
+                )
 
-              # Only the fields the chosen provider actually needs are shown. Rendering all of
-              # them made the modal taller than most terminals, so it scrolled and pushed its
-              # own title out of view; it also asked for a repo when publishing to a folder.
-              with Vertical(id="fields-directory"):
-                  yield Label("Carpeta compartida", classes="section")
-                  yield Input(
-                      value=self._initial.path,
-                      placeholder="/mnt/equipo/sesiones-claude",
-                      id="remote-path",
-                  )
+                yield Label("Proveedor", classes="section")
+                with RadioSet(id="server-kind"):
+                    yield RadioButton(
+                        "GitLab", value=self._initial.kind != "github", id="server-kind-gitlab"
+                    )
+                    yield RadioButton(
+                        "GitHub", value=self._initial.kind == "github", id="server-kind-github"
+                    )
 
-              with Vertical(id="fields-repo"):
-                  yield Label("Servidor (vacío = gitlab.com / api.github.com)", classes="section")
-                  yield Input(
-                      value=self._initial.host,
-                      placeholder="https://git.tuempresa.com",
-                      id="remote-host",
-                  )
+                yield Label(
+                    "URL de la API (vacío = gitlab.com / api.github.com)", classes="section"
+                )
+                yield Input(
+                    value=self._initial.host,
+                    placeholder="https://git.tuempresa.com",
+                    id="server-host",
+                )
 
-                  yield Label("Repositorio de sesiones", classes="section")
-                  yield Input(
-                      value=self._initial.repo,
-                      placeholder="grupo/sesiones-claude",
-                      id="remote-repo",
-                  )
+                yield Label("Token (lectura y escritura sobre los repos)", classes="section")
+                yield Input(
+                    placeholder=(
+                        "•••• guardado (escribe para reemplazarlo)"
+                        if self._has_token
+                        else "glpat-… / github_pat_…"
+                    ),
+                    password=True,
+                    id="server-token",
+                )
+                yield Label(
+                    "Se guarda aparte con permisos 0600, nunca en config.json", classes="hint"
+                )
 
-                  yield Label("Rama", classes="section")
-                  yield Input(value=self._initial.branch, placeholder="main", id="remote-branch")
-
-                  yield Label("Token (lectura y escritura sobre el repo)", classes="section")
-                  yield Input(
-                      placeholder=(
-                          "•••• guardado (escribe para reemplazarlo)"
-                          if self._has_token
-                          else "glpat-… / github_pat_…"
-                      ),
-                      password=True,
-                      id="remote-token",
-                  )
-                  yield Label(
-                      "Se guarda aparte con permisos 0600, nunca en config.json", classes="hint"
-                  )
-
-              with Vertical(id="fields-common"):
-                  yield Label("Nombre de la pestaña (opcional)", classes="section")
-                  yield Input(
-                      value=self._initial.label,
-                      placeholder=self._initial.tab_label(),
-                      id="remote-label",
-                  )
-
-            yield Label("", id="remote-status", classes="hint")
+            yield Label("", id="server-status", classes="hint")
             with Horizontal():
                 yield Button("Cancelar", id="cancel", variant="default")
                 yield Button("Probar", id="test", variant="default")
                 yield Button("Guardar", id="save", variant="primary")
 
     def on_mount(self) -> None:
-        self._sync_visible_fields(self._initial.kind)
-        self.query_one("#remote-kind", RadioSet).focus()
-        # Focusing scrolls the container to reveal the radio, which pushes the title off the
-        # top on a short terminal. Put it back once the layout has settled.
-        self.call_after_refresh(self._scroll_to_top)
-
-    def _scroll_to_top(self) -> None:
-        self.query_one("#remote-body").scroll_home(animate=False)
-
-    @on(RadioSet.Changed, "#remote-kind")
-    def _on_kind_changed(self, event: RadioSet.Changed) -> None:
-        self._sync_visible_fields(self._kind_from_radio())
-
-    def _sync_visible_fields(self, kind: str) -> None:
-        """Show only what ``kind`` needs; hide the rest so the modal stays short."""
-        self.query_one("#fields-directory").display = kind == "directory"
-        self.query_one("#fields-repo").display = kind in ("gitlab", "github")
-        self.query_one("#fields-common").display = kind != "none"
+        self.query_one("#server-name", Input).focus()
 
     @on(Button.Pressed, "#cancel")
     def _cancel(self) -> None:
@@ -1205,52 +1161,71 @@ class RemoteSettingsModal(ModalScreen["RemoteLink | None"]):
 
     @on(Button.Pressed, "#save")
     def _save(self) -> None:
-        self.dismiss(self.collect())
+        self._try_save()
 
     @on(Button.Pressed, "#test")
     def _test(self) -> None:
         self.action_test()
 
+    @on(Input.Submitted)
+    def _submitted(self) -> None:
+        self._try_save()
+
     def action_cancel(self) -> None:
         self.dismiss(None)
 
-    def action_test(self) -> None:
-        """Check the settings as typed, before saving them.
+    def _try_save(self) -> None:
+        server = self.collect()
+        status = self.query_one("#server-status", Label)
+        if not server.name:
+            self._set_status(status, "Ponle un nombre al servidor", ok=False)
+            self.query_one("#server-name", Input).focus()
+            return
+        token = self.typed_token()
+        if token:
+            from multi_claude.remote import TokenStore
 
-        Deliberately synchronous: it is a single API call the user just asked for, and a
-        worker here would need to survive the modal closing underneath it.
-        """
+            TokenStore().set(token, server.name)
+        self.dismiss(server)
+
+    def action_test(self) -> None:
+        """Check the server as typed, before saving it."""
         from multi_claude.remote import RemoteError, TokenStore, store_from_link
 
-        status = self.query_one("#remote-status", Label)
-        candidate = self.collect()
-        if candidate.kind == "none":
-            self._set_status(status, "Compartir está desactivado", ok=False)
+        status = self.query_one("#server-status", Label)
+        server = self.collect()
+        if not server.is_configured:
+            self._set_status(status, "Falta el nombre o la URL", ok=False)
             return
-        if not candidate.is_configured:
-            self._set_status(status, "Configuración incompleta (falta ruta o repo)", ok=False)
+        token = self.typed_token() or TokenStore().get(server.name)
+        if not token:
+            self._set_status(status, "Falta el token", ok=False)
             return
-        token = self._typed_token() or TokenStore().get()
-        store = store_from_link(candidate, token=token)
+        # A server on its own has no repo to talk to, so the check needs one. Any name will do:
+        # a 404 still proves the host answers and the token is accepted, while 401 proves it
+        # is not — which is the useful distinction here.
+        probe = RemoteLink(
+            kind=server.kind, host=server.api_host, repo="multi-claude/_probe", branch="main"
+        )
+        store = store_from_link(probe, token=token)
         if store is None:
-            self._set_status(status, "Configuración incompleta (falta ruta o repo)", ok=False)
+            self._set_status(status, "Configuración incompleta", ok=False)
             return
         check = getattr(store, "check_connection", None)
         if not callable(check):
-            # A directory has nothing to authenticate: existence is the whole check.
-            exists = Path(candidate.path).expanduser().is_dir()
-            self._set_status(
-                status,
-                f"OK · carpeta accesible: {candidate.path}"
-                if exists
-                else f"La carpeta no existe todavía: {candidate.path}",
-                ok=exists,
-            )
+            self._set_status(status, "Este proveedor no admite prueba de conexión", ok=False)
             return
         try:
-            self._set_status(status, check(), ok=True)
+            check()
+            self._set_status(status, f"OK · {server.summary()} responde", ok=True)
         except RemoteError as exc:
-            self._set_status(status, str(exc), ok=False)
+            message = str(exc)
+            if message.startswith("404"):
+                self._set_status(
+                    status, f"OK · {server.summary()} responde y acepta el token", ok=True
+                )
+            else:
+                self._set_status(status, message, ok=False)
 
     @staticmethod
     def _set_status(label: Label, message: str, *, ok: bool) -> None:
@@ -1258,35 +1233,322 @@ class RemoteSettingsModal(ModalScreen["RemoteLink | None"]):
         label.add_class("ok" if ok else "error")
         label.update(message)
 
-    def _typed_token(self) -> str | None:
-        """The token as typed, or None to mean "keep whatever is already stored"."""
-        typed = self.query_one("#remote-token", Input).value.strip()
-        return typed or None
+    def typed_token(self) -> str | None:
+        """The token as typed, or None meaning "keep whatever is already stored"."""
+        return self.query_one("#server-token", Input).value.strip() or None
 
-    def token_to_save(self) -> str | None:
-        """The token the caller should persist, or None if the user left it untouched."""
-        return self._typed_token()
+    def collect(self) -> RemoteServer:
+        pressed = self.query_one("#server-kind", RadioSet).pressed_button
+        kind = (
+            "github" if (pressed is not None and pressed.id == "server-kind-github") else "gitlab"
+        )
+        return RemoteServer(
+            name=self.query_one("#server-name", Input).value.strip(),
+            kind=kind,
+            host=self.query_one("#server-host", Input).value.strip().rstrip("/"),
+        )
+
+
+class ServersModal(ModalScreen["list[RemoteServer] | None"]):
+    """Manage the configured servers. Returns the final list, or None on cancel."""
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+        Binding("a", "add", "Añadir"),
+        Binding("e", "edit", "Editar"),
+        Binding("delete", "remove", "Quitar"),
+    ]
+
+    DEFAULT_CSS = """
+    ServersModal { align: center middle; }
+    ServersModal > Vertical {
+        background: $surface;
+        border: thick $primary;
+        padding: 1 2;
+        width: 80;
+        height: auto;
+    }
+    ServersModal Label.title { text-style: bold; }
+    ServersModal Label.hint { color: $text-muted; }
+    ServersModal Horizontal { align: center middle; height: auto; margin-top: 1; }
+    ServersModal Button { margin: 0 1; }
+    """
+
+    def __init__(self, servers: list[RemoteServer]) -> None:
+        super().__init__()
+        self._servers = list(servers)
+
+    def compose(self) -> ComposeResult:
+        from textual.containers import Horizontal
+
+        with Vertical():
+            yield Label("Servidores de sesiones", classes="title")
+            yield Label(
+                "Configúralos aquí una vez y elígelos por nombre al enlazar un repositorio "
+                "a un proyecto.",
+                classes="hint",
+            )
+            yield Label("a añade · e edita · Supr quita · Enter guarda", classes="hint")
+            yield Label("", id="servers-empty", classes="hint")
+            with RadioSet(id="servers"):
+                yield from self._buttons()
+            with Horizontal():
+                yield Button("Cancelar", id="cancel", variant="default")
+                yield Button("Añadir…", id="add", variant="default")
+                yield Button("Guardar", id="save", variant="primary")
+
+    def _buttons(self) -> ComposeResult:
+        for index, server in enumerate(self._servers):
+            yield RadioButton(
+                f"{server.name} — {server.summary()}", value=(index == 0), id=f"server-{index}"
+            )
+
+    def on_mount(self) -> None:
+        self._sync_empty()
+
+    def _sync_empty(self) -> None:
+        self.query_one("#servers-empty", Label).update(
+            "(ninguno configurado)" if not self._servers else ""
+        )
+
+    async def _rebuild(self) -> None:
+        radio_set = self.query_one("#servers", RadioSet)
+        await radio_set.remove_children()
+        for index, server in enumerate(self._servers):
+            await radio_set.mount(
+                RadioButton(
+                    f"{server.name} — {server.summary()}",
+                    value=(index == 0),
+                    id=f"server-{index}",
+                )
+            )
+        self._sync_empty()
+
+    @on(Button.Pressed, "#cancel")
+    def _cancel(self) -> None:
+        self.dismiss(None)
+
+    @on(Button.Pressed, "#save")
+    def _save(self) -> None:
+        self.dismiss(list(self._servers))
+
+    @on(Button.Pressed, "#add")
+    def _add_pressed(self) -> None:
+        self.action_add()
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def action_add(self) -> None:
+        self.app.push_screen(ServerEditModal(RemoteServer(name="")), self._on_saved)
+
+    def action_edit(self) -> None:
+        index = self._selected_index()
+        if index is None:
+            return
+        from multi_claude.remote import TokenStore
+
+        current = self._servers[index]
+        self.app.push_screen(
+            ServerEditModal(current, has_token=TokenStore().has_token(current.name)),
+            self._on_saved,
+        )
+
+    def action_remove(self) -> None:
+        index = self._selected_index()
+        if index is None:
+            return
+        del self._servers[index]
+        self.run_worker(self._rebuild(), exclusive=False)
+
+    def _on_saved(self, server: RemoteServer | None) -> None:
+        if server is None or not server.name:
+            return
+        for index, current in enumerate(self._servers):
+            if current.name == server.name:
+                self._servers[index] = server
+                break
+        else:
+            self._servers.append(server)
+        self.run_worker(self._rebuild(), exclusive=False)
+
+    def _selected_index(self) -> int | None:
+        pressed = self.query_one("#servers", RadioSet).pressed_button
+        radio_id = pressed.id if pressed is not None else None
+        if not radio_id or not radio_id.startswith("server-"):
+            return None
+        index = int(radio_id.split("-", 1)[1])
+        return index if 0 <= index < len(self._servers) else None
+
+
+class RepoLinkModal(ModalScreen["RemoteLink | None"]):
+    """Point a project at one sessions repo, on a configured server or a shared folder.
+
+    The server list comes from Ajustes, so linking a repo asks only what is specific to it:
+    which server, which repo, which branch, and what to call its tab.
+    """
+
+    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+
+    DEFAULT_CSS = """
+    RepoLinkModal { align: center middle; }
+    RepoLinkModal > Vertical {
+        background: $surface;
+        border: thick $primary;
+        padding: 1 2;
+        width: 84;
+        height: auto;
+    }
+    RepoLinkModal Label.title { text-style: bold; }
+    RepoLinkModal Label.section { text-style: bold; color: $accent; }
+    RepoLinkModal Label.hint { color: $text-muted; }
+    RepoLinkModal Label.error { color: $error; }
+    RepoLinkModal Horizontal { align: center middle; height: auto; margin-top: 1; }
+    RepoLinkModal Button { margin: 0 1; }
+    RepoLinkModal #fields-folder, RepoLinkModal #fields-repo { height: auto; }
+    """
+
+    # Radio index of the "shared folder" option, which needs a path instead of a repo.
+    FOLDER = "target-folder"
+
+    def __init__(
+        self, link: RemoteLink, *, servers: list[RemoteServer], title: str | None = None
+    ) -> None:
+        super().__init__()
+        self._initial = link
+        self._servers = servers
+        self._title_text = title or "Repositorio de sesiones"
+
+    def compose(self) -> ComposeResult:
+        from textual.containers import Horizontal, VerticalScroll
+
+        with Vertical():
+            yield Label(self._title_text, classes="title")
+            yield Label("Enter guarda · Esc cancela", classes="hint")
+            if not self._servers:
+                yield Label(
+                    "No hay servidores configurados: añádelos en Ajustes para poder elegir "
+                    "GitLab o GitHub.",
+                    classes="hint",
+                )
+
+            with VerticalScroll(id="link-body"):
+                yield Label("Dónde", classes="section")
+                with RadioSet(id="link-target"):
+                    for index, server in enumerate(self._servers):
+                        yield RadioButton(
+                            f"{server.name} — {server.summary()}",
+                            value=(server.name == self._initial.server),
+                            id=f"target-{index}",
+                        )
+                    yield RadioButton(
+                        "Carpeta compartida",
+                        value=(self._initial.kind == "directory" or not self._servers),
+                        id=self.FOLDER,
+                    )
+
+                with Vertical(id="fields-folder"):
+                    yield Label("Ruta de la carpeta", classes="section")
+                    yield Input(
+                        value=self._initial.path,
+                        placeholder="/mnt/equipo/sesiones-claude",
+                        id="link-path",
+                    )
+
+                with Vertical(id="fields-repo"):
+                    yield Label("Repositorio", classes="section")
+                    yield Input(
+                        value=self._initial.repo,
+                        placeholder="grupo/sesiones-cliente-x",
+                        id="link-repo",
+                    )
+                    yield Label("Rama", classes="section")
+                    yield Input(value=self._initial.branch, placeholder="main", id="link-branch")
+
+                yield Label("Nombre de la pestaña (opcional)", classes="section")
+                yield Input(
+                    value=self._initial.label,
+                    placeholder=self._initial.tab_label(),
+                    id="link-label",
+                )
+
+            yield Label("", id="link-error", classes="error")
+            with Horizontal():
+                yield Button("Cancelar", id="cancel", variant="default")
+                yield Button("Guardar", id="save", variant="primary")
+
+    def on_mount(self) -> None:
+        self._sync_visible_fields()
+        self.query_one("#link-target", RadioSet).focus()
+        self.call_after_refresh(self._scroll_to_top)
+
+    def _scroll_to_top(self) -> None:
+        self.query_one("#link-body").scroll_home(animate=False)
+
+    @on(RadioSet.Changed, "#link-target")
+    def _on_target_changed(self, event: RadioSet.Changed) -> None:
+        self._sync_visible_fields()
+
+    def _sync_visible_fields(self) -> None:
+        folder = self._chosen_server() is None
+        self.query_one("#fields-folder").display = folder
+        self.query_one("#fields-repo").display = not folder
+
+    @on(Button.Pressed, "#cancel")
+    def _cancel(self) -> None:
+        self.dismiss(None)
+
+    @on(Button.Pressed, "#save")
+    def _save(self) -> None:
+        self._try_save()
+
+    @on(Input.Submitted)
+    def _submitted(self) -> None:
+        self._try_save()
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def _try_save(self) -> None:
+        link = self.collect()
+        server = self._chosen_server()
+        missing = (
+            "Falta la ruta de la carpeta"
+            if server is None and not link.path
+            else "Falta el repositorio"
+            if server is not None and not link.repo
+            else ""
+        )
+        if missing:
+            self.query_one("#link-error", Label).update(missing)
+            return
+        self.dismiss(link)
+
+    def _chosen_server(self) -> RemoteServer | None:
+        """The selected server, or None when the folder option is chosen."""
+        pressed = self.query_one("#link-target", RadioSet).pressed_button
+        radio_id = pressed.id if pressed is not None else None
+        if not radio_id or radio_id == self.FOLDER or not radio_id.startswith("target-"):
+            return None
+        index = int(radio_id.split("-", 1)[1])
+        return self._servers[index] if 0 <= index < len(self._servers) else None
 
     def collect(self) -> RemoteLink:
-        return replace(
-            self._initial,
-            kind=self._kind_from_radio(),
-            path=self.query_one("#remote-path", Input).value,
-            host=self.query_one("#remote-host", Input).value,
-            repo=self.query_one("#remote-repo", Input).value,
-            branch=self.query_one("#remote-branch", Input).value,
-            label=self.query_one("#remote-label", Input).value,
+        server = self._chosen_server()
+        if server is None:
+            return RemoteLink(
+                kind="directory",
+                path=self.query_one("#link-path", Input).value,
+                label=self.query_one("#link-label", Input).value,
+            ).normalised()
+        return RemoteLink(
+            kind=server.kind,
+            host=server.api_host,
+            server=server.name,
+            repo=self.query_one("#link-repo", Input).value,
+            branch=self.query_one("#link-branch", Input).value,
+            label=self.query_one("#link-label", Input).value,
         ).normalised()
-
-    def _kind_from_radio(self) -> str:
-        pressed = self.query_one("#remote-kind", RadioSet).pressed_button
-        radio_id = pressed.id if pressed is not None else None
-        if radio_id and radio_id.startswith("kind-"):
-            candidate = radio_id.split("-", 1)[1]
-            for kind in VALID_REMOTE_KINDS:
-                if candidate == kind:
-                    return kind
-        return self._initial.kind
 
 
 class ProjectRemotesModal(ModalScreen["list[RemoteLink] | None"]):
@@ -1339,11 +1601,17 @@ class ProjectRemotesModal(ModalScreen["list[RemoteLink] | None"]):
     """
 
     def __init__(
-        self, *, project_name: str, links: list[RemoteLink], inherited: bool = False
+        self,
+        *,
+        project_name: str,
+        links: list[RemoteLink],
+        inherited: bool = False,
+        servers: list[RemoteServer] | None = None,
     ) -> None:
         super().__init__()
         self.project_name = project_name
         self._links = list(links)
+        self.servers = list(servers or [])
         # ``inherited`` means what is listed came from the global setting, not from a link of
         # this project's own. Saving turns it into an explicit link, which is worth saying.
         self._inherited = inherited
@@ -1424,23 +1692,18 @@ class ProjectRemotesModal(ModalScreen["list[RemoteLink] | None"]):
         self.dismiss(None)
 
     def action_add(self) -> None:
-        from multi_claude.remote import TokenStore
-
-        modal = RemoteSettingsModal(
-            RemoteLink(kind="gitlab"),
-            has_token=TokenStore().has_token(),
-            title=f"Añadir repositorio de sesiones — {self.project_name}",
+        self.app.push_screen(
+            RepoLinkModal(
+                RemoteLink(),
+                servers=self.servers,
+                title=f"Añadir repositorio — {self.project_name}",
+            ),
+            self._on_added,
         )
-        self.app.push_screen(modal, lambda result: self._on_added(modal, result))
 
-    def _on_added(self, modal: RemoteSettingsModal, result: RemoteLink | None) -> None:
+    def _on_added(self, result: RemoteLink | None) -> None:
         if result is None or not result.is_configured:
             return
-        from multi_claude.remote import TokenStore
-
-        token = modal.token_to_save()
-        if token:
-            TokenStore().set(token)
         # Re-adding the same target replaces it, so one repo can never own two tabs.
         for index, current in enumerate(self._links):
             if current.same_target(result):

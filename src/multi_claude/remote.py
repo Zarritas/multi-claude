@@ -363,56 +363,95 @@ REMOTE_TOKEN_ENV = "MULTI_CLAUDE_REMOTE_TOKEN"
 
 
 def token_path() -> Path:
-    """Where the API token lives: next to the config, but in its own file."""
+    """Where API tokens live: next to the config, but in their own file."""
+    base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+    return Path(base) / "multi-claude" / "remote-tokens.json"
+
+
+def legacy_token_path() -> Path:
+    """The single-token file used before tokens were per server."""
     base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
     return Path(base) / "multi-claude" / "remote-token"
 
 
 class TokenStore:
-    """The API token for a hosted remote, kept out of ``config.json`` on purpose.
+    """API tokens, one per configured server, kept out of ``config.json`` on purpose.
 
-    ``config.json`` gets pasted into issues and shared between machines, so a credential
-    in it leaks by accident. This is a separate file created ``0600``, and
-    ``$MULTI_CLAUDE_REMOTE_TOKEN`` overrides it so CI or a one-off run never has to write
-    a secret to disk at all.
+    ``config.json`` gets pasted into issues and shared between machines, so a credential in it
+    leaks by accident. This is a separate file created ``0600``.
+
+    Keyed by server name because a company has more than one host and they do not share
+    credentials. ``$MULTI_CLAUDE_REMOTE_TOKEN`` still overrides everything, so CI or a one-off
+    run never has to write a secret to disk; the old single-token file is read as a fallback so
+    an existing setup keeps working.
     """
 
-    def __init__(self, path: Path | None = None) -> None:
+    def __init__(self, path: Path | None = None, *, legacy: Path | None = None) -> None:
         self.path = path or token_path()
+        self.legacy = legacy if legacy is not None else legacy_token_path()
 
-    def get(self) -> str | None:
-        env = os.environ.get(REMOTE_TOKEN_ENV)
-        if env:
-            return env
+    def _load(self) -> dict[str, str]:
         try:
-            token = self.path.read_text(encoding="utf-8").strip()
+            raw = json.loads(self.path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, OSError, json.JSONDecodeError):
+            return {}
+        if not isinstance(raw, dict):
+            return {}
+        return {k: v for k, v in raw.items() if isinstance(k, str) and isinstance(v, str)}
+
+    def _legacy_token(self) -> str | None:
+        try:
+            token = self.legacy.read_text(encoding="utf-8").strip()
         except (FileNotFoundError, OSError):
             return None
         return token or None
 
-    def has_token(self) -> bool:
+    def get(self, server: str | None = None) -> str | None:
+        env = os.environ.get(REMOTE_TOKEN_ENV)
+        if env:
+            return env
+        tokens = self._load()
+        if server:
+            found = tokens.get(server)
+            if found:
+                return found
+        elif len(tokens) == 1:
+            # No server named and exactly one token stored: it can only mean that one.
+            return next(iter(tokens.values()))
+        return self._legacy_token()
+
+    def has_token(self, server: str | None = None) -> bool:
         """Whether a token is available, without handing the value out.
 
         The settings screen needs to say "saved" without rendering the secret.
         """
-        return self.get() is not None
+        return self.get(server) is not None
 
-    def set(self, token: str) -> None:
-        """Write the token with owner-only permissions, atomically."""
+    def set(self, token: str, server: str | None = None) -> None:
+        """Store ``token`` for ``server`` with owner-only permissions, atomically."""
+        tokens = self._load()
+        tokens[server or ""] = token.strip()
+        self._write(tokens)
+
+    def delete(self, server: str | None = None) -> None:
+        tokens = self._load()
+        if tokens.pop(server or "", None) is not None:
+            self._write(tokens)
+        if server is None:
+            self.legacy.unlink(missing_ok=True)
+
+    def _write(self, tokens: dict[str, str]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp_str = tempfile.mkstemp(prefix=".token.", dir=str(self.path.parent))
+        fd, tmp_str = tempfile.mkstemp(prefix=".tokens.", dir=str(self.path.parent))
         tmp = Path(tmp_str)
         try:
             os.fchmod(fd, 0o600)
             with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(token.strip() + "\n")
+                json.dump(tokens, f, indent=2, sort_keys=True)
             os.replace(tmp, self.path)
         except Exception:
             tmp.unlink(missing_ok=True)
             raise
-
-    def delete(self) -> None:
-        self.path.unlink(missing_ok=True)
 
 
 def store_from_link(link: RemoteLink, *, token: str | None = None) -> RemoteStore | None:
@@ -432,7 +471,7 @@ def store_from_link(link: RemoteLink, *, token: str | None = None) -> RemoteStor
         link.api_host,
         link.repo,
         link.branch,
-        token if token is not None else TokenStore().get(),
+        token if token is not None else TokenStore().get(link.server or None),
     )
 
 

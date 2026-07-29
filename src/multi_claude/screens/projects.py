@@ -528,6 +528,7 @@ class ProjectsScreen(Screen[None]):
                 project_name=project.name,
                 links=list(own or self._claude_app.remote_links_for(project)),
                 inherited=not own,
+                servers=list(self._claude_app.prefs.remote_servers),
             ),
             lambda links: self._apply_links(key, links),
         )
