@@ -1090,6 +1090,7 @@ class ServerEditModal(ModalScreen["RemoteServer | None"]):
     ServerEditModal Label.hint { color: $text-muted; }
     ServerEditModal Label.error { color: $error; }
     ServerEditModal Label.ok { color: $success; }
+    ServerEditModal #server-ssh-fields, ServerEditModal #server-token-fields { height: auto; }
     ServerEditModal Horizontal { align: center middle; height: auto; margin-top: 1; }
     ServerEditModal Button { margin: 0 1; }
     """
@@ -1123,28 +1124,51 @@ class ServerEditModal(ModalScreen["RemoteServer | None"]):
                         "GitHub", value=self._initial.kind == "github", id="server-kind-github"
                     )
 
-                yield Label(
-                    "URL de la API (vacío = gitlab.com / api.github.com)", classes="section"
-                )
+                yield Label("Autenticación", classes="section")
+                with RadioSet(id="server-auth"):
+                    yield RadioButton(
+                        "Token de acceso (API)",
+                        value=not self._initial.uses_ssh,
+                        id="server-auth-token",
+                    )
+                    yield RadioButton(
+                        "SSH (usa tus claves)",
+                        value=self._initial.uses_ssh,
+                        id="server-auth-ssh",
+                    )
+
+                yield Label("Servidor (vacío = gitlab.com / github.com)", classes="section")
                 yield Input(
                     value=self._initial.host,
                     placeholder="https://git.tuempresa.com",
                     id="server-host",
                 )
 
-                yield Label("Token (lectura y escritura sobre los repos)", classes="section")
-                yield Input(
-                    placeholder=(
-                        "•••• guardado (escribe para reemplazarlo)"
-                        if self._has_token
-                        else "glpat-… / github_pat_…"
-                    ),
-                    password=True,
-                    id="server-token",
-                )
-                yield Label(
-                    "Se guarda aparte con permisos 0600, nunca en config.json", classes="hint"
-                )
+                with Vertical(id="server-ssh-fields"):
+                    yield Label("Usuario SSH", classes="section")
+                    yield Input(
+                        value=self._initial.ssh_user, placeholder="git", id="server-ssh-user"
+                    )
+                    yield Label(
+                        "No hace falta token: se usan las claves SSH que ya tengas.",
+                        classes="hint",
+                    )
+
+                with Vertical(id="server-token-fields"):
+                    yield Label("Token (lectura y escritura sobre los repos)", classes="section")
+                    yield Input(
+                        placeholder=(
+                            "•••• guardado (escribe para reemplazarlo)"
+                            if self._has_token
+                            else "glpat-… / github_pat_…"
+                        ),
+                        password=True,
+                        id="server-token",
+                    )
+                    yield Label(
+                        "Se guarda aparte con permisos 0600, nunca en config.json",
+                        classes="hint",
+                    )
 
             yield Label("", id="server-status", classes="hint")
             with Horizontal():
@@ -1153,7 +1177,23 @@ class ServerEditModal(ModalScreen["RemoteServer | None"]):
                 yield Button("Guardar", id="save", variant="primary")
 
     def on_mount(self) -> None:
+        self._sync_auth_fields()
         self.query_one("#server-name", Input).focus()
+
+    @on(RadioSet.Changed, "#server-auth")
+    def _on_auth_changed(self, event: RadioSet.Changed) -> None:
+        self._sync_auth_fields()
+
+    def _sync_auth_fields(self) -> None:
+        """Show only what the chosen authentication needs."""
+        ssh = self._auth_from_radio() == "ssh"
+        self.query_one("#server-ssh-fields").display = ssh
+        self.query_one("#server-token-fields").display = not ssh
+
+    def _auth_from_radio(self) -> str:
+        pressed = self.query_one("#server-auth", RadioSet).pressed_button
+        radio_id = pressed.id if pressed is not None else None
+        return "ssh" if radio_id == "server-auth-ssh" else "token"
 
     @on(Button.Pressed, "#cancel")
     def _cancel(self) -> None:
@@ -1197,6 +1237,9 @@ class ServerEditModal(ModalScreen["RemoteServer | None"]):
         if not server.is_configured:
             self._set_status(status, "Falta el nombre o la URL", ok=False)
             return
+        if server.uses_ssh:
+            self._test_ssh(server, status)
+            return
         token = self.typed_token() or TokenStore().get(server.name)
         if not token:
             self._set_status(status, "Falta el token", ok=False)
@@ -1227,6 +1270,29 @@ class ServerEditModal(ModalScreen["RemoteServer | None"]):
             else:
                 self._set_status(status, message, ok=False)
 
+    def _test_ssh(self, server: RemoteServer, status: Label) -> None:
+        """SSH needs no token, and ``ls-remote`` on the host proves the key works."""
+        from multi_claude.remote import RemoteError
+        from multi_claude.remote_git import GitSshRemote
+
+        probe = RemoteLink(
+            kind="ssh",
+            host=server.ssh_host,
+            ssh_user=server.ssh_user,
+            repo="multi-claude/_probe",
+            branch="main",
+        )
+        try:
+            GitSshRemote(probe).check_connection()
+            self._set_status(status, f"OK · {server.summary()} responde", ok=True)
+        except RemoteError as exc:
+            message = str(exc)
+            if "no existe o no es un repositorio" in message:
+                # The host answered and accepted the key; only the invented repo is missing.
+                self._set_status(status, f"OK · {server.ssh_host} acepta tu clave SSH", ok=True)
+            else:
+                self._set_status(status, message, ok=False)
+
     @staticmethod
     def _set_status(label: Label, message: str, *, ok: bool) -> None:
         label.remove_class("error", "ok")
@@ -1246,6 +1312,8 @@ class ServerEditModal(ModalScreen["RemoteServer | None"]):
             name=self.query_one("#server-name", Input).value.strip(),
             kind=kind,
             host=self.query_one("#server-host", Input).value.strip().rstrip("/"),
+            auth=self._auth_from_radio(),
+            ssh_user=self.query_one("#server-ssh-user", Input).value.strip() or "git",
         )
 
 

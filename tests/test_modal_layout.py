@@ -52,10 +52,17 @@ CASES: dict[str, tuple[Callable[[], ModalScreen], list[str], list[str]]] = {
         ["Ajustes", "Guardar", "Cancelar"],
         ["Enter (predeterminado)", "Argumentos para"],
     ),
-    "server-edit": (
+    "server-edit-token": (
         lambda: M.ServerEditModal(RemoteServer(name="FactorLibre", kind="gitlab")),
         ["Servidor de sesiones", "Ctrl+T prueba la conexión", "Guardar", "Probar", "Cancelar"],
-        ["Nombre", "Proveedor", "permisos 0600"],
+        ["Nombre", "Autenticación", "permisos 0600"],
+    ),
+    "server-edit-ssh": (
+        lambda: M.ServerEditModal(
+            RemoteServer(name="FactorLibre", host="https://git.empresa.com", auth="ssh")
+        ),
+        ["Servidor de sesiones", "Guardar", "Probar", "Cancelar"],
+        ["Usuario SSH", "las claves SSH que ya tengas"],
     ),
     "servers-list": (
         lambda: M.ServersModal(

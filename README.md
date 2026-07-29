@@ -196,19 +196,32 @@ por completo: un proyecto enlazado al repo de un cliente no publica además al g
 El diálogo de configuración pide proveedor, servidor, repositorio, rama, token y nombre de la
 pestaña, y tiene **`Ctrl+T` para probar la conexión** antes de guardar.
 
-| Proveedor | Qué necesita | Notas |
-|-----------|--------------|-------|
-| Carpeta compartida | una ruta | Montaje de red, Syncthing, Dropbox. Los permisos son los del sistema de ficheros |
-| GitLab | servidor + `grupo/repo` + token | Funciona con `gitlab.com` y con self-hosted |
-| GitHub | `owner/repo` + token | El servidor por defecto es `api.github.com` |
+**Servidores.** En Ajustes defines los servidores una vez (nombre, proveedor, URL y
+autenticación) y luego, al enlazar un repositorio a un proyecto, los eliges por nombre: solo
+tienes que indicar el repo y la rama. Corregir una URL o rotar un token arregla de golpe todos
+los repositorios que apuntan a ese servidor.
+
+| Autenticación | Qué necesita | Cuándo |
+|---------------|--------------|--------|
+| **Token de acceso** | un token por servidor | Vía API REST. Un token por persona y por host |
+| **SSH** | nada nuevo | Usa las claves que ya tienes. Sin tokens que repartir, y **git resuelve las publicaciones simultáneas** en vez de que la última pise a la anterior |
+
+| Destino | Qué necesita |
+|---------|--------------|
+| Carpeta compartida | una ruta (montaje de red, Syncthing…). Los permisos son los del sistema de ficheros |
+| GitLab / GitHub | un servidor configurado + `grupo/repo` + rama |
 
 Con GitLab o GitHub los permisos, el SSO y la auditoría son los del propio repositorio: quien
 pueda leerlo puede leer las sesiones, y cada publicación es un commit con su autor. Es la razón
 principal para preferirlos a una carpeta.
 
-El **token nunca se guarda en `config.json`** (ese fichero se comparte y se pega en issues):
-va a `remote-token`, junto a la config, con permisos `0600`. `$MULTI_CLAUDE_REMOTE_TOKEN` lo
-sobreescribe, para que CI no tenga que escribir un secreto en disco.
+Los **tokens nunca se guardan en `config.json`** (ese fichero se comparte y se pega en issues):
+van a `remote-tokens.json`, junto a la config, con permisos `0600` y uno por servidor.
+`$MULTI_CLAUDE_REMOTE_TOKEN` los sobreescribe, para que CI no tenga que escribir un secreto en
+disco. Con autenticación SSH no hay token que guardar.
+
+Con SSH se mantiene una copia de trabajo del repo bajo `~/.cache/multi-claude/repos/`, que es
+caché reconstruible: se puede borrar sin perder nada.
 
 Los campos también se pueden editar a mano en `config.json` (`remote_kind`, `remote_host`,
 `remote_repo`, `remote_branch`, `remote_path`), y `MULTI_CLAUDE_REMOTE_DIR=/ruta` fuerza una

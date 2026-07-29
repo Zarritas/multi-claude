@@ -36,7 +36,7 @@ DEFAULT_REMOTE_HOSTS: dict[str, str] = {
 
 _SCHEME_RE = re.compile(r"\A[a-zA-Z][a-zA-Z0-9+.-]*://")
 
-_LINK_KINDS = ("directory", "gitlab", "github")
+_LINK_KINDS = ("directory", "gitlab", "github", "ssh")
 
 
 @dataclass(frozen=True)
@@ -54,6 +54,31 @@ class RemoteServer:
     name: str
     kind: str = "gitlab"
     host: str = ""
+    # ``token`` talks to the provider's REST API; ``ssh`` runs git over the keys the user
+    # already has. SSH avoids handing out credentials at all, which is often the reason a
+    # company has keys deployed in the first place.
+    auth: str = "token"
+    # SSH user for the git URL. GitLab and GitHub both use ``git``; kept configurable for
+    # self-hosted setups that do not.
+    ssh_user: str = "git"
+
+    @property
+    def uses_ssh(self) -> bool:
+        return self.auth == "ssh"
+
+    @property
+    def ssh_host(self) -> str:
+        """Hostname for git-over-SSH, derived from the API URL when not obvious.
+
+        ``https://git.empresa.com`` and ``https://git.empresa.com/api/v4`` both yield
+        ``git.empresa.com``; github.com's API lives on a different host than its git, so it is
+        special-cased rather than derived wrongly.
+        """
+        host = self.host or DEFAULT_REMOTE_HOSTS.get(self.kind, "")
+        bare = host.split("://", 1)[-1].split("/", 1)[0].split(":", 1)[0]
+        if bare == "api.github.com":
+            return "github.com"
+        return bare
 
     @property
     def api_host(self) -> str:
@@ -61,14 +86,24 @@ class RemoteServer:
 
     @property
     def is_configured(self) -> bool:
-        return bool(self.name and self.kind in ("gitlab", "github") and self.api_host)
+        if not self.name or self.kind not in ("gitlab", "github"):
+            return False
+        return bool(self.ssh_host) if self.uses_ssh else bool(self.api_host)
 
     def summary(self) -> str:
+        if self.uses_ssh:
+            return f"{self.kind} · {self.ssh_user}@{self.ssh_host} (ssh)"
         host = self.api_host.replace("https://", "").replace("http://", "").rstrip("/")
         return f"{self.kind} · {host}"
 
     def to_dict(self) -> dict[str, str]:
-        return {"name": self.name, "kind": self.kind, "host": self.host}
+        return {
+            "name": self.name,
+            "kind": self.kind,
+            "host": self.host,
+            "auth": self.auth,
+            "ssh_user": self.ssh_user,
+        }
 
     @classmethod
     def from_dict(cls, raw: object) -> RemoteServer | None:
@@ -79,7 +114,14 @@ class RemoteServer:
             return None
         if not isinstance(kind, str) or kind not in ("gitlab", "github"):
             return None
-        return cls(name=name.strip(), kind=kind, host=_as_str(raw.get("host")).rstrip("/"))
+        auth = _as_str(raw.get("auth")) or "token"
+        return cls(
+            name=name.strip(),
+            kind=kind,
+            host=_as_str(raw.get("host")).rstrip("/"),
+            auth=auth if auth in ("token", "ssh") else "token",
+            ssh_user=_as_str(raw.get("ssh_user")) or "git",
+        )
 
 
 @dataclass(frozen=True)
@@ -103,6 +145,8 @@ class RemoteLink:
     # Name of a configured RemoteServer. When set, it supplies kind and host, and the link
     # only carries what is specific to the repo.
     server: str = ""
+    # SSH user, carried through when the server authenticates that way.
+    ssh_user: str = "git"
 
     def tab_label(self) -> str:
         """Short name for the tab: the explicit label, or one derived from the target."""
@@ -124,8 +168,19 @@ class RemoteLink:
             return self
         for server in servers:
             if server.name == self.server:
+                if server.uses_ssh:
+                    return replace(
+                        self,
+                        kind="ssh",
+                        host=server.ssh_host,
+                        ssh_user=server.ssh_user,
+                    )
                 return replace(self, kind=server.kind, host=server.api_host)
         return replace(self, kind="none")
+
+    def git_url(self) -> str:
+        """The ``git@host:group/repo.git`` URL this link clones from, for ``kind="ssh"``."""
+        return f"{self.ssh_user}@{self.host}:{self.repo.strip('/')}.git"
 
     def same_target(self, other: RemoteLink) -> bool:
         """Whether two links point at the same place, ignoring the label.
@@ -134,10 +189,10 @@ class RemoteLink:
         same sessions under two tabs.
         """
         a, b = self.normalised(), other.normalised()
-        return (a.kind, a.path, a.api_host, a.repo, a.branch) == (
+        return (a.kind, a.path, a.host or a.api_host, a.repo, a.branch) == (
             b.kind,
             b.path,
-            b.api_host,
+            b.host or b.api_host,
             b.repo,
             b.branch,
         )
@@ -149,6 +204,8 @@ class RemoteLink:
             return bool(self.path)
         if self.kind in ("gitlab", "github"):
             return bool(self.repo and self.api_host)
+        if self.kind == "ssh":
+            return bool(self.repo and self.host)
         return False
 
     @property
@@ -162,6 +219,8 @@ class RemoteLink:
             return "desactivado"
         if self.kind == "directory":
             return f"carpeta · {self.path or '(sin ruta)'}"
+        if self.kind == "ssh":
+            return f"ssh · {self.ssh_user}@{self.host}:{self.repo or '(sin repo)'}"
         host = self.api_host.replace("https://", "").replace("http://", "").rstrip("/")
         return f"{self.kind} · {host}/{self.repo or '(sin repo)'}"
 
@@ -174,6 +233,7 @@ class RemoteLink:
             "branch": self.branch,
             "label": self.label,
             "server": self.server,
+            "ssh_user": self.ssh_user,
         }
 
     @classmethod
@@ -195,6 +255,7 @@ class RemoteLink:
             branch=_as_str(raw.get("branch")) or "main",
             label=_as_str(raw.get("label")),
             server=_as_str(raw.get("server")),
+            ssh_user=_as_str(raw.get("ssh_user")) or "git",
         )
 
     def normalised(self) -> RemoteLink:

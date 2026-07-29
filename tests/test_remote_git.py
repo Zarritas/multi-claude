@@ -1,0 +1,228 @@
+"""Tests for the git-over-SSH backend (multi_claude.remote_git).
+
+Run against a real bare repository on disk rather than a mock: what is being tested is that
+git's own behaviour is used correctly — the clone, the fetch, and above all the rejected push
+that makes concurrent publishing safe. A file:// URL exercises every one of those paths without
+needing an SSH server; only the URL construction differs, and that is asserted separately.
+"""
+
+from __future__ import annotations
+
+import shutil
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from multi_claude.project_remotes import RemoteLink, RemoteServer
+from multi_claude.remote import RemoteError, RemoteSession
+from multi_claude.remote_git import GitSshRemote
+from tests.conftest import write_session
+
+pytestmark = pytest.mark.skipif(shutil.which("git") is None, reason="git no disponible")
+
+
+@pytest.fixture
+def bare_repo(tmp_path: Path) -> Path:
+    """An empty sessions repo, as a colleague would have created it."""
+    repo = tmp_path / "sesiones.git"
+    subprocess.run(["git", "init", "--bare", "-q", "--initial-branch=main", str(repo)], check=True)
+    return repo
+
+
+def _remote(bare: Path, tmp_path: Path, *, name: str = "work") -> GitSshRemote:
+    """A store pointed at ``bare`` over file://, with its own working copy."""
+    remote = GitSshRemote(
+        RemoteLink(kind="ssh", host="ignored", repo="grupo/sesiones", branch="main"),
+        cache_dir=tmp_path / "cache" / name,
+    )
+    remote.url = str(bare)  # file path stands in for the SSH URL
+    return remote
+
+
+def _meta(session_id: str, **kwargs: object) -> RemoteSession:
+    return RemoteSession(
+        session_id=session_id, published_at="2026-07-28T10:00:00+00:00", **kwargs
+    )  # type: ignore[arg-type]
+
+
+# --- URL construction ---------------------------------------------------------------
+
+
+def test_the_ssh_url_is_built_the_way_git_expects() -> None:
+    link = RemoteLink(kind="ssh", host="git.empresa.com", repo="grupo/sesiones", ssh_user="git")
+    assert link.git_url() == "git@git.empresa.com:grupo/sesiones.git"
+
+
+def test_a_custom_ssh_user_is_honoured() -> None:
+    link = RemoteLink(kind="ssh", host="git.empresa.com", repo="g/s", ssh_user="gitlab")
+    assert link.git_url() == "gitlab@git.empresa.com:g/s.git"
+
+
+def test_the_api_host_is_reduced_to_a_git_host() -> None:
+    """The API URL and the git host are not the same string, and github proves it."""
+    assert RemoteServer(name="x", host="https://git.empresa.com/api/v4").ssh_host == (
+        "git.empresa.com"
+    )
+    assert RemoteServer(name="x", kind="github").ssh_host == "github.com"
+    assert RemoteServer(name="x", kind="gitlab").ssh_host == "gitlab.com"
+
+
+def test_an_ssh_server_needs_no_api_url_to_be_usable() -> None:
+    server = RemoteServer(name="FactorLibre", host="https://git.empresa.com", auth="ssh")
+    assert server.uses_ssh
+    assert server.is_configured
+    assert "ssh" in server.summary()
+
+
+def test_a_link_resolved_against_an_ssh_server_publishes_over_ssh() -> None:
+    server = RemoteServer(name="FL", host="https://git.empresa.com", auth="ssh", ssh_user="git")
+    link = RemoteLink(server="FL", repo="grupo/sesiones").resolved([server])
+
+    assert link.kind == "ssh"
+    assert link.git_url() == "git@git.empresa.com:grupo/sesiones.git"
+    assert link.is_configured
+
+
+# --- round trip ---------------------------------------------------------------------
+
+
+def test_publish_then_fetch_round_trips(bare_repo: Path, tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    jsonl = write_session(project, session_id="sid-1", extra_events=100)
+    subagents = project / "sid-1" / "subagents"
+    subagents.mkdir(parents=True)
+    (subagents / "agent-a.jsonl").write_text('{"x":1}\n', encoding="utf-8")
+
+    remote = _remote(bare_repo, tmp_path)
+    remote.publish(_meta("sid-1", published_by="ana@example.com"), project)
+
+    (listed,) = remote.list_sessions()
+    assert listed.session_id == "sid-1"
+    assert listed.published_by == "ana@example.com"
+
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    result = remote.fetch("sid-1", dest)
+    assert (dest / "sid-1.jsonl").read_bytes() == jsonl.read_bytes()
+    assert (dest / "sid-1" / "subagents" / "agent-a.jsonl").read_text(encoding="utf-8") == (
+        '{"x":1}\n'
+    )
+    assert len(result.written) == 2
+
+
+def test_a_second_clone_sees_what_the_first_published(bare_repo: Path, tmp_path: Path) -> None:
+    """The point of the whole feature, over this backend: a colleague sees your session."""
+    project = tmp_path / "project"
+    write_session(project, session_id="sid-1")
+    _remote(bare_repo, tmp_path, name="ana").publish(_meta("sid-1"), project)
+
+    carlos = _remote(bare_repo, tmp_path, name="carlos")
+    assert [s.session_id for s in carlos.list_sessions()] == ["sid-1"]
+
+    dest = tmp_path / "de-carlos"
+    dest.mkdir()
+    carlos.fetch("sid-1", dest)
+    assert (dest / "sid-1.jsonl").is_file()
+
+
+def test_an_empty_repo_lists_nothing(bare_repo: Path, tmp_path: Path) -> None:
+    assert _remote(bare_repo, tmp_path).list_sessions() == ()
+
+
+def test_republishing_the_same_bytes_makes_no_commit(bare_repo: Path, tmp_path: Path) -> None:
+    """Nothing changed, so there is nothing to commit — and no empty commit either."""
+    project = tmp_path / "project"
+    write_session(project, session_id="sid-1")
+    remote = _remote(bare_repo, tmp_path)
+    remote.publish(_meta("sid-1"), project)
+    first = subprocess.run(
+        ["git", "rev-list", "--count", "main"],
+        cwd=bare_repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+    remote.publish(_meta("sid-1"), project)
+    second = subprocess.run(
+        ["git", "rev-list", "--count", "main"],
+        cwd=bare_repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert first == second
+
+
+# --- concurrency, which is what this backend buys ------------------------------------
+
+
+def test_two_people_publishing_at_once_both_land(bare_repo: Path, tmp_path: Path) -> None:
+    """A rejected push is rebased and retried, so neither session is lost.
+
+    This is the difference from the REST drivers, where the second publish overwrites.
+    """
+    ana_project = tmp_path / "de-ana"
+    write_session(ana_project, session_id="sid-ana")
+    carlos_project = tmp_path / "de-carlos"
+    write_session(carlos_project, session_id="sid-carlos")
+
+    ana = _remote(bare_repo, tmp_path, name="ana")
+    carlos = _remote(bare_repo, tmp_path, name="carlos")
+
+    # Both clone while the repo is empty, so neither knows about the other's commit.
+    ana.list_sessions()
+    carlos.list_sessions()
+
+    ana.publish(_meta("sid-ana"), ana_project)
+    carlos.publish(_meta("sid-carlos"), carlos_project)  # push rejected, rebased, retried
+
+    fresh = _remote(bare_repo, tmp_path, name="tercero")
+    assert sorted(s.session_id for s in fresh.list_sessions()) == ["sid-ana", "sid-carlos"]
+
+
+# --- failures a user can act on -----------------------------------------------------
+
+
+def test_a_missing_session_fails_cleanly(bare_repo: Path, tmp_path: Path) -> None:
+    remote = _remote(bare_repo, tmp_path)
+    with pytest.raises(RemoteError, match="no está en el remoto"):
+        remote.fetch("sid-nope", tmp_path / "dest")
+
+
+def test_fetch_refuses_to_overwrite_a_local_session(bare_repo: Path, tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    write_session(project, session_id="sid-1")
+    remote = _remote(bare_repo, tmp_path)
+    remote.publish(_meta("sid-1"), project)
+
+    with pytest.raises(RemoteError, match="ya existe en destino"):
+        remote.fetch("sid-1", project)
+
+
+def test_publishing_a_session_that_is_not_on_disk_fails(bare_repo: Path, tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    with pytest.raises(RemoteError, match="no tiene transcript en disco"):
+        _remote(bare_repo, tmp_path).publish(_meta("sid-1"), project)
+
+
+def test_an_unreachable_repo_says_so_instead_of_leaking_git_stderr(tmp_path: Path) -> None:
+    remote = GitSshRemote(
+        RemoteLink(kind="ssh", host="git.invalid", repo="g/s"), cache_dir=tmp_path / "cache"
+    )
+    remote.url = str(tmp_path / "no-existe.git")
+    with pytest.raises(RemoteError) as excinfo:
+        remote.list_sessions()
+    assert "no existe o no es un repositorio" in str(excinfo.value)
+
+
+def test_connection_check_reports_the_branch(bare_repo: Path, tmp_path: Path) -> None:
+    remote = _remote(bare_repo, tmp_path)
+    assert "vacío" in remote.check_connection()
+
+    project = tmp_path / "project"
+    write_session(project, session_id="sid-1")
+    remote.publish(_meta("sid-1"), project)
+    assert "main" in remote.check_connection()

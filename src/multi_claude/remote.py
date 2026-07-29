@@ -464,6 +464,10 @@ def store_from_link(link: RemoteLink, *, token: str | None = None) -> RemoteStor
         return None
     if link.kind == "directory":
         return DirectoryRemote(Path(link.path).expanduser())
+    if link.kind == "ssh":
+        from multi_claude.remote_git import GitSshRemote
+
+        return GitSshRemote(link)
     from multi_claude.remote_http import GitHubRemote, GitLabRemote
 
     driver = GitLabRemote if link.kind == "gitlab" else GitHubRemote

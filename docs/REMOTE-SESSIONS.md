@@ -38,7 +38,9 @@ compañero y la carpeta de proyecto local.
 | Modelo | Local-first; el remoto es un almacén, nunca el directorio de trabajo |
 | uuid | Se preserva tal cual (uuid v4, no colisionan entre empleados) |
 | `cwd` embebido | No se reescribe: es histórico y Claude lo ignora (validado, ver Fase 0) |
-| Backends | Carpeta (`DirectoryRemote`), GitLab y GitHub (`remote_http.py`) |
+| Backends | Carpeta (`DirectoryRemote`), API REST de GitLab/GitHub (`remote_http.py`), git por SSH (`remote_git.py`) |
+| Servidores | Definidos una vez en Ajustes; los enlaces los referencian **por nombre**, no copian su host |
+| Autenticación | Token por servidor, o SSH con las claves del usuario |
 | Alcance | **Por proyecto**: cada proyecto se enlaza a uno o varios repos de sesiones, cada uno una pestaña. El remoto global solo es fallback |
 | Clave del enlace | El `origin` normalizado del repo, así que todos sus worktrees comparten enlace |
 | Credenciales | Fichero `remote-token` con permisos `0600`, o `$MULTI_CLAUDE_REMOTE_TOKEN`; **nunca** en `config.json` |
@@ -216,6 +218,41 @@ nuevo: `y` copia el uuid al portapapeles y el filtro soporta `id:`.
 **Reanudar** (`Enter` sobre remota): descargar → descomprimir en `project_dir` con el uuid intacto →
 comparar `git_remote`/`git_head` del manifest con el estado local → si divergen, avisar antes de
 lanzar → `launch_claude`.
+
+## Servidores y autenticación
+
+Un servidor (`RemoteServer`) es proveedor + URL + autenticación; un enlace (`RemoteLink`) es
+repo + rama + nombre de pestaña **sobre** un servidor. Están separados porque cambian a ritmos
+distintos: una empresa tiene uno o dos servidores y un repo por cliente, así que teclear el host
+y pegar un token en cada repo era trabajo repetido y dejaba la misma credencial en varios sitios.
+
+Los enlaces referencian el servidor **por nombre**, así que corregir una URL o rotar un token
+arregla todos los repos que apuntan a él. Un enlace que nombra un servidor inexistente resuelve a
+`kind="none"`: inerte y visiblemente inerte, mejor que publicar en otro sitio sin avisar.
+
+### SSH frente a token
+
+| | Token (API REST) | SSH (`remote_git.py`) |
+|---|---|---|
+| Credencial | Una por persona y por host, hay que crearla y repartirla | Las claves que ya están desplegadas |
+| Transporte | `urllib` contra la API | El binario `git` contra un clon en `~/.cache/` |
+| Concurrencia | La segunda publicación **pisa** la primera | Push rechazado → rebase → reintento: **ambas sobreviven** |
+| Coste | Ninguno en disco | Una copia de trabajo por repo y rama |
+
+Esa fila de concurrencia es la razón técnica para preferir SSH: es el único backend donde dos
+personas publicando a la vez no se pierden trabajo, porque git ya sabe resolver eso. El layout en
+el remoto es idéntico en los tres, así que una sesión publicada por SSH y la misma publicada por
+API son iguales byte a byte, y un repo se puede leer de las dos formas.
+
+Dos detalles del driver de git que no son obvios:
+
+- **`LC_ALL=C` es obligatorio.** git traduce sus errores, así que en un sistema en español
+  «repository does not exist» llega como «el repositorio no existe» y cualquier interpretación
+  del stderr deja de funcionar en silencio — dejando al usuario el mensaje crudo de git. Lo
+  descubrió un test al ejecutarse en una máquina con git en español.
+- **`GIT_TERMINAL_PROMPT=0` y `BatchMode=yes`.** Una petición de credenciales colgada dentro de
+  un worker de la TUI es invisible y parece que la aplicación se ha congelado; fallar con un
+  mensaje es estrictamente mejor.
 
 ## Estado de la copia local
 
