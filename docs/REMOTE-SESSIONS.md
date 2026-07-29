@@ -250,6 +250,22 @@ Verificado contra github.com real: `git@github.com` responde
 `autenticado en github.com como Zarritas`, y `Zarritas@github.com` responde
 `github.com rechazó tu clave SSH — en github.com el usuario SSH es «git», no «Zarritas»`.
 
+### El puerto SSH no se puede deducir
+
+Un servidor SSH lleva puerto propio (`ssh_port`, 22 por defecto), y hay dos razones para que sea
+un campo y no algo inferido:
+
+- **La URL web no lo dice.** `https://git.empresa.com` contesta por 443 tanto si el SSH está en
+  el 22 como en el 2211, así que no hay nada que derivar.
+- **La forma familiar de URL no puede expresarlo.** En `git@host:grupo/repo.git` lo que sigue a
+  los dos puntos es la *ruta*, no un puerto, así que un puerto no estándar obliga a la forma
+  explícita `ssh://git@host:2211/grupo/repo.git`. `git_url()` elige una u otra según el puerto.
+
+El síntoma cuando falta era el peor posible: `ssh` contra el 22 no devuelve **nada** y la prueba
+reportaba un fallo vacío. Ahora el silencio con puerto 22 sugiere explícitamente revisarlo, con
+la pista de dónde mirarlo. Verificado contra un GitLab self-hosted real en el 2211: el 22 no
+responde y el 2211 contesta `Welcome to GitLab, @usuario!`.
+
 ### Nada que toque la red corre en el hilo de la UI
 
 Invariante, y aprendida por las malas: la prueba de conexión del editor de servidor era

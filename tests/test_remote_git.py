@@ -371,3 +371,97 @@ def test_the_probe_needs_no_repository(monkeypatch: pytest.MonkeyPatch) -> None:
     assert argv[:2] == ["ssh", "-T"]
     assert argv[-1] == "git@git.empresa.com"
     assert not any("_probe" in part for part in argv)
+
+
+# --- non-default SSH port ------------------------------------------------------------
+
+
+def test_a_non_default_port_needs_the_explicit_ssh_url_form() -> None:
+    """``git@host:path`` cannot carry a port: what follows the colon is the path.
+
+    Self-hosted GitLab commonly listens elsewhere (2211 in the case that found this), and the
+    scp-like form silently goes to 22 and times out.
+    """
+    link = RemoteLink(kind="ssh", host="git.empresa.com", repo="grupo/repo", ssh_port=2211)
+    assert link.git_url() == "ssh://git@git.empresa.com:2211/grupo/repo.git"
+
+
+def test_port_22_keeps_the_familiar_form() -> None:
+    link = RemoteLink(kind="ssh", host="github.com", repo="Zarritas/multi-claude", ssh_port=22)
+    assert link.git_url() == "git@github.com:Zarritas/multi-claude.git"
+
+
+def test_the_port_travels_from_the_server_to_the_link() -> None:
+    server = RemoteServer(
+        name="FL", host="https://git.empresa.com", auth="ssh", ssh_port=2211
+    )
+    link = RemoteLink(server="FL", repo="grupo/sesiones").resolved([server])
+
+    assert link.ssh_port == 2211
+    assert link.git_url() == "ssh://git@git.empresa.com:2211/grupo/sesiones.git"
+    assert "2211" in server.summary()
+
+
+def test_two_links_differing_only_in_port_are_different_targets() -> None:
+    """Otherwise fixing a port would look like the same link and not replace it."""
+    a = RemoteLink(kind="ssh", host="h", repo="g/s", ssh_port=22)
+    b = RemoteLink(kind="ssh", host="h", repo="g/s", ssh_port=2211)
+    assert not a.same_target(b)
+
+
+@pytest.mark.parametrize(
+    ("stored", "expected"),
+    [(2211, 2211), ("2211", 2211), (None, 22), ("", 22), (0, 22), (99999, 22), (True, 22)],
+)
+def test_a_stored_port_is_coerced_sanely(stored: object, expected: int) -> None:
+    from multi_claude.project_remotes import RemoteServer as RS
+
+    parsed = RS.from_dict({"name": "x", "kind": "gitlab", "ssh_port": stored})
+    assert parsed is not None
+    assert parsed.ssh_port == expected
+
+
+def test_the_probe_passes_the_port_to_ssh(monkeypatch: pytest.MonkeyPatch) -> None:
+    import subprocess as sp
+
+    from multi_claude.remote_git import probe_ssh_access
+
+    seen: list[list[str]] = []
+
+    class Result:
+        returncode = 0
+        stdout = "Welcome to GitLab, @x!"
+        stderr = ""
+
+    def spy(argv: list[str], **kwargs: object) -> Result:
+        seen.append(argv)
+        return Result()
+
+    monkeypatch.setattr(sp, "run", spy)
+    probe_ssh_access("git.empresa.com", "git", 2211)
+
+    (argv,) = seen
+    assert "-p" in argv and argv[argv.index("-p") + 1] == "2211"
+
+
+def test_silence_on_port_22_suggests_checking_the_port(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The symptom that started this: nothing at all, which says nothing to the user."""
+    from multi_claude.remote import RemoteError
+    from multi_claude.remote_git import probe_ssh_access
+
+    _fake_ssh(monkeypatch, stderr="", stdout="", code=255)
+    with pytest.raises(RemoteError) as excinfo:
+        probe_ssh_access("git.empresa.com", "git", 22)
+    assert "el puerto SSH es otro" in str(excinfo.value)
+
+
+def test_silence_on_a_custom_port_does_not_repeat_the_port_hint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from multi_claude.remote import RemoteError
+    from multi_claude.remote_git import probe_ssh_access
+
+    _fake_ssh(monkeypatch, stderr="", stdout="", code=255)
+    with pytest.raises(RemoteError) as excinfo:
+        probe_ssh_access("git.empresa.com", "git", 2211)
+    assert "el puerto SSH es otro" not in str(excinfo.value)

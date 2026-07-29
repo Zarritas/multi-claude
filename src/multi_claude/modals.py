@@ -1043,6 +1043,14 @@ class SettingsModal(ModalScreen[Config | None]):
         return f"Shift+Enter → {_MODE_LABELS[alternate_for(default)]}"
 
 
+def _coerce_port(value: str) -> int:
+    """Read a typed SSH port, falling back to 22 rather than refusing to save."""
+    text = value.strip()
+    if text.isdigit() and 1 <= int(text) <= 65535:
+        return int(text)
+    return 22
+
+
 def _probe_server(server: RemoteServer, token: str | None) -> tuple[str, bool]:
     """Check a server and return one line plus whether it is good news.
 
@@ -1059,7 +1067,10 @@ def _probe_server(server: RemoteServer, token: str | None) -> tuple[str, bool]:
         # ``ssh -T`` instead of a made-up repo: it needs no repository and both providers
         # answer with the account name, which is what the user actually wants confirmed.
         try:
-            return (f"OK · {probe_ssh_access(server.ssh_host, server.ssh_user)}", True)
+            return (
+                f"OK · {probe_ssh_access(server.ssh_host, server.ssh_user, server.ssh_port)}",
+                True,
+            )
         except RemoteError as exc:
             return (str(exc), False)
 
@@ -1199,6 +1210,15 @@ class ServerEditModal(ModalScreen["RemoteServer | None"]):
                         "repositorio. Cámbialo solo en instalaciones que usen otro.",
                         classes="hint",
                     )
+                    yield Label("Puerto SSH", classes="section")
+                    yield Input(
+                        value=str(self._initial.ssh_port), placeholder="22", id="server-ssh-port"
+                    )
+                    yield Label(
+                        "22 salvo que tu servidor use otro. Míralo en la URL SSH del repo: en "
+                        "ssh://git@git.tuempresa.com:2211/grupo/repo.git el puerto es 2211.",
+                        classes="hint",
+                    )
 
                 with Vertical(id="server-token-fields"):
                     yield Label("Token (lectura y escritura sobre los repos)", classes="section")
@@ -1327,6 +1347,7 @@ class ServerEditModal(ModalScreen["RemoteServer | None"]):
             host=self.query_one("#server-host", Input).value.strip().rstrip("/"),
             auth=self._auth_from_radio(),
             ssh_user=self.query_one("#server-ssh-user", Input).value.strip() or "git",
+            ssh_port=_coerce_port(self.query_one("#server-ssh-port", Input).value),
         )
 
 

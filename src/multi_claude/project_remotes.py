@@ -61,6 +61,9 @@ class RemoteServer:
     # SSH user for the git URL. GitLab and GitHub both use ``git``; kept configurable for
     # self-hosted setups that do not.
     ssh_user: str = "git"
+    # Self-hosted GitLab often listens on something other than 22, and there is no way to
+    # infer it from the API URL: the web host answers on 443 either way.
+    ssh_port: int = 22
 
     @property
     def uses_ssh(self) -> bool:
@@ -92,17 +95,19 @@ class RemoteServer:
 
     def summary(self) -> str:
         if self.uses_ssh:
-            return f"{self.kind} · {self.ssh_user}@{self.ssh_host} (ssh)"
+            port = "" if self.ssh_port == 22 else f":{self.ssh_port}"
+            return f"{self.kind} · {self.ssh_user}@{self.ssh_host}{port} (ssh)"
         host = self.api_host.replace("https://", "").replace("http://", "").rstrip("/")
         return f"{self.kind} · {host}"
 
-    def to_dict(self) -> dict[str, str]:
+    def to_dict(self) -> dict[str, object]:
         return {
             "name": self.name,
             "kind": self.kind,
             "host": self.host,
             "auth": self.auth,
             "ssh_user": self.ssh_user,
+            "ssh_port": self.ssh_port,
         }
 
     @classmethod
@@ -121,6 +126,7 @@ class RemoteServer:
             host=_as_str(raw.get("host")).rstrip("/"),
             auth=auth if auth in ("token", "ssh") else "token",
             ssh_user=_as_str(raw.get("ssh_user")) or "git",
+            ssh_port=_as_port(raw.get("ssh_port")),
         )
 
 
@@ -145,8 +151,9 @@ class RemoteLink:
     # Name of a configured RemoteServer. When set, it supplies kind and host, and the link
     # only carries what is specific to the repo.
     server: str = ""
-    # SSH user, carried through when the server authenticates that way.
+    # SSH user and port, carried through when the server authenticates that way.
     ssh_user: str = "git"
+    ssh_port: int = 22
 
     def tab_label(self) -> str:
         """Short name for the tab: the explicit label, or one derived from the target."""
@@ -174,13 +181,22 @@ class RemoteLink:
                         kind="ssh",
                         host=server.ssh_host,
                         ssh_user=server.ssh_user,
+                        ssh_port=server.ssh_port,
                     )
                 return replace(self, kind=server.kind, host=server.api_host)
         return replace(self, kind="none")
 
     def git_url(self) -> str:
-        """The ``git@host:group/repo.git`` URL this link clones from, for ``kind="ssh"``."""
-        return f"{self.ssh_user}@{self.host}:{self.repo.strip('/')}.git"
+        """The URL this link clones from, for ``kind="ssh"``.
+
+        The familiar ``git@host:group/repo.git`` form cannot express a port — the part after the
+        colon is the path — so a non-default port needs the explicit ``ssh://`` form. Self-hosted
+        GitLab commonly listens elsewhere, and getting this wrong just times out against 22.
+        """
+        path = self.repo.strip("/")
+        if self.ssh_port and self.ssh_port != 22:
+            return f"ssh://{self.ssh_user}@{self.host}:{self.ssh_port}/{path}.git"
+        return f"{self.ssh_user}@{self.host}:{path}.git"
 
     def same_target(self, other: RemoteLink) -> bool:
         """Whether two links point at the same place, ignoring the label.
@@ -189,12 +205,13 @@ class RemoteLink:
         same sessions under two tabs.
         """
         a, b = self.normalised(), other.normalised()
-        return (a.kind, a.path, a.host or a.api_host, a.repo, a.branch) == (
+        return (a.kind, a.path, a.host or a.api_host, a.repo, a.branch, a.ssh_port) == (
             b.kind,
             b.path,
             b.host or b.api_host,
             b.repo,
             b.branch,
+            b.ssh_port,
         )
 
     @property
@@ -220,11 +237,12 @@ class RemoteLink:
         if self.kind == "directory":
             return f"carpeta · {self.path or '(sin ruta)'}"
         if self.kind == "ssh":
-            return f"ssh · {self.ssh_user}@{self.host}:{self.repo or '(sin repo)'}"
+            port = "" if self.ssh_port == 22 else f":{self.ssh_port}"
+            return f"ssh · {self.ssh_user}@{self.host}{port}/{self.repo or '(sin repo)'}"
         host = self.api_host.replace("https://", "").replace("http://", "").rstrip("/")
         return f"{self.kind} · {host}/{self.repo or '(sin repo)'}"
 
-    def to_dict(self) -> dict[str, str]:
+    def to_dict(self) -> dict[str, object]:
         return {
             "kind": self.kind,
             "path": self.path,
@@ -234,6 +252,7 @@ class RemoteLink:
             "label": self.label,
             "server": self.server,
             "ssh_user": self.ssh_user,
+            "ssh_port": self.ssh_port,
         }
 
     @classmethod
@@ -256,6 +275,7 @@ class RemoteLink:
             label=_as_str(raw.get("label")),
             server=_as_str(raw.get("server")),
             ssh_user=_as_str(raw.get("ssh_user")) or "git",
+            ssh_port=_as_port(raw.get("ssh_port")),
         )
 
     def normalised(self) -> RemoteLink:
@@ -273,6 +293,19 @@ class RemoteLink:
 
 def _as_str(value: object) -> str:
     return value if isinstance(value, str) else ""
+
+
+def _as_port(value: object) -> int:
+    """Coerce a stored SSH port, falling back to 22 for anything unusable."""
+    if isinstance(value, bool):
+        return 22
+    if isinstance(value, int) and 1 <= value <= 65535:
+        return value
+    if isinstance(value, str) and value.strip().isdigit():
+        port = int(value.strip())
+        if 1 <= port <= 65535:
+            return port
+    return 22
 
 
 def normalize_git_remote(url: str | None) -> str | None:

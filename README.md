@@ -210,8 +210,14 @@ los repositorios que apuntan a ese servidor.
 > `git@github.com:Zarritas/multi-claude.git`, `Zarritas` es parte del *repositorio*. Solo hay que
 > cambiarlo en instalaciones self-hosted que usen otro usuario.
 >
+> **Si tu servidor usa un puerto SSH distinto del 22, ponlo.** Míralo en la URL SSH de cualquier
+> repo suyo: en `ssh://git@git.tuempresa.com:2211/grupo/repo.git` el puerto es `2211`. Es
+> frecuente en GitLab self-hosted, y no se puede deducir de la URL web (esa contesta por 443
+> igualmente).
+>
 > `Ctrl+T` sobre un servidor SSH ejecuta `ssh -T` y te dice como quién te autentica
-> (`autenticado en github.com como Zarritas`), sin necesitar ningún repositorio.
+> (`autenticado en git.tuempresa.com:2211 como jesus.lorenzo`), sin necesitar ningún
+> repositorio.
 
 | Destino | Qué necesita |
 |---------|--------------|

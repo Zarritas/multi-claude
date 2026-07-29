@@ -268,7 +268,9 @@ def _git_message(stderr: str, url: str) -> str:
         return f"{url} no existe o no es un repositorio"
     return text or f"git falló contra {url}"
 
-def probe_ssh_access(host: str, user: str = "git", *, timeout: int = PROBE_TIMEOUT) -> str:
+def probe_ssh_access(
+    host: str, user: str = "git", port: int = 22, *, timeout: int = PROBE_TIMEOUT
+) -> str:
     """Verify SSH access to a git host and return who you are authenticated as.
 
     ``ssh -T`` is the canonical way GitHub and GitLab expect this to be checked: it needs no
@@ -289,6 +291,8 @@ def probe_ssh_access(host: str, user: str = "git", *, timeout: int = PROBE_TIMEO
             [
                 "ssh",
                 "-T",
+                "-p",
+                str(port or 22),
                 "-o",
                 "BatchMode=yes",
                 "-o",
@@ -304,17 +308,25 @@ def probe_ssh_access(host: str, user: str = "git", *, timeout: int = PROBE_TIMEO
     except FileNotFoundError as exc:
         raise RemoteError("ssh no está en el PATH") from exc
     except subprocess.TimeoutExpired as exc:
-        raise RemoteError(f"{host} no respondió en {timeout}s") from exc
+        raise RemoteError(
+            f"{host}:{port} no respondió en {timeout}s"
+            + (
+                " — ¿el puerto SSH es otro? (mira la URL ssh:// del repo)"
+                if port == 22
+                else ""
+            )
+        ) from exc
 
     output = " ".join(f"{result.stdout} {result.stderr}".split())
     lowered = output.lower()
 
+    where = host if port == 22 else f"{host}:{port}"
     if "successfully authenticated" in lowered:  # GitHub
         who = output.split("Hi ", 1)[1].split("!", 1)[0] if "Hi " in output else "?"
-        return f"autenticado en {host} como {who}"
+        return f"autenticado en {where} como {who}"
     if "welcome to gitlab" in lowered:  # GitLab
         who = output.split("@", 1)[1].split("!", 1)[0] if "@" in output else "?"
-        return f"autenticado en {host} como {who}"
+        return f"autenticado en {where} como {who}"
     if "permission denied" in lowered:
         hint = ""
         if user != "git" and host.endswith(("github.com", "gitlab.com")):
@@ -324,11 +336,16 @@ def probe_ssh_access(host: str, user: str = "git", *, timeout: int = PROBE_TIMEO
         return _raise(f"no se pudo resolver {host}")
     if "host key verification failed" in lowered:
         return _raise(f"la clave del host de {host} no está aceptada")
+    if "connection refused" in lowered or "connection timed out" in lowered or not output:
+        # The commonest cause by far, and the hardest to guess from silence: self-hosted GitLab
+        # on a non-default SSH port. Say it, instead of reporting an empty failure.
+        extra = " — ¿el puerto SSH es otro? (mira la URL ssh:// del repo)" if port == 22 else ""
+        return _raise(f"{host}:{port} no respondió{extra}")
     if result.returncode == 0:
         # Some self-hosted setups answer with something else entirely, but a clean exit over
         # BatchMode means the key was accepted.
         return f"{host} acepta tu clave SSH"
-    return _raise(output or f"ssh falló contra {host}")
+    return _raise(output or f"ssh falló contra {host}:{port}")
 
 
 def _raise(message: str) -> str:
