@@ -10,3 +10,62 @@ DataTable {
     color: $text-muted;
     text-style: dim;
 }
+
+/* Every modal must fit the terminal it is drawn in.
+ *
+ * Each modal sets its own width in DEFAULT_CSS (80, 86, 90, 100…), which silently clips
+ * both ways on a smaller terminal: text cut off on the right, and the bottom of a tall
+ * modal — buttons included — simply not drawn, with no scrollbar to hint at it.
+ *
+ * App CSS wins over a widget's DEFAULT_CSS, so capping it here fixes every modal at once
+ * without touching their individual widths, which are still the preferred size when there
+ * is room for them.
+ */
+ModalScreen > Vertical {
+    max-width: 100%;
+    max-height: 90%;
+    overflow-y: auto;
+    overflow-x: hidden;
+}
+
+/* Long help text must wrap, not get clipped.
+ *
+ * A Label sizes itself to its content by default, so a sentence wider than the modal grows
+ * past the edge and the container quietly cuts it mid-word — the text is simply gone, with
+ * nothing to indicate it. Pinning Labels to the container width makes them wrap instead.
+ */
+ModalScreen Label {
+    width: 100%;
+}
+
+/* Modals with a long form: fixed header and footer, scrollable middle.
+ *
+ * These have to live in app CSS rather than the modal's DEFAULT_CSS, because app CSS is what
+ * wins — the generic ModalScreen rule above would otherwise put the scrollbar on the outer
+ * container and take the buttons with it. A fixed height (rather than auto + max-height) is
+ * what lets the middle claim 1fr.
+ */
+RemoteSettingsModal > Vertical {
+    height: 90%;
+    overflow-y: hidden;
+}
+RemoteSettingsModal #remote-body {
+    height: 1fr;
+    overflow-y: auto;
+}
+
+/* Keep every modal's title and buttons on screen.
+ *
+ * Docking pins them to the top and bottom of the modal, so the scrollable part is only the
+ * content between them. Without this, a modal taller than the terminal scrolls as one block
+ * and the buttons — the only visible way to accept or dismiss it — scroll out of reach.
+ *
+ * Applies to every modal at once, including the ones that were already too tall before any
+ * of the shared-sessions work.
+ */
+ModalScreen > Vertical > Label.title {
+    dock: top;
+}
+ModalScreen > Vertical > Horizontal {
+    dock: bottom;
+}

@@ -30,7 +30,7 @@ from multi_claude.config import (
 )
 from multi_claude.discovery import Project
 from multi_claude.launcher import PLACEMENT_LABELS, preview_dispatch
-from multi_claude.project_remotes import DEFAULT_REMOTE_HOSTS, RemoteLink
+from multi_claude.project_remotes import RemoteLink
 from multi_claude.tags import parse_tag_list
 
 
@@ -852,70 +852,68 @@ class SettingsModal(ModalScreen[Config | None]):
         with Vertical():
             yield Label("Ajustes", classes="title")
             with TabbedContent(id="settings-tabs"):
-              with TabPane("Lanzamiento", id="tab-launch"):
-                yield Label("Enter (predeterminado)", classes="section")
-                with RadioSet(id="default-mode"):
-                    for mode in VALID_MODES:
-                        yield RadioButton(
-                            _MODE_LABELS[mode],
-                            value=(mode == self._initial.default_mode),
-                            id=f"default-{mode}",
-                        )
+                with TabPane("Lanzamiento", id="tab-launch"):
+                    yield Label("Enter (predeterminado)", classes="section")
+                    with RadioSet(id="default-mode"):
+                        for mode in VALID_MODES:
+                            yield RadioButton(
+                                _MODE_LABELS[mode],
+                                value=(mode == self._initial.default_mode),
+                                id=f"default-{mode}",
+                            )
 
-                yield Static(
-                    _MODE_SKETCHES[self._initial.default_mode],
-                    id="mode-sketch",
-                    classes="sketch",
-                    markup=False,
-                )
-                yield Label(
-                    _dispatch_hint(self._initial.default_mode),
-                    id="dispatch-hint",
-                    classes="hint",
-                )
-                yield Label(
-                    self._alt_preview_text(self._initial.default_mode),
-                    id="alt-preview",
-                    classes="alt-preview",
-                )
+                    yield Static(
+                        _MODE_SKETCHES[self._initial.default_mode],
+                        id="mode-sketch",
+                        classes="sketch",
+                        markup=False,
+                    )
+                    yield Label(
+                        _dispatch_hint(self._initial.default_mode),
+                        id="dispatch-hint",
+                        classes="hint",
+                    )
+                    yield Label(
+                        self._alt_preview_text(self._initial.default_mode),
+                        id="alt-preview",
+                        classes="alt-preview",
+                    )
 
-                yield Label("Argumentos para `claude`", classes="section")
-                yield Checkbox(
-                    f"Saltar permisos ({_SKIP_PERMISSIONS_FLAG})",
-                    value=self._skip_initial,
-                    id="skip-permissions",
-                )
-                yield Input(
-                    value=" ".join(self._extra_initial),
-                    placeholder="--model opus --effort high --add-dir ../shared",
-                    id="claude-args",
-                )
-                yield Label("Se anteponen a --resume/-n en cada lanzamiento", classes="hint")
-                yield Label("", id="args-error", classes="error")
+                    yield Label("Argumentos para `claude`", classes="section")
+                    yield Checkbox(
+                        f"Saltar permisos ({_SKIP_PERMISSIONS_FLAG})",
+                        value=self._skip_initial,
+                        id="skip-permissions",
+                    )
+                    yield Input(
+                        value=" ".join(self._extra_initial),
+                        placeholder="--model opus --effort high --add-dir ../shared",
+                        id="claude-args",
+                    )
+                    yield Label("Se anteponen a --resume/-n en cada lanzamiento", classes="hint")
+                    yield Label("", id="args-error", classes="error")
 
-              with TabPane("Sesiones compartidas", id="tab-remote"):
-                  yield Label("Remoto global", classes="section")
-                  yield Label(self._initial.remote_summary(), id="remote-summary", classes="hint")
-                  yield Label(
-                      "Se usa en los proyectos que no tengan repositorios propios "
-                      "enlazados. Para enlazar un proyecto concreto: L en su listado.",
-                      classes="hint",
-                  )
-                  yield Button("Configurar remoto…", id="configure-remote", variant="default")
+                with TabPane("Sesiones compartidas", id="tab-remote"):
+                    yield Label("Remoto global", classes="section")
+                    yield Label(self._initial.remote_summary(), id="remote-summary", classes="hint")
+                    yield Label(
+                        "Solo para proyectos sin repos propios. Para enlazar uno: L.",
+                        classes="hint",
+                    )
+                    yield Button("Configurar remoto…", id="configure-remote", variant="default")
 
-              with TabPane("Colores", id="tab-colors"):
-                  yield Label("Reglas automáticas", classes="section")
-                  yield Label(
-                      f"{len(self._initial.color_rules)} regla(s) definida(s)",
-                      id="rules-summary",
-                      classes="hint",
-                  )
-                  yield Label(
-                      "Se evalúan en orden; gana la primera que casa. El color manual "
-                      "de una sesión (c) siempre tiene prioridad.",
-                      classes="hint",
-                  )
-                  yield Button("Editar reglas…", id="edit-rules", variant="default")
+                with TabPane("Colores", id="tab-colors"):
+                    yield Label("Reglas automáticas", classes="section")
+                    yield Label(
+                        f"{len(self._initial.color_rules)} regla(s) definida(s)",
+                        id="rules-summary",
+                        classes="hint",
+                    )
+                    yield Label(
+                        "En orden; gana la primera que casa. El color manual (c) manda.",
+                        classes="hint",
+                    )
+                    yield Button("Editar reglas…", id="edit-rules", variant="default")
 
             yield Label("Enter guarda · Esc cancela", classes="hint")
             with Horizontal():
@@ -956,9 +954,7 @@ class SettingsModal(ModalScreen[Config | None]):
         )
         self.app.push_screen(modal, lambda result: self._on_remote_configured(modal, result))
 
-    def _on_remote_configured(
-        self, modal: RemoteSettingsModal, result: RemoteLink | None
-    ) -> None:
+    def _on_remote_configured(self, modal: RemoteSettingsModal, result: RemoteLink | None) -> None:
         if result is None:
             return  # cancelled: leave the remote settings untouched
         from multi_claude.remote import TokenStore
@@ -1072,7 +1068,6 @@ class RemoteSettingsModal(ModalScreen["RemoteLink | None"]):
         text-style: bold;
     }
     RemoteSettingsModal Label.section {
-        margin-top: 1;
         text-style: bold;
         color: $accent;
     }
@@ -1084,6 +1079,11 @@ class RemoteSettingsModal(ModalScreen["RemoteLink | None"]):
     }
     RemoteSettingsModal Label.ok {
         color: $success;
+    }
+    RemoteSettingsModal #fields-directory,
+    RemoteSettingsModal #fields-repo,
+    RemoteSettingsModal #fields-common {
+        height: auto;
     }
     RemoteSettingsModal Horizontal {
         align: center middle;
@@ -1104,78 +1104,100 @@ class RemoteSettingsModal(ModalScreen["RemoteLink | None"]):
         self._title_text = title or "Ajustes — sesiones compartidas"
 
     def compose(self) -> ComposeResult:
-        from textual.containers import Horizontal
+        from textual.containers import Horizontal, VerticalScroll
 
         with Vertical():
             yield Label(self._title_text, classes="title")
+            yield Label("Ctrl+T prueba la conexión · Enter guarda · Esc cancela", classes="hint")
 
-            yield Label("Dónde se publican", classes="section")
-            with RadioSet(id="remote-kind"):
-                for kind in VALID_REMOTE_KINDS:
-                    yield RadioButton(
-                        _REMOTE_KIND_LABELS[kind],
-                        value=(kind == self._initial.kind),
-                        id=f"kind-{kind}",
-                    )
+            # Only the fields scroll. Title and buttons stay pinned, so on a short terminal
+            # the modal never hides how to accept or dismiss it.
+            with VerticalScroll(id="remote-body"):
+              yield Label("Dónde se publican", classes="section")
+              with RadioSet(id="remote-kind"):
+                  for kind in VALID_REMOTE_KINDS:
+                      yield RadioButton(
+                          _REMOTE_KIND_LABELS[kind],
+                          value=(kind == self._initial.kind),
+                          id=f"kind-{kind}",
+                      )
 
-            yield Label("Carpeta (solo para «carpeta compartida»)", classes="section")
-            yield Input(
-                value=self._initial.path,
-                placeholder="/mnt/equipo/sesiones-claude",
-                id="remote-path",
-            )
+              # Only the fields the chosen provider actually needs are shown. Rendering all of
+              # them made the modal taller than most terminals, so it scrolled and pushed its
+              # own title out of view; it also asked for a repo when publishing to a folder.
+              with Vertical(id="fields-directory"):
+                  yield Label("Carpeta compartida", classes="section")
+                  yield Input(
+                      value=self._initial.path,
+                      placeholder="/mnt/equipo/sesiones-claude",
+                      id="remote-path",
+                  )
 
-            yield Label("Servidor de la API (GitLab/GitHub)", classes="section")
-            yield Input(
-                value=self._initial.host,
-                placeholder=DEFAULT_REMOTE_HOSTS["gitlab"],
-                id="remote-host",
-            )
-            yield Label(
-                "Vacío usa gitlab.com o api.github.com. Para GitLab self-hosted: "
-                "https://git.tuempresa.com",
-                classes="hint",
-            )
+              with Vertical(id="fields-repo"):
+                  yield Label("Servidor (vacío = gitlab.com / api.github.com)", classes="section")
+                  yield Input(
+                      value=self._initial.host,
+                      placeholder="https://git.tuempresa.com",
+                      id="remote-host",
+                  )
 
-            yield Label("Repositorio de sesiones", classes="section")
-            yield Input(
-                value=self._initial.repo,
-                placeholder="grupo/sesiones-claude",
-                id="remote-repo",
-            )
+                  yield Label("Repositorio de sesiones", classes="section")
+                  yield Input(
+                      value=self._initial.repo,
+                      placeholder="grupo/sesiones-claude",
+                      id="remote-repo",
+                  )
 
-            yield Label("Rama", classes="section")
-            yield Input(value=self._initial.branch, placeholder="main", id="remote-branch")
+                  yield Label("Rama", classes="section")
+                  yield Input(value=self._initial.branch, placeholder="main", id="remote-branch")
 
-            yield Label("Nombre de la pestaña (opcional)", classes="section")
-            yield Input(
-                value=self._initial.label,
-                placeholder=self._initial.tab_label(),
-                id="remote-label",
-            )
+                  yield Label("Token (lectura y escritura sobre el repo)", classes="section")
+                  yield Input(
+                      placeholder=(
+                          "•••• guardado (escribe para reemplazarlo)"
+                          if self._has_token
+                          else "glpat-… / github_pat_…"
+                      ),
+                      password=True,
+                      id="remote-token",
+                  )
+                  yield Label(
+                      "Se guarda aparte con permisos 0600, nunca en config.json", classes="hint"
+                  )
 
-            yield Label("Token de acceso", classes="section")
-            yield Input(
-                placeholder=("•••• guardado (escribe para reemplazarlo)" if self._has_token
-                             else "glpat-… / github_pat_…"),
-                password=True,
-                id="remote-token",
-            )
-            yield Label(
-                "Se guarda en remote-token con permisos 0600, nunca en config.json. "
-                "Necesita permiso de lectura y escritura sobre el repo.",
-                classes="hint",
-            )
+              with Vertical(id="fields-common"):
+                  yield Label("Nombre de la pestaña (opcional)", classes="section")
+                  yield Input(
+                      value=self._initial.label,
+                      placeholder=self._initial.tab_label(),
+                      id="remote-label",
+                  )
 
             yield Label("", id="remote-status", classes="hint")
-            yield Label("Ctrl+T prueba la conexión · Enter guarda · Esc cancela", classes="hint")
             with Horizontal():
                 yield Button("Cancelar", id="cancel", variant="default")
                 yield Button("Probar", id="test", variant="default")
                 yield Button("Guardar", id="save", variant="primary")
 
     def on_mount(self) -> None:
+        self._sync_visible_fields(self._initial.kind)
         self.query_one("#remote-kind", RadioSet).focus()
+        # Focusing scrolls the container to reveal the radio, which pushes the title off the
+        # top on a short terminal. Put it back once the layout has settled.
+        self.call_after_refresh(self._scroll_to_top)
+
+    def _scroll_to_top(self) -> None:
+        self.query_one("#remote-body").scroll_home(animate=False)
+
+    @on(RadioSet.Changed, "#remote-kind")
+    def _on_kind_changed(self, event: RadioSet.Changed) -> None:
+        self._sync_visible_fields(self._kind_from_radio())
+
+    def _sync_visible_fields(self, kind: str) -> None:
+        """Show only what ``kind`` needs; hide the rest so the modal stays short."""
+        self.query_one("#fields-directory").display = kind == "directory"
+        self.query_one("#fields-repo").display = kind in ("gitlab", "github")
+        self.query_one("#fields-common").display = kind != "none"
 
     @on(Button.Pressed, "#cancel")
     def _cancel(self) -> None:
@@ -1332,15 +1354,13 @@ class ProjectRemotesModal(ModalScreen["list[RemoteLink] | None"]):
         with Vertical():
             yield Label(f"Repositorios de sesiones — {self.project_name}", classes="title")
             yield Label(
-                "Cada repositorio enlazado es una pestaña en el listado de sesiones. "
-                "El enlace se guarda contra el origin del repo, así que vale para todos "
-                "sus worktrees.",
+                "Cada repositorio es una pestaña. El enlace se guarda contra el origin "
+                "del repo, así que vale para todos sus worktrees.",
                 classes="hint",
             )
             if self._inherited:
                 yield Label(
-                    "Ahora mismo este proyecto usa el remoto global; al guardar pasará a "
-                    "tener enlaces propios.",
+                    "Ahora usa el remoto global; al guardar tendrá enlaces propios.",
                     classes="hint",
                 )
 
@@ -1509,11 +1529,13 @@ class ConfirmDeleteModal(ModalScreen[bool]):
 
         with Vertical():
             yield Label(self.title_text, classes="title")
-            for line in self.details:
-                yield Static(line)
+            # Warning before the details, not after: the details can be a long file list, and
+            # the one line that must not be missed is the reason to think twice.
             if self.warning:
                 yield Label(f"⚠️  {self.warning}", classes="warning")
             yield Label("`y` confirma · Enter/Esc cancela", classes="hint")
+            for line in self.details:
+                yield Static(line)
             with Horizontal():
                 yield Button("Cancelar", id="cancel", variant="default")
                 yield Button("Borrar", id="confirm", variant="error")
