@@ -99,8 +99,8 @@ Atajos:
 - `m` — **mover** la(s) sesión(es) seleccionada(s) a otro worktree del mismo repo (el checkout principal o un worktree hermano). Si no hay nada marcado, mueve la fila actual.
 - `x` — **exportar** la(s) sesión(es) seleccionada(s) a un único `.zip` compartible (para enviárselo a un compañero). Si no hay nada marcado, exporta la fila actual.
 - `u` — **publicar** la(s) sesión(es) en el repositorio de la pestaña activa, sin zip de por medio (ver [Sesiones compartidas](#sesiones-compartidas-l-y-u)). Pide confirmación mostrando qué ficheros se suben.
-- `L` — gestionar los **repositorios de sesiones** enlazados a este proyecto; cada uno es una pestaña del listado, y `Enter` sobre una fila compartida la trae y la reanuda.
-- `d` — borrar la(s) sesión(es) seleccionada(s) y todos sus artefactos en disco.
+- `L` — gestionar los **repositorios de sesiones** enlazados a este proyecto (añadir, editar, quitar). Cada uno aparece como pestaña del listado.
+- `d` — borrar la(s) sesión(es) seleccionada(s) y todos sus artefactos en disco. Sobre una fila **compartida** no borra nada tuyo: la **despublica** del repositorio.
 - `D` — **limpieza** por antigüedad: eliges un umbral y borra de golpe las sesiones más viejas (las sesiones vivas quedan protegidas).
 - `/` — filtrar la lista (ver [Filtro](#filtro-)).
 - `1`…`6` — ordenar por prompt / branch / tags / msgs / tamaño / última actividad.
@@ -176,126 +176,147 @@ Condiciones soportadas en una regla (un `when` por regla):
 
 ### Sesiones compartidas (`L` y `u`)
 
-Publicar una sesión en un sitio común y que un compañero la reanude con `Enter`, sin el
-viaje de ida y vuelta de `x` (exportar) → enviar el zip → `i` (importar).
+Publicar una sesión en un repositorio común y que un compañero la reanude con `Enter`, sin el
+viaje de ida y vuelta de `x` (exportar) → enviar el zip → `i` (importar). La sesión conserva su
+uuid, así que es literalmente la misma conversación, no una copia.
 
-**Enlazar repositorios a un proyecto.** Cada proyecto de Claude puede publicar a **uno o
-varios** repositorios de sesiones, y cada uno aparece como **pestaña** en el listado de
-sesiones. Se gestionan con **`L`**, tanto en la pantalla de proyectos como dentro del proyecto.
+Está **desactivado por defecto**: hay que configurarlo.
 
-El enlace se guarda contra el **`origin` del repo**, no contra la ruta, así que:
+#### Puesta en marcha en un equipo
 
-- Todos los **worktrees** de un repo comparten enlace: enlazas uno y quedan enlazados todos.
-- `git@host:grupo/repo.git` y `https://host/grupo/repo.git` son la misma clave.
-- Un proyecto sin `origin` se enlaza por su ruta absoluta (funciona, pero solo en esa máquina).
+1. **Un repositorio vacío para las sesiones**, en vuestro GitLab o GitHub. Privado, y con acceso
+   solo para quien deba leer esas conversaciones — sus permisos *son* los permisos de las
+   sesiones. Uno por cliente o por área es lo razonable; no hace falta inicializarlo.
 
-**Remoto global.** En **Ajustes (`s`) → pestaña «Sesiones compartidas»** se configura un remoto
-que sirve de *fallback* para los proyectos sin enlaces propios. Los enlaces del proyecto ganan
-por completo: un proyecto enlazado al repo de un cliente no publica además al global.
+2. **Cada persona configura el servidor una vez**: `s` → pestaña «Sesiones compartidas» →
+   «Servidores…» → «Añadir». Nombre libre, proveedor, URL, y token o SSH (ver abajo).
+   **`Ctrl+T` comprueba el acceso antes de guardar**; no sigas sin un OK.
 
-El diálogo de configuración pide proveedor, servidor, repositorio, rama, token y nombre de la
-pestaña, y tiene **`Ctrl+T` para probar la conexión** antes de guardar. El remoto global se puede
-**desactivar** eligiendo «Desactivado»; los enlaces de un proyecto se quitan con su botón
-**Quitar**.
+3. **Cada persona enlaza el proyecto al repositorio**: abre el proyecto, `L` → «Añadir», elige el
+   servidor por nombre e indica `grupo/repo-de-sesiones` y la rama. Aparece una pestaña nueva con
+   el nombre del repositorio.
 
-**Servidores.** En Ajustes defines los servidores una vez (nombre, proveedor, URL y
-autenticación) y luego, al enlazar un repositorio a un proyecto, los eliges por nombre: solo
-tienes que indicar el repo y la rama. Corregir una URL o rotar un token arregla de golpe todos
-los repositorios que apuntan a ese servidor.
+4. **Publicar**: sitúate en una sesión y pulsa `u`. Revisa la lista de ficheros que muestra el
+   diálogo y confirma. En la pestaña `Locales` la sesión queda marcada con `✓`.
 
-| Autenticación | Qué necesita | Cuándo |
-|---------------|--------------|--------|
-| **Token de acceso** | un token por servidor | Vía API REST. Un token por persona y por host |
-| **SSH** | nada nuevo | Usa las claves que ya tienes. Sin tokens que repartir, y **git resuelve las publicaciones simultáneas** en vez de que la última pise a la anterior |
+5. **Traer la de otro**: en la pestaña del repositorio aparecen las sesiones de los demás con `☁`.
+   `Enter` la descarga y la reanuda como si fuera tuya.
+
+El enlace se guarda contra el **`origin` del repo de trabajo**, no contra la ruta, así que cada
+persona lo configura en su máquina pero *acierta el mismo destino* aunque tenga el proyecto en
+otra carpeta. Y todos los **worktrees** de un repo comparten enlace: enlazas uno y quedan
+enlazados todos.
+
+#### Servidores y autenticación
+
+Un servidor se define una vez (nombre, proveedor, URL, autenticación) y luego se elige **por
+nombre** al enlazar cada repositorio: solo hay que indicar repo y rama. Corregir una URL o rotar
+un token arregla de golpe todos los repositorios que apuntan a ese servidor.
+
+| Autenticación | Qué necesita | Qué implica |
+|---------------|--------------|-------------|
+| **SSH** *(recomendada)* | nada nuevo | Usa las claves que ya tenéis. Sin tokens que crear ni repartir, y **git resuelve las publicaciones simultáneas**: si dos personas publican a la vez, ambas sesiones sobreviven |
+| **Token de acceso** | un token por persona y por servidor | Vía API REST. Más simple de arrancar, pero si dos publican la misma sesión a la vez, la segunda pisa a la primera |
 
 > **El usuario SSH es siempre `git`**, no tu usuario de GitHub/GitLab. En
-> `git@github.com:Zarritas/multi-claude.git`, `Zarritas` es parte del *repositorio*. Solo hay que
-> cambiarlo en instalaciones self-hosted que usen otro usuario.
+> `git@github.com:Zarritas/multi-claude.git`, `Zarritas` es parte del *repositorio*. Cámbialo solo
+> en instalaciones self-hosted que usen otro.
 >
 > **Si tu servidor usa un puerto SSH distinto del 22, ponlo.** Míralo en la URL SSH de cualquier
 > repo suyo: en `ssh://git@git.tuempresa.com:2211/grupo/repo.git` el puerto es `2211`. Es
-> frecuente en GitLab self-hosted, y no se puede deducir de la URL web (esa contesta por 443
-> igualmente).
+> frecuente en GitLab self-hosted, y no se puede deducir de la URL web — esa contesta por 443
+> igualmente. Si el puerto está mal, la prueba de conexión no recibe *nada*: por eso el aviso te
+> sugiere revisarlo.
 >
 > `Ctrl+T` sobre un servidor SSH ejecuta `ssh -T` y te dice como quién te autentica
-> (`autenticado en git.tuempresa.com:2211 como jesus.lorenzo`), sin necesitar ningún
-> repositorio.
+> (`autenticado en git.tuempresa.com:2211 como jesus.lorenzo`), sin necesitar ningún repositorio.
 
-| Destino | Qué necesita |
-|---------|--------------|
-| Carpeta compartida | una ruta (montaje de red, Syncthing…). Los permisos son los del sistema de ficheros |
-| GitLab / GitHub | un servidor configurado + `grupo/repo` + rama |
-
-Con GitLab o GitHub los permisos, el SSO y la auditoría son los del propio repositorio: quien
-pueda leerlo puede leer las sesiones, y cada publicación es un commit con su autor. Es la razón
-principal para preferirlos a una carpeta.
+También se puede publicar a una **carpeta compartida** (montaje de red, Syncthing) en lugar de un
+repositorio: ahí los permisos son los del sistema de ficheros, y no hay control de acceso por
+cliente ni autoría. Va bien para probar; para un equipo, un repositorio privado es mejor.
 
 Los **tokens nunca se guardan en `config.json`** (ese fichero se comparte y se pega en issues):
-van a `remote-tokens.json`, junto a la config, con permisos `0600` y uno por servidor.
+van a `remote-tokens.json`, con permisos `0600` y uno por servidor.
 `$MULTI_CLAUDE_REMOTE_TOKEN` los sobreescribe, para que CI no tenga que escribir un secreto en
-disco. Con autenticación SSH no hay token que guardar.
+disco. Con SSH no hay token que guardar.
 
-Con SSH se mantiene una copia de trabajo del repo bajo `~/.cache/multi-claude/repos/`, que es
-caché reconstruible: se puede borrar sin perder nada.
+Con SSH se mantiene una copia de trabajo del repo en `~/.cache/multi-claude/repos/`. Es caché
+reconstruible: se puede borrar sin perder nada.
 
-Los campos también se pueden editar a mano en `config.json` (`remote_kind`, `remote_host`,
-`remote_repo`, `remote_branch`, `remote_path`), y `MULTI_CLAUDE_REMOTE_DIR=/ruta` fuerza una
-carpeta por encima de todo lo demás — útil para probar sin tocar tu configuración real.
+#### Remoto global
 
-**Qué hace cada tecla:**
+En Ajustes se puede configurar además un remoto **global**, que sirve de respaldo para los
+proyectos sin enlaces propios. Los enlaces del proyecto ganan por completo: un proyecto enlazado
+al repositorio de un cliente **no** publica además al global. Se desactiva eligiendo
+«Desactivado» en su diálogo.
 
-- `L` — gestiona los repositorios de sesiones enlazados a este proyecto (añadir, quitar).
-- **Pestañas** — `Locales` muestra tus sesiones; cada `☁ nombre` es una vista del repositorio:
-  **todo lo publicado en él**, con su autor y un indicador del estado de tu copia local. La barra
-  se oculta si no hay nada enlazado.
+#### Pestañas y marcas
 
-  | Marca | Significado |
-  |-------|-------------|
-  | `☁` | Publicada, no la tienes en local. `Enter` la trae y la reanuda |
-  | `✓` | Descargada y al día con lo publicado |
-  | `↻` | Descargada, pero alguien la continuó después: **hay versión más reciente** |
-  | `↑` | Descargada y la has continuado tú: **tienes turnos sin publicar** |
+`Locales` muestra tus sesiones; cada `☁ nombre` es una vista del repositorio: **todo lo publicado
+en él**, con su autor y el estado de tu copia. La barra se oculta si no hay nada enlazado.
 
-  El estado se calcula comparando el tamaño de tu `.jsonl` con el que registra el manifest.
-  Como el transcript solo crece, cualquier diferencia es contenido real.
+En la pestaña de un repositorio:
 
-- **En la pestaña `Locales`** también se ve qué sesiones están compartidas, con el mismo
-  vocabulario visto desde el otro lado:
+| Marca | Significado |
+|-------|-------------|
+| `☁` | Publicada, no la tienes en local. `Enter` la trae y la reanuda |
+| `✓` | Descargada y al día con lo publicado |
+| `↻` | Descargada, pero alguien la continuó después: **hay versión más reciente** |
+| `↑` | Descargada y la has continuado tú: **tienes turnos sin publicar** |
 
-  | Marca | Significado |
-  |-------|-------------|
-  | (sin marca) | Solo tuya, no está en ningún repositorio |
-  | `✓` | Publicada y al día. Si la subió otra persona, se indica: `· de ana` |
-  | `↻` | El repositorio tiene una versión más reciente que tu copia |
-  | `↑` | Tienes turnos que no has publicado |
+En `Locales`, el mismo vocabulario visto desde el otro lado:
 
-  Se consulta a los repositorios enlazados en segundo plano, así que la lista aparece al
-  instante y las marcas se pintan al llegar. Si un repositorio no responde, te quedas sin
-  esa marca, no sin listado.
-- `u` — publica la fila actual (o todas las marcadas). El diálogo pide confirmación y, si hay
-  **varios repositorios enlazados, te deja elegir a cuál** (parte del de la pestaña en la que
-  estés). Muestra además **la lista de ficheros exactos** que salen de la máquina: el
-  transcript incluye los `tool-results/`, así que una sesión que imprimió un `.env` lo
-  publicaría.
-- `Enter` sobre una compartida — si no la tienes (`☁`), la descarga en el directorio de este
-  proyecto preservando su uuid y la reanuda; si ya la tienes, reanuda tu copia local. Avisa antes
-  de lanzar cuando se grabó sobre otro commit, o cuando tu copia está por detrás de la publicada
-  (traer los turnos nuevos de una sesión ya descargada todavía no está implementado).
+| Marca | Significado |
+|-------|-------------|
+| (sin marca) | Solo tuya, no está en ningún repositorio |
+| `✓` | Publicada y al día. Si la subió otra persona, se indica: `· de ana` |
+| `↻` | El repositorio tiene una versión más reciente que tu copia |
+| `↑` | Tienes turnos que no has publicado |
+
+El estado se calcula comparando el tamaño de tu `.jsonl` con el que registra el manifest: como el
+transcript solo crece, cualquier diferencia es contenido real. Se consulta a los repositorios en
+segundo plano, así que la lista aparece al instante y las marcas se pintan al llegar; si un
+repositorio no responde, te quedas sin esa marca, no sin listado.
+
+#### Teclas
+
+- `L` — gestiona los repositorios enlazados a este proyecto (añadir, editar, quitar). Está en la
+  pantalla de proyectos y dentro del proyecto.
+- `u` — publica la fila actual, o todas las marcadas con `Espacio`. El diálogo pide confirmación
+  y, si hay varios repositorios enlazados, **te deja elegir a cuál** (parte del de la pestaña en
+  la que estés). Muestra **la lista exacta de ficheros** que salen de la máquina.
+- `Enter` sobre una compartida — si no la tienes (`☁`), la descarga preservando su uuid y la
+  reanuda; si ya la tienes, reanuda tu copia local. Avisa antes de lanzar si se grabó sobre otro
+  commit, o si tu copia está por detrás de la publicada.
 - `d` sobre una compartida — **despublicarla**: la quita del repositorio para todos. Tu copia
-  local no se toca, y el diálogo lo dice explícitamente. En la pestaña `Locales`, `d` sigue
-  borrando la sesión de tu disco.
+  local no se toca, y el diálogo lo dice. En `Locales`, `d` sigue borrando la sesión de tu disco.
 
-Sobre una fila compartida las acciones locales (renombrar, etiquetar, borrar, mover) están
-ocultas: todavía no hay jsonl que tocar.
+Sobre una fila compartida las acciones locales (renombrar, etiquetar, mover) están ocultas:
+todavía no hay jsonl que tocar.
 
-**Qué viaja y qué no.** Sube el `<uuid>.jsonl`, los `subagents/` (en una sesión con fan-out
-son la mayor parte del trabajo) y los `tool-results/`. **No** sube el `memory/` del
-proyecto — esa es tu auto-memoria personal — ni nada llamado `session-env`.
+#### Qué viaja y qué no
 
-El código no viaja: tu compañero necesita el repo. El aviso de commit divergente es lo que
-lo hace visible en vez de sorprendente.
+Sube el `<uuid>.jsonl`, los `subagents/` (en una sesión con fan-out son la mayor parte del
+trabajo) y los `tool-results/`. **No** sube el `memory/` del proyecto —esa es tu auto-memoria
+personal— ni nada llamado `session-env`.
+
+#### Antes de usarlo en serio con un equipo
+
+- **Revisa la lista de ficheros al publicar.** El transcript arrastra los `tool-results/`, así que
+  una sesión que en su día imprimió un `.env` o un log con credenciales **lo publicaría**. No hay
+  escáner de secretos todavía: el diálogo te muestra qué sube, y esa revisión es manual.
+- **El código no viaja.** Tu compañero necesita el repositorio de trabajo, y si está en otro
+  commit la conversación describe ficheros que ya no son esos. Al reanudar se avisa de la
+  divergencia, que es lo que lo hace visible en vez de sorprendente.
+- **Con token, republicar pisa.** Si dos personas continúan la misma sesión y ambas publican, con
+  API la segunda sobrescribe a la primera en el remoto (cada una conserva la suya en local). Con
+  **SSH no**: git rechaza el push y se reintenta encima. Es la razón principal para preferir SSH
+  en un equipo.
+- **Una sesión traída y luego continuada por el otro no se puede actualizar.** Se ve el aviso
+  `↻`, pero traer los turnos nuevos exige un merge que aún no está implementado.
 
 Diseño completo y fases pendientes en [docs/REMOTE-SESSIONS.md](docs/REMOTE-SESSIONS.md).
+
 
 ## Cómo se lanza Claude
 
@@ -363,7 +384,13 @@ con un error en el modal en vez de colisionar con la sesión que se está reanud
 
 ## Ajustes (`s`)
 
-El modal está dividido en pestañas: **Lanzamiento** (modo de Enter y argumentos de `claude`), **Sesiones compartidas** (remoto global) y **Colores** (reglas automáticas).
+El modal está dividido en pestañas:
+
+| Pestaña | Qué configura |
+|---------|---------------|
+| **Lanzamiento** | dónde se abre la sesión con Enter, y argumentos extra para `claude` |
+| **Sesiones compartidas** | los **servidores** (nombre, proveedor, URL, token o SSH) y el **remoto global** |
+| **Colores** | las reglas automáticas de color |
 
 Modal en la TUI con:
 
@@ -397,9 +424,22 @@ El fichero guarda, además del modo, el estado de la UI que se recuerda entre ar
   "sessions_sort": { "key": "last_activity", "descending": true },
   "preview_visible": true,
   "group_worktrees": true,
-  "color_rules": []
+  "color_rules": [],
+  "remote_servers": [
+    { "name": "FactorLibre", "kind": "gitlab", "host": "https://git.factorlibre.com",
+      "auth": "ssh", "ssh_user": "git", "ssh_port": 2211 }
+  ],
+  "remote_kind": "none",
+  "remote_server": "",
+  "remote_repo": "",
+  "remote_branch": "main",
+  "remote_path": ""
 }
 ```
+
+Los `remote_*` sueltos son el **remoto global**; `remote_servers` es el catálogo de servidores.
+Los enlaces por proyecto viven aparte, en `project-remotes.json`, y los tokens en
+`remote-tokens.json` — nunca aquí.
 
 Un `config.json` ausente, corrupto o con claves inválidas cae silenciosamente a estos valores por defecto — nunca es un error fatal.
 
@@ -416,9 +456,13 @@ Todo lo que multi-claude guarda por su cuenta (nunca escribe dentro de los jsonl
 | `~/.config/multi-claude/session-tags.json`       | etiquetas por sesión (`t`)                           |
 | `~/.config/multi-claude/session-colors.json`     | colores manuales por sesión (`c`)                    |
 | `~/.config/multi-claude/project-folders.json`    | árbol de carpetas y asignación de proyectos (`f`)    |
+| `~/.config/multi-claude/project-remotes.json`    | repositorios de sesiones enlazados a cada proyecto (`L`), indexados por el `origin` del repo |
+| `~/.config/multi-claude/remote-tokens.json`      | un token por servidor, con permisos `0600`           |
 | `~/.local/share/multi-claude/index.sqlite3`      | índice SQLite + tabla FTS5 (caché reconstruible)     |
+| `~/.cache/multi-claude/repos/`                   | copias de trabajo de los repositorios de sesiones por SSH (caché reconstruible) |
 
-Borrar cualquiera de ellos es seguro: se pierde ese estado, no las sesiones.
+Borrar cualquiera de ellos es seguro: se pierde ese estado, no las sesiones. `remote-tokens.json`
+es el único que contiene un secreto, y por eso se crea con permisos de solo-propietario.
 
 ## Identidad de un proyecto
 
@@ -436,7 +480,9 @@ El nombre de la carpeta `~/.claude/projects/<encoded>/` es la ruta original con 
 - **No todos los emuladores saben abrir pestañas desde la CLI**: Ghostty (su CLI no expone `+new-tab`), Alacritty, foot y Terminal.app solo pueden abrir ventanas, así que en modo `tab` la sesión acaba en una ventana nueva y la TUI te lo dice. En kitty y WezTerm la pestaña exige tener el control remoto activado (`allow_remote_control` en `kitty.conf`); si está apagado, mismo fallback.
 - **zellij no puede lanzar un comando en una pestaña nueva**: `zellij action new-tab` solo acepta un layout, no un comando, así que el modo `tab` dentro de zellij abre un panel.
 - **Ordenar por tags no se persiste**: `3` ordena la tabla de sesiones por etiquetas en la sesión actual de la TUI, pero `tags` no está en `VALID_SESSION_SORT` (`config.py`), así que al reabrir vuelve al orden por última actividad.
-- **Republicar una sesión compartida sobrescribe la versión del remoto**: si dos personas reanudan la misma sesión compartida y ambas publican, la segunda publicación pisa la primera en el remoto (cada una conserva la suya en local). El fork explícito que lo resuelve está planificado, no implementado — ver [docs/REMOTE-SESSIONS.md](docs/REMOTE-SESSIONS.md).
+- **Con token, republicar una sesión compartida sobrescribe la versión del remoto**: si dos personas continúan la misma sesión y ambas publican vía API, la segunda pisa a la primera en el remoto (cada una conserva la suya en local). **Con autenticación SSH no ocurre**: git rechaza el segundo push y se reintenta encima, así que ambas sobreviven. El fork explícito que lo resolvería también en API está planificado, no implementado — ver [docs/REMOTE-SESSIONS.md](docs/REMOTE-SESSIONS.md).
+- **Una sesión ya descargada no se puede actualizar**: si un compañero la continúa después de que la traigas, la fila lo indica con `↻` pero no hay forma de incorporar esos turnos. Requiere el merge por `uuid` que sigue pendiente.
+- **No hay escáner de secretos al publicar**: el diálogo muestra la lista exacta de ficheros que suben, y revisarla es manual. Una sesión que imprimió un `.env` lo publicaría.
 - **Publicar en GitLab/GitHub hace un commit por fichero**: una sesión con subagentes son varios commits en el repo de sesiones, no uno. El manifest siempre va el último, así que una publicación interrumpida queda invisible en vez de a medias, pero el historial del repo es más ruidoso de lo necesario.
 - **Las sesiones compartidas no entran en la búsqueda global (`?`)** hasta que las traes: el índice FTS solo indexa lo que hay en disco.
 
@@ -569,6 +615,10 @@ src/multi_claude/
   focus.py           # traer al frente la terminal de una sesión ya viva
   deletion.py        # borrado de sesiones/proyectos y sus artefactos en disco
   transfer.py        # export/import de sesiones en .zip
+  project_remotes.py # RemoteServer, RemoteLink y qué repos tiene enlazado cada proyecto
+  remote.py          # RemoteStore (protocolo), DirectoryRemote, TokenStore, manifests
+  remote_http.py     # GitLabRemote / GitHubRemote sobre sus API REST
+  remote_git.py      # GitSshRemote — git por SSH, y comprobación de acceso con ssh -T
   filtering.py       # parseo de las queries de `/` + matching fuzzy
   config.py          # Config persistida en config.json
   names.py           # NamesStore — nombres de sesión
