@@ -352,11 +352,16 @@ fallback. Dos consecuencias, ambas buscadas:
 Un proyecto sin `origin` se indexa por ruta: sigue sirviendo en una máquina, pero no viaja entre
 checkouts.
 
-### Publicar con varias pestañas
+### Elegir destino al publicar
 
-`u` publica al repo de la **pestaña activa**. Desde la pestaña local solo es inequívoco cuando hay
-exactamente un repo enlazado; con varios se pide abrir la pestaña del destino, porque adivinar
-podría publicar la sesión de un cliente en el repo de otro.
+`u` abre un diálogo propio (`PublishModal`) que hace las dos preguntas a la vez: a qué repo va y
+si confirmas. Con varios repos enlazados muestra un selector, preseleccionando el de la pestaña
+activa; con uno solo, lo declara y no hay nada que elegir.
+
+La primera versión reutilizaba el modal de borrado, lo que dejaba un botón «Borrar» en rojo al
+publicar — verbo y color equivocados para una subida— y obligaba a abrir la pestaña del destino
+antes de pulsar `u`. Preguntarlo en el propio diálogo es menos pasos y mantiene la lista de
+ficheros a la vista mientras eliges, que es justamente lo que hay que revisar.
 
 ## Cómo probarlo
 

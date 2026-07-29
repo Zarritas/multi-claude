@@ -1466,6 +1466,154 @@ class ProjectRemotesModal(ModalScreen["list[RemoteLink] | None"]):
         return index if 0 <= index < len(self._links) else None
 
 
+class PublishModal(ModalScreen["RemoteLink | None"]):
+    """Confirm publishing sessions, and choose which repo they go to.
+
+    Was originally the delete-confirmation modal reused, which meant the accept button said
+    "Borrar" in red — wrong verb, wrong colour, and alarming for an upload.
+
+    Picking the destination here rather than beforehand means one dialogue answers both
+    questions at once, and the file list stays visible while you choose. That list is the
+    point: the transcript drags ``tool-results/`` along, so a session that once printed a
+    ``.env`` would publish it.
+
+    Dismisses with the chosen :class:`RemoteLink`, or None on cancel.
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+    ]
+
+    DEFAULT_CSS = """
+    PublishModal {
+        align: center middle;
+    }
+    PublishModal > Vertical {
+        background: $surface;
+        border: thick $primary;
+        padding: 1 2;
+        width: 84;
+        height: auto;
+    }
+    PublishModal Label.title {
+        text-style: bold;
+    }
+    PublishModal Label.warning {
+        color: $warning;
+        text-style: bold;
+    }
+    PublishModal Label.keys {
+        color: $text-muted;
+    }
+    PublishModal Label.hint {
+        color: $text-muted;
+    }
+    PublishModal Label.section {
+        text-style: bold;
+        color: $accent;
+    }
+    PublishModal Horizontal {
+        align: center middle;
+        height: auto;
+        margin-top: 1;
+    }
+    PublishModal Button {
+        margin: 0 1;
+    }
+    """
+
+    def __init__(
+        self,
+        *,
+        session_count: int,
+        files: list[str],
+        destinations: list[RemoteLink],
+        preselected: int = 0,
+    ) -> None:
+        super().__init__()
+        self.session_count = session_count
+        self.files = files
+        self.destinations = destinations
+        self.preselected = preselected if 0 <= preselected < len(destinations) else 0
+
+    def compose(self) -> ComposeResult:
+        from textual.containers import Horizontal, VerticalScroll
+
+        with Vertical():
+            yield Label(
+                f"Publicar {self.session_count} sesión(es) · {len(self.files)} ficheros",
+                classes="title",
+            )
+            yield Label(
+                "⚠️  Se sube el transcript completo, incluidos los tool-results. "
+                "Revisa que no haya secretos.",
+                classes="warning",
+            )
+            yield Label("Enter publica · Esc cancela", classes="keys")
+
+            # Everything that can grow lives in one scrollable body, so the title, the
+            # warning and the buttons stay put however many repos or files there are.
+            with VerticalScroll(id="publish-body"):
+                if len(self.destinations) > 1:
+                    yield Label("Repositorio de destino", classes="section")
+                    with RadioSet(id="publish-destination"):
+                        for index, link in enumerate(self.destinations):
+                            yield RadioButton(
+                                f"{link.tab_label()} — {link.summary()}",
+                                value=(index == self.preselected),
+                                id=f"dest-{index}",
+                            )
+                else:
+                    target = self.destinations[0]
+                    yield Label(
+                        f"Destino: {target.tab_label()} — {target.summary()}", classes="hint"
+                    )
+
+                yield Label("Se suben estos ficheros", classes="section")
+                for line in self.files:
+                    yield Static(line)
+
+            with Horizontal():
+                yield Button("Cancelar", id="cancel", variant="default")
+                yield Button("Publicar", id="publish", variant="primary")
+
+    def on_mount(self) -> None:
+        if len(self.destinations) > 1:
+            self.query_one("#publish-destination", RadioSet).focus()
+        else:
+            self.query_one("#publish", Button).focus()
+
+    @on(Button.Pressed, "#cancel")
+    def _cancel(self) -> None:
+        self.dismiss(None)
+
+    @on(Button.Pressed, "#publish")
+    def _publish(self) -> None:
+        self.dismiss(self.chosen())
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def on_key(self, event: object) -> None:
+        """Enter accepts from anywhere, including with the radio focused."""
+        key = getattr(event, "key", None)
+        if key == "enter":
+            _stop_event(event)
+            self.dismiss(self.chosen())
+
+    def chosen(self) -> RemoteLink:
+        """The destination the user selected, or the only one there is."""
+        if len(self.destinations) == 1:
+            return self.destinations[0]
+        pressed = self.query_one("#publish-destination", RadioSet).pressed_button
+        radio_id = pressed.id if pressed is not None else None
+        if radio_id and radio_id.startswith("dest-"):
+            index = int(radio_id.split("-", 1)[1])
+            if 0 <= index < len(self.destinations):
+                return self.destinations[index]
+        return self.destinations[self.preselected]
+
+
 class ConfirmDeleteModal(ModalScreen[bool]):
     """Yes/no confirmation. Cancel-focused by default; ``y`` confirms.
 

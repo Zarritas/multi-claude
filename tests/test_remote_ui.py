@@ -8,6 +8,7 @@ under test, not a mock of it.
 from __future__ import annotations
 
 import json
+import re
 import stat
 from collections.abc import Callable
 from pathlib import Path
@@ -72,6 +73,11 @@ async def _open_sessions(pilot: object) -> SessionsScreen:
             table.action_select_cursor()
     screen = pilot.app.screen  # type: ignore[attr-defined]
     assert isinstance(screen, SessionsScreen), f"no se abrió la pantalla: {screen}"
+    # Wait for rows too: row-dependent bindings like u are disabled while the list is empty.
+    for _ in range(20):
+        if screen._rows:
+            break
+        await pilot.pause()  # type: ignore[attr-defined]
     return screen
 
 
@@ -85,6 +91,25 @@ async def _remote_store(app: ClaudeBrowserApp, project_index: int = 0) -> Direct
     store = app.store_for_link(link)
     assert isinstance(store, DirectoryRemote)
     return store
+
+
+async def _publish(pilot: object, *, dest_index: int | None = None) -> None:
+    """Press u, optionally pick a destination, and confirm."""
+    from textual.widgets import RadioButton
+
+    from multi_claude.modals import PublishModal
+
+    await pilot.press("u")  # type: ignore[attr-defined]
+    for _ in range(6):
+        await pilot.pause()  # type: ignore[attr-defined]
+    modal = pilot.app.screen  # type: ignore[attr-defined]
+    assert isinstance(modal, PublishModal), f"no se abrió el diálogo: {modal}"
+    if dest_index is not None:
+        modal.query_one(f"#dest-{dest_index}", RadioButton).value = True
+        await pilot.pause()  # type: ignore[attr-defined]
+    modal.query_one("#publish").press()
+    for _ in range(6):
+        await pilot.pause()  # type: ignore[attr-defined]
 
 
 async def _open_remote_tab(pilot: object, screen: SessionsScreen, index: int = 0) -> None:
@@ -104,10 +129,7 @@ async def test_publish_writes_the_session_to_the_remote(world: Path) -> None:
         screen = await _open_sessions(pilot)
         store = await _remote_store(app)
 
-        await pilot.press("u")
-        await pilot.pause()
-        await pilot.press("y")  # ConfirmDeleteModal: y confirms
-        await pilot.pause()
+        await _publish(pilot)
         for _ in range(20):  # let the publish worker finish
             await pilot.pause()
 
@@ -124,9 +146,11 @@ async def test_publish_can_be_cancelled(world: Path) -> None:
         store = await _remote_store(app)
 
         await pilot.press("u")
-        await pilot.pause()
-        await pilot.press("n")  # decline
-        await pilot.pause()
+        for _ in range(6):
+            await pilot.pause()
+        await pilot.press("escape")
+        for _ in range(6):
+            await pilot.pause()
 
         assert store.list_sessions() == ()
 
@@ -142,9 +166,7 @@ async def test_publishing_marked_sessions_publishes_all_of_them(world: Path) -> 
         await pilot.press("down")
         await pilot.press("space")  # mark row 2
         await pilot.pause()
-        await pilot.press("u")
-        await pilot.pause()
-        await pilot.press("y")
+        await _publish(pilot)
         for _ in range(20):
             await pilot.pause()
 
@@ -208,9 +230,7 @@ async def test_a_published_session_shows_up_in_its_tab(world: Path) -> None:
     async with app.run_test() as pilot:
         screen = await _open_sessions(pilot)
 
-        await pilot.press("u")
-        await pilot.pause()
-        await pilot.press("y")
+        await _publish(pilot)
         for _ in range(20):
             await pilot.pause()
 
@@ -228,9 +248,7 @@ async def test_a_session_you_already_have_is_marked_not_hidden(world: Path) -> N
     async with app.run_test() as pilot:
         screen = await _open_sessions(pilot)
 
-        await pilot.press("u")
-        await pilot.pause()
-        await pilot.press("y")
+        await _publish(pilot)
         for _ in range(20):
             await pilot.pause()
         await _open_remote_tab(pilot, screen)
@@ -286,9 +304,7 @@ async def test_the_row_says_when_you_have_unpublished_turns(world: Path) -> None
     app = ClaudeBrowserApp()
     async with app.run_test() as pilot:
         screen = await _open_sessions(pilot)
-        await pilot.press("u")
-        await pilot.pause()
-        await pilot.press("y")
+        await _publish(pilot)
         for _ in range(20):
             await pilot.pause()
         await _open_remote_tab(pilot, screen)
@@ -318,9 +334,7 @@ async def test_enter_on_a_session_you_already_have_resumes_it_locally(world: Pat
     app = ClaudeBrowserApp()
     async with app.run_test() as pilot:
         screen = await _open_sessions(pilot)
-        await pilot.press("u")
-        await pilot.pause()
-        await pilot.press("y")
+        await _publish(pilot)
         for _ in range(20):
             await pilot.pause()
         await _open_remote_tab(pilot, screen)
@@ -527,10 +541,10 @@ async def test_linking_a_project_creates_one_tab_per_repo(
         assert labels == ["Locales", "☁ cliente-x", "☁ r-producto"]
 
 
-async def test_publishing_from_the_local_tab_needs_an_unambiguous_target(
+async def test_the_publish_dialogue_lets_you_choose_between_repos(
     world: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """With several repos linked, guessing could publish a client's session to the wrong one."""
+    """With several repos linked you pick the destination in the dialogue itself."""
     from multi_claude.project_remotes import RemoteLink
 
     monkeypatch.delenv(REMOTE_DIR_ENV, raising=False)
@@ -547,16 +561,20 @@ async def test_publishing_from_the_local_tab_needs_an_unambiguous_target(
         await screen._refresh_remote_tabs()
         await pilot.pause()
 
-        # On the local tab with two candidates: no target, so nothing is published.
-        assert screen._publish_target() is None
+        # From the local tab the dialogue offers both and starts on the first.
+        assert screen._default_destination() == 0
+        await _publish(pilot, dest_index=1)
+        for _ in range(20):
+            await pilot.pause()
+        assert [s.session_id for s in DirectoryRemote(world / "b").list_sessions()] == ["ses-1"]
+        assert DirectoryRemote(world / "a").list_sessions() == ()
 
-        # On a remote tab the target is that tab.
+        # From a repo's tab it starts on that repo.
         await _open_remote_tab(pilot, screen, index=1)
-        target = screen._publish_target()
-        assert target is not None and target.label == "b"
+        assert screen._default_destination() == 1
 
 
-async def test_a_single_linked_repo_is_an_unambiguous_target(
+async def test_a_single_linked_repo_needs_no_choosing(
     world: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from multi_claude.project_remotes import RemoteLink
@@ -571,8 +589,11 @@ async def test_a_single_linked_repo_is_an_unambiguous_target(
         await screen._refresh_remote_tabs()
         await pilot.pause()
 
-        target = screen._publish_target()
-        assert target is not None and target.path == str(world / "solo")
+        # A single destination needs no choosing: the dialogue just states it.
+        await _publish(pilot)
+        for _ in range(20):
+            await pilot.pause()
+        assert [s.session_id for s in DirectoryRemote(world / "solo").list_sessions()] == ["ses-1"]
 
 
 async def test_project_links_win_over_the_global_remote(
@@ -674,9 +695,7 @@ async def test_local_rows_show_which_sessions_are_published(world: Path) -> None
         # Nothing published yet: no mark.
         assert "✓" not in str(table.get_row_at(0)[0])
 
-        await pilot.press("u")
-        await pilot.pause()
-        await pilot.press("y")
+        await _publish(pilot)
         await _wait_until(pilot, lambda: "ses-1" in screen._published)
 
         row = str(table.get_row_at(0)[0])
@@ -691,9 +710,7 @@ async def test_an_unpublished_session_stays_unmarked(world: Path) -> None:
     app = ClaudeBrowserApp()
     async with app.run_test() as pilot:
         screen = await _open_sessions(pilot)
-        await pilot.press("u")  # publishes the cursor row only
-        await pilot.pause()
-        await pilot.press("y")
+        await _publish(pilot)
         await _wait_until(pilot, lambda: bool(screen._published))
 
         table = screen.query_one("#sessions", DataTable)
@@ -707,9 +724,7 @@ async def test_a_local_row_says_when_it_has_unpublished_turns(world: Path) -> No
     app = ClaudeBrowserApp()
     async with app.run_test() as pilot:
         screen = await _open_sessions(pilot)
-        await pilot.press("u")
-        await pilot.pause()
-        await pilot.press("y")
+        await _publish(pilot)
         await _wait_until(pilot, lambda: "ses-1" in screen._published)
 
         # Continuing the session appends to its jsonl, making it longer than what is published.
@@ -781,3 +796,110 @@ async def test_the_published_index_survives_a_remote_that_fails(
         table = screen.query_one("#sessions", DataTable)
         assert table.row_count == 2
         assert screen._published == {}
+
+
+# --- the publish dialogue ------------------------------------------------------------
+
+
+async def test_the_publish_dialogue_offers_publish_not_delete(world: Path) -> None:
+    """Regression: it reused the delete modal, so the accept button read "Borrar" in red."""
+    from textual.widgets import Button
+
+    from multi_claude.modals import PublishModal
+
+    app = ClaudeBrowserApp()
+    async with app.run_test() as pilot:
+        await _open_sessions(pilot)
+        await pilot.press("u")
+        for _ in range(6):
+            await pilot.pause()
+
+        modal = app.screen
+        assert isinstance(modal, PublishModal)
+        confirm = modal.query_one("#publish", Button)
+        assert str(confirm.label) == "Publicar"
+        assert confirm.variant == "primary"  # not "error": nothing is being destroyed
+        assert not modal.query("#confirm")  # the delete modal's button id is absent
+
+
+async def test_the_publish_dialogue_lists_the_files_and_the_warning(world: Path) -> None:
+    from multi_claude.modals import PublishModal
+
+    app = ClaudeBrowserApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _open_sessions(pilot)
+        await pilot.press("u")
+        for _ in range(6):
+            await pilot.pause()
+
+        modal = app.screen
+        assert isinstance(modal, PublishModal)
+        assert modal.files == ["· ses-1.jsonl"]
+
+        # Read what is actually painted, once the modal has had frames to draw itself.
+        for _ in range(10):
+            await pilot.pause()
+        rendered = "\n".join(
+            "".join(s.text for s in strip)
+            for strip in app.screen._compositor.render_strips()
+        )
+        flat = re.sub(r"[█▀▄▔▁▊▎▆▃]", " ", rendered)
+        flat = re.sub(r"\s+", " ", flat)
+        assert "Revisa que no haya secretos" in flat
+        assert "ses-1.jsonl" in flat
+        assert "Publicar" in flat
+
+
+async def test_the_dialogue_starts_on_the_active_tabs_repo(
+    world: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Publishing from a repo's tab almost always means that repo."""
+    from textual.widgets import RadioSet
+
+    from multi_claude.modals import PublishModal
+    from multi_claude.project_remotes import RemoteLink
+
+    monkeypatch.delenv(REMOTE_DIR_ENV, raising=False)
+    app = ClaudeBrowserApp()
+    async with app.run_test() as pilot:
+        screen = await _open_sessions(pilot)
+        app.project_remotes.set_all(
+            screen._remote_key(),
+            [
+                RemoteLink(kind="directory", path=str(world / "uno"), label="uno"),
+                RemoteLink(kind="directory", path=str(world / "dos"), label="dos"),
+            ],
+        )
+        await screen._refresh_remote_tabs()
+        await pilot.pause()
+        # Mark a local session first: a repo tab has no local rows to act on, and space
+        # survives the tab switch.
+        await pilot.press("space")
+        await pilot.pause()
+        await _open_remote_tab(pilot, screen, index=1)
+
+        await pilot.press("u")
+        for _ in range(6):
+            await pilot.pause()
+        modal = app.screen
+        assert isinstance(modal, PublishModal)
+        assert modal.preselected == 1
+        pressed = modal.query_one("#publish-destination", RadioSet).pressed_button
+        assert pressed is not None and pressed.id == "dest-1"
+        assert modal.chosen().label == "dos"
+
+
+async def test_a_single_destination_shows_no_chooser(world: Path) -> None:
+    from multi_claude.modals import PublishModal
+
+    app = ClaudeBrowserApp()
+    async with app.run_test() as pilot:
+        await _open_sessions(pilot)
+        await pilot.press("u")
+        for _ in range(6):
+            await pilot.pause()
+
+        modal = app.screen
+        assert isinstance(modal, PublishModal)
+        assert not modal.query("#publish-destination")  # nothing to choose between
+        assert modal.chosen() is modal.destinations[0]

@@ -74,18 +74,27 @@ CASES: dict[str, tuple[Callable[[], ModalScreen], list[str], list[str]]] = {
         ["Repositorios de sesiones", "Añadir", "Guardar"],
         ["vale para todos sus worktrees", "sesiones-cliente-x"],
     ),
-    "publish-confirmation": (
-        lambda: M.ConfirmDeleteModal(
-            title="Publicar 2 sesión(es) · 14 ficheros",
-            details=["Destino: cliente-x"] + [f"· fichero-{i}.jsonl" for i in range(12)],
-            warning=(
-                "Se sube el transcript completo, incluidos los tool-results. "
-                "Revisa que no haya secretos."
-            ),
+    "publish": (
+        lambda: M.PublishModal(
+            session_count=2,
+            files=[f"· fichero-{i}.jsonl" for i in range(12)] + ["… y 2 más"],
+            destinations=[
+                RemoteLink(kind="gitlab", repo="grupo/sesiones-cliente-x", label="cliente-x"),
+                RemoteLink(kind="directory", path="/mnt/equipo/sesiones"),
+            ],
         ),
         # The warning is in the always-list on purpose: it is the whole point of the dialog.
-        ["Publicar 2", "Revisa que no haya secretos", "confirma", "Cancelar"],
-        ["Destino: cliente-x"],
+        ["Publicar 2", "Revisa que no haya secretos", "Publicar", "Cancelar"],
+        ["Repositorio de destino", "cliente-x"],
+    ),
+    "delete-confirmation": (
+        lambda: M.ConfirmDeleteModal(
+            title="Borrar sesión abc123…",
+            details=["Prompt: refactor del exporter", "Mensajes: 412"],
+            warning="Esta sesión está corriendo ahora mismo",
+        ),
+        ["Borrar sesión", "Esta sesión está corriendo", "confirma", "Cancelar"],
+        ["Prompt: refactor del exporter"],
     ),
     "cleanup": (
         lambda: M.CleanupModal(session_activities=[1000.0] * 8, active_count=2),

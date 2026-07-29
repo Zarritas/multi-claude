@@ -244,10 +244,9 @@ carpeta por encima de todo lo demás — útil para probar sin tocar tu configur
   Se consulta a los repositorios enlazados en segundo plano, así que la lista aparece al
   instante y las marcas se pintan al llegar. Si un repositorio no responde, te quedas sin
   esa marca, no sin listado.
-- `u` — publica la fila actual (o todas las marcadas) **al repositorio de la pestaña activa**.
-  Desde `Locales` solo funciona si hay exactamente un repositorio enlazado; con varios, abre
-  la pestaña del destino (adivinar podría publicar la sesión de un cliente en el repo de otro).
-  Antes de subir muestra **la lista de ficheros exactos** que salen de la máquina: el
+- `u` — publica la fila actual (o todas las marcadas). El diálogo pide confirmación y, si hay
+  **varios repositorios enlazados, te deja elegir a cuál** (parte del de la pestaña en la que
+  estés). Muestra además **la lista de ficheros exactos** que salen de la máquina: el
   transcript incluye los `tool-results/`, así que una sesión que imprimió un `.env` lo
   publicaría.
 - `Enter` sobre una compartida — si no la tienes (`☁`), la descarga en el directorio de este

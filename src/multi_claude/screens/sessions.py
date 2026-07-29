@@ -45,6 +45,7 @@ from multi_claude.modals import (
     FilePathModal,
     MoveSessionModal,
     ProjectRemotesModal,
+    PublishModal,
     RenameModal,
     SettingsModal,
     TagEditorModal,
@@ -684,29 +685,13 @@ class SessionsScreen(Screen[None]):
             return None
         return self._remote_links[self._active_remote]
 
-    def _publish_target(self) -> RemoteLink | None:
-        """Which remote ``u`` publishes to, or None with a reason already notified.
+    def _default_destination(self) -> int:
+        """Which linked remote the publish dialogue starts on.
 
-        The selected tab decides. From the local tab it is unambiguous only when exactly one
-        remote is linked; with several, guessing would publish a client's session to the wrong
-        repo, so the user is asked to pick the tab instead.
+        The active tab, when you are on one: publishing from a repo's tab almost always means
+        that repo. Otherwise the first, and the dialogue lets you change it.
         """
-        active = self._active_link()
-        if active is not None:
-            return active
-        if not self._remote_links:
-            self.notify(
-                "Este proyecto no tiene repositorio de sesiones enlazado (pulsa L)",
-                severity="warning",
-            )
-            return None
-        if len(self._remote_links) > 1:
-            self.notify(
-                "Varios repositorios enlazados: abre la pestaña del destino para publicar",
-                severity="warning",
-            )
-            return None
-        return self._remote_links[0]
+        return self._active_remote if self._active_remote is not None else 0
 
     def _notify_error(self, message: str) -> None:
         """Named so worker threads can post an error via ``call_from_thread``.
@@ -716,12 +701,11 @@ class SessionsScreen(Screen[None]):
         self.notify(message, severity="error")
 
     def action_publish(self) -> None:
-        link = self._publish_target()
-        if link is None:
-            return
-        store = self._claude_app.store_for_link(link)
-        if store is None:
-            self.notify(f"«{link.tab_label()}» está mal configurado", severity="warning")
+        if not self._remote_links:
+            self.notify(
+                "Este proyecto no tiene repositorio de sesiones enlazado (pulsa L)",
+                severity="warning",
+            )
             return
         targets = self._selected_sessions()
         if not targets:
@@ -744,20 +728,19 @@ class SessionsScreen(Screen[None]):
         ]
         if len(files) > _PUBLISH_PREVIEW_LIMIT:
             listed.append(f"… y {len(files) - _PUBLISH_PREVIEW_LIMIT} más")
-        modal = ConfirmDeleteModal(
-            title=f"Publicar {len(targets)} sesión(es) · {len(files)} ficheros",
-            details=[f"Destino: {link.tab_label()} — {link.summary()}", "", *listed],
-            warning=(
-                "Se sube el transcript completo, incluidos los tool-results. "
-                "Revisa que no haya secretos."
-            ),
+        modal = PublishModal(
+            session_count=len(targets),
+            files=listed,
+            destinations=list(self._remote_links),
+            preselected=self._default_destination(),
         )
-        self.app.push_screen(modal, lambda ok: self._apply_publish(targets, link, ok))
+        self.app.push_screen(modal, lambda link: self._apply_publish(targets, link))
 
-    def _apply_publish(
-        self, targets: list[Session], link: RemoteLink, confirmed: bool | None
-    ) -> None:
-        if not confirmed:
+    def _apply_publish(self, targets: list[Session], link: RemoteLink | None) -> None:
+        if link is None:
+            return  # cancelled
+        if self._claude_app.store_for_link(link) is None:
+            self.notify(f"«{link.tab_label()}» está mal configurado", severity="warning")
             return
         self.notify(f"Publicando {len(targets)} sesión(es) en «{link.tab_label()}»…")
         self._publish_worker(targets, link)
