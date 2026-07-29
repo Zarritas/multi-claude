@@ -964,3 +964,61 @@ async def test_a_single_destination_shows_no_chooser(world: Path) -> None:
         assert isinstance(modal, PublishModal)
         assert not modal.query("#publish-destination")  # nothing to choose between
         assert modal.chosen() is modal.destinations[0]
+
+
+async def test_testing_a_server_does_not_freeze_the_ui(
+    world: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: the check ran on the UI thread and hung the app until it timed out.
+
+    The probe is made deliberately slow, because the bug only shows when it takes a while —
+    which over SSH meant up to two minutes of frozen terminal.
+    """
+    import time
+
+    from textual.widgets import Input, Label, RadioButton
+
+    from multi_claude import modals as modals_module
+    from multi_claude.modals import ServerEditModal
+    from multi_claude.project_remotes import RemoteServer
+
+    def slow_probe(server: RemoteServer, token: str | None) -> tuple[str, bool]:
+        time.sleep(1.0)
+        return ("OK · tardío", True)
+
+    monkeypatch.setattr(modals_module, "_probe_server", slow_probe)
+
+    app = ClaudeBrowserApp()
+    async with app.run_test(size=(100, 34)) as pilot:
+        await pilot.pause()
+        # SSH on purpose: that is the case that froze, and it needs no token.
+        modal = ServerEditModal(
+            RemoteServer(name="lento", host="https://git.example.com", auth="ssh")
+        )
+        app.push_screen(modal)
+        for _ in range(6):
+            await pilot.pause()
+        modal.query_one("#server-auth-ssh", RadioButton).value = True
+        await pilot.pause()
+
+        started = time.monotonic()
+        modal.action_test()
+        elapsed = time.monotonic() - started
+        # Returned without waiting for the probe: that is the whole fix.
+        assert elapsed < 0.5, f"action_test bloqueó {elapsed:.2f}s"
+
+        await pilot.pause()
+        assert "Probando" in str(modal.query_one("#server-status", Label).content)
+
+        # And the UI still takes input while the probe is in flight.
+        modal.query_one("#server-name", Input).value = "sigo escribiendo"
+        await pilot.pause()
+        assert modal.query_one("#server-name", Input).value == "sigo escribiendo"
+        assert app.screen is modal
+
+        # Eventually the result lands.
+        for _ in range(60):
+            await pilot.pause()
+            if "tardío" in str(modal.query_one("#server-status", Label).content):
+                break
+        assert "tardío" in str(modal.query_one("#server-status", Label).content)

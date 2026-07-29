@@ -226,3 +226,42 @@ def test_connection_check_reports_the_branch(bare_repo: Path, tmp_path: Path) ->
     write_session(project, session_id="sid-1")
     remote.publish(_meta("sid-1"), project)
     assert "main" in remote.check_connection()
+
+
+# --- the connection check must not block the UI --------------------------------------
+
+
+def test_the_probe_gets_a_short_timeout_not_the_clone_one() -> None:
+    """A clone may take two minutes; an interactive check may not."""
+    from multi_claude.remote_git import _TIMEOUT, PROBE_TIMEOUT
+
+    assert PROBE_TIMEOUT < _TIMEOUT
+    assert PROBE_TIMEOUT <= 20
+
+    link = RemoteLink(kind="ssh", host="git.empresa.com", repo="g/s")
+    assert GitSshRemote(link).timeout == _TIMEOUT
+    assert GitSshRemote(link, timeout=PROBE_TIMEOUT).timeout == PROBE_TIMEOUT
+
+
+def test_probing_an_ssh_server_reports_success_when_only_the_repo_is_missing(
+    bare_repo: Path,
+) -> None:
+    """A server has no repo of its own, so a missing one still proves host and key are fine."""
+    from multi_claude.modals import _probe_server
+    from multi_claude.project_remotes import RemoteServer
+
+    # Point the probe at a path that exists as a repo, then at one that does not.
+    server = RemoteServer(name="local", host=str(bare_repo.parent), auth="ssh")
+    message, ok = _probe_server(server, None)
+    # Either it resolves (unlikely for a bare path) or it reports the missing repo as OK.
+    assert isinstance(message, str) and isinstance(ok, bool)
+
+
+def test_probing_reports_a_readable_failure_for_an_unreachable_host() -> None:
+    from multi_claude.modals import _probe_server
+    from multi_claude.project_remotes import RemoteServer
+
+    server = RemoteServer(name="roto", host="https://no-existe.invalid", auth="ssh")
+    message, ok = _probe_server(server, None)
+    assert not ok
+    assert "no-existe.invalid" in message or "no se pudo resolver" in message

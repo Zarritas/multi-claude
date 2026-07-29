@@ -230,6 +230,20 @@ Los enlaces referencian el servidor **por nombre**, así que corregir una URL o 
 arregla todos los repos que apuntan a él. Un enlace que nombra un servidor inexistente resuelve a
 `kind="none"`: inerte y visiblemente inerte, mejor que publicar en otro sitio sin avisar.
 
+### Nada que toque la red corre en el hilo de la UI
+
+Invariante, y aprendida por las malas: la prueba de conexión del editor de servidor era
+síncrona, así que pulsar «Probar» con SSH congelaba la aplicación hasta el timeout — hasta dos
+minutos con la terminal muerta y sin ninguna indicación de que estuviera trabajando.
+
+Todas las operaciones remotas van en un `@work(thread=True)` y devuelven por
+`call_from_thread`: publicar, listar, hidratar, el índice de publicados y la prueba de conexión.
+El callback comprueba `is_mounted` antes de escribir en la pantalla, porque el modal puede
+haberse cerrado mientras la llamada estaba en vuelo.
+
+La prueba usa además un timeout propio y corto (`PROBE_TIMEOUT`, 15 s) en lugar del de clonado
+(120 s): es interactiva, y fallar rápido vale más que acertar tarde.
+
 ### SSH frente a token
 
 | | Token (API REST) | SSH (`remote_git.py`) |

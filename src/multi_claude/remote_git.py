@@ -41,9 +41,11 @@ from multi_claude.remote import (
     safe_session_id,
 )
 
-# Long enough for a clone of a repo full of transcripts on a slow link, short enough that a
-# wrong host fails while the user is still watching.
+# Long enough for a clone of a repo full of transcripts on a slow link.
 _TIMEOUT = 120
+# What a connection check gets: it is interactive, so it must fail fast rather than make the
+# user wonder whether anything is happening.
+PROBE_TIMEOUT = 15
 _PUSH_ATTEMPTS = 3
 _COMMIT_MESSAGE = "multi-claude: publish session"
 
@@ -57,10 +59,13 @@ def cache_root() -> Path:
 class GitSshRemote:
     """Sessions in a git repo, reached over SSH with the user's own keys."""
 
-    def __init__(self, link: RemoteLink, *, cache_dir: Path | None = None) -> None:
+    def __init__(
+        self, link: RemoteLink, *, cache_dir: Path | None = None, timeout: int = _TIMEOUT
+    ) -> None:
         self.link = link
         self.url = link.git_url()
         self.branch = link.branch or "main"
+        self.timeout = timeout
         root = cache_dir or cache_root()
         # One working copy per repo+branch, named after the URL so two links to the same repo
         # on different branches do not fight over one checkout.
@@ -95,7 +100,7 @@ class GitSshRemote:
                 capture_output=True,
                 text=True,
                 check=False,
-                timeout=_TIMEOUT,
+                timeout=self.timeout,
                 env=env,
             )
         except FileNotFoundError as exc:

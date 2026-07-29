@@ -11,7 +11,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
-from textual import on
+from textual import on, work
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
@@ -1043,6 +1043,43 @@ class SettingsModal(ModalScreen[Config | None]):
         return f"Shift+Enter → {_MODE_LABELS[alternate_for(default)]}"
 
 
+def _probe_server(server: RemoteServer, token: str | None) -> tuple[str, bool]:
+    """Check a server and return one line plus whether it is good news.
+
+    Pure enough to test without a TUI, and free of Textual so it can run in a worker thread.
+
+    Both providers are probed with an invented repo, because a server on its own has nothing to
+    talk to. A 404 (or "no such repo" over SSH) is therefore *success*: the host answered and
+    the credential was accepted, which is exactly what is being verified.
+    """
+    from multi_claude.remote import RemoteError, store_from_link
+    from multi_claude.remote_git import PROBE_TIMEOUT, GitSshRemote
+
+    probe = RemoteLink(
+        kind="ssh" if server.uses_ssh else server.kind,
+        host=server.ssh_host if server.uses_ssh else server.api_host,
+        ssh_user=server.ssh_user,
+        repo="multi-claude/_probe",
+        branch="main",
+    )
+    store: object | None
+    if server.uses_ssh:
+        store = GitSshRemote(probe, timeout=PROBE_TIMEOUT)
+    else:
+        store = store_from_link(probe, token=token)
+    check = getattr(store, "check_connection", None)
+    if not callable(check):
+        return ("Configuración incompleta", False)
+    try:
+        check()
+    except RemoteError as exc:
+        message = str(exc)
+        if message.startswith("404") or "no existe o no es un repositorio" in message:
+            return (f"OK · {server.summary()} responde y acepta la credencial", True)
+        return (message, False)
+    return (f"OK · {server.summary()} responde", True)
+
+
 def _servers_summary(servers: list[RemoteServer]) -> str:
     """One line naming the configured servers, for the settings tab."""
     if not servers:
@@ -1229,69 +1266,36 @@ class ServerEditModal(ModalScreen["RemoteServer | None"]):
         self.dismiss(server)
 
     def action_test(self) -> None:
-        """Check the server as typed, before saving it."""
-        from multi_claude.remote import RemoteError, TokenStore, store_from_link
+        """Check the server as typed, before saving it.
+
+        Runs in a worker: both paths reach the network, and doing that on the UI thread froze
+        the whole app until the timeout — 15s over HTTP, and up to two minutes over SSH.
+        """
+        from multi_claude.remote import TokenStore
 
         status = self.query_one("#server-status", Label)
         server = self.collect()
         if not server.is_configured:
             self._set_status(status, "Falta el nombre o la URL", ok=False)
             return
-        if server.uses_ssh:
-            self._test_ssh(server, status)
-            return
         token = self.typed_token() or TokenStore().get(server.name)
-        if not token:
+        if not server.uses_ssh and not token:
             self._set_status(status, "Falta el token", ok=False)
             return
-        # A server on its own has no repo to talk to, so the check needs one. Any name will do:
-        # a 404 still proves the host answers and the token is accepted, while 401 proves it
-        # is not — which is the useful distinction here.
-        probe = RemoteLink(
-            kind=server.kind, host=server.api_host, repo="multi-claude/_probe", branch="main"
-        )
-        store = store_from_link(probe, token=token)
-        if store is None:
-            self._set_status(status, "Configuración incompleta", ok=False)
-            return
-        check = getattr(store, "check_connection", None)
-        if not callable(check):
-            self._set_status(status, "Este proveedor no admite prueba de conexión", ok=False)
-            return
-        try:
-            check()
-            self._set_status(status, f"OK · {server.summary()} responde", ok=True)
-        except RemoteError as exc:
-            message = str(exc)
-            if message.startswith("404"):
-                self._set_status(
-                    status, f"OK · {server.summary()} responde y acepta el token", ok=True
-                )
-            else:
-                self._set_status(status, message, ok=False)
+        self._set_status(status, f"Probando {server.summary()}…", ok=True)
+        self._probe_worker(server, token)
 
-    def _test_ssh(self, server: RemoteServer, status: Label) -> None:
-        """SSH needs no token, and ``ls-remote`` on the host proves the key works."""
-        from multi_claude.remote import RemoteError
-        from multi_claude.remote_git import GitSshRemote
+    @work(thread=True, exclusive=True, group="server-probe")
+    def _probe_worker(self, server: RemoteServer, token: str | None) -> None:
+        """Do the network call off the UI thread and report back one line."""
+        message, ok = _probe_server(server, token)
+        self.app.call_from_thread(self._on_probe_done, message, ok)
 
-        probe = RemoteLink(
-            kind="ssh",
-            host=server.ssh_host,
-            ssh_user=server.ssh_user,
-            repo="multi-claude/_probe",
-            branch="main",
-        )
-        try:
-            GitSshRemote(probe).check_connection()
-            self._set_status(status, f"OK · {server.summary()} responde", ok=True)
-        except RemoteError as exc:
-            message = str(exc)
-            if "no existe o no es un repositorio" in message:
-                # The host answered and accepted the key; only the invented repo is missing.
-                self._set_status(status, f"OK · {server.ssh_host} acepta tu clave SSH", ok=True)
-            else:
-                self._set_status(status, message, ok=False)
+    def _on_probe_done(self, message: str, ok: bool) -> None:
+        # The modal may have been dismissed while the probe was in flight.
+        if not self.is_mounted:
+            return
+        self._set_status(self.query_one("#server-status", Label), message, ok=ok)
 
     @staticmethod
     def _set_status(label: Label, message: str, *, ok: bool) -> None:
