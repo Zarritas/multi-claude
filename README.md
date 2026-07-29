@@ -18,7 +18,7 @@ Claude Code guarda cada sesión como un `.jsonl` bajo `~/.claude/projects/<encod
 - **Etiquetas** (`t`) y **colores** por sesión (`c`), con reglas automáticas por branch, antigüedad o actividad (`C`).
 - **Nombres persistentes** (`e`) para sesiones y proyectos, incluido el `/rename` de Claude como fallback.
 - **Mover, exportar e importar** sesiones entre worktrees o hacia un `.zip` compartible (`m`, `x`, `i`).
-- **Sesiones compartidas** (`u`, `R`): publica una sesión en un remoto común y reanuda la de un compañero con `Enter`, sin exportar ni importar nada.
+- **Sesiones compartidas** (`L`, `u`): enlaza cada proyecto a uno o varios repositorios de sesiones (GitLab, GitHub o una carpeta), que aparecen como pestañas; publica con `u` y reanuda la sesión de un compañero con `Enter`, sin exportar ni importar nada.
 - **Sin duplicados**: si una sesión ya está abierta en otra terminal, la trae al frente en vez de abrir una segunda.
 - **Borrado y limpieza** (`d`, `D`) que arrastran todos los artefactos en disco, no solo el jsonl.
 
@@ -55,6 +55,7 @@ Atajos:
 - `f` — asignar el proyecto a una **carpeta** (o quitarlo de ella).
 - `g` — alternar entre **worktrees agrupados** y expandidos.
 - `i` — **importar** un `.zip` de sesiones exportado por otra persona; tras validar el archivo, eliges en qué proyecto existente aterrizan.
+- `L` — enlazar el proyecto a uno o varios **repositorios de sesiones** compartidas.
 - `m` — **merge de un proyecto huérfano** sobre otro proyecto vivo: mueve sus sesiones y le traspasa el alias. Solo disponible sobre filas huérfanas.
 - `d` — borrar el proyecto (cascada sobre todas sus sesiones y artefactos en disco).
 - `C` — editar las **reglas de color** (ver [Colores](#colores-c-y-c)).
@@ -97,8 +98,8 @@ Atajos:
 - `y` — copiar el **id** de la sesión al portapapeles.
 - `m` — **mover** la(s) sesión(es) seleccionada(s) a otro worktree del mismo repo (el checkout principal o un worktree hermano). Si no hay nada marcado, mueve la fila actual.
 - `x` — **exportar** la(s) sesión(es) seleccionada(s) a un único `.zip` compartible (para enviárselo a un compañero). Si no hay nada marcado, exporta la fila actual.
-- `u` — **publicar** la(s) sesión(es) en el remoto compartido, sin zip de por medio (ver [Sesiones compartidas](#sesiones-compartidas-u-y-r)). Pide confirmación mostrando qué ficheros se suben.
-- `R` — mostrar/ocultar las **sesiones compartidas** por otras personas; `Enter` sobre una de ellas la trae y la reanuda.
+- `u` — **publicar** la(s) sesión(es) en el repositorio de la pestaña activa, sin zip de por medio (ver [Sesiones compartidas](#sesiones-compartidas-l-y-u)). Pide confirmación mostrando qué ficheros se suben.
+- `L` — gestionar los **repositorios de sesiones** enlazados a este proyecto; cada uno es una pestaña del listado, y `Enter` sobre una fila compartida la trae y la reanuda.
 - `d` — borrar la(s) sesión(es) seleccionada(s) y todos sus artefactos en disco.
 - `D` — **limpieza** por antigüedad: eliges un umbral y borra de golpe las sesiones más viejas (las sesiones vivas quedan protegidas).
 - `/` — filtrar la lista (ver [Filtro](#filtro-)).
@@ -173,14 +174,27 @@ Condiciones soportadas en una regla (un `when` por regla):
 | `active=true`         | la sesión está viva según `~/.claude/sessions`                     |
 | `age<1h`, `age<2d`    | la última actividad es más reciente que el umbral (`s`/`m`/`h`/`d`/`w`) |
 
-### Sesiones compartidas (`u` y `R`)
+### Sesiones compartidas (`L` y `u`)
 
 Publicar una sesión en un sitio común y que un compañero la reanude con `Enter`, sin el
 viaje de ida y vuelta de `x` (exportar) → enviar el zip → `i` (importar).
 
-**Configuración.** Está desactivado por defecto. Se configura desde **Ajustes (`s`) → botón
-«Configurar remoto…»**, que pide proveedor, servidor, repositorio, rama y token, y tiene un
-**`Ctrl+T` para probar la conexión** antes de guardar.
+**Enlazar repositorios a un proyecto.** Cada proyecto de Claude puede publicar a **uno o
+varios** repositorios de sesiones, y cada uno aparece como **pestaña** en el listado de
+sesiones. Se gestionan con **`L`**, tanto en la pantalla de proyectos como dentro del proyecto.
+
+El enlace se guarda contra el **`origin` del repo**, no contra la ruta, así que:
+
+- Todos los **worktrees** de un repo comparten enlace: enlazas uno y quedan enlazados todos.
+- `git@host:grupo/repo.git` y `https://host/grupo/repo.git` son la misma clave.
+- Un proyecto sin `origin` se enlaza por su ruta absoluta (funciona, pero solo en esa máquina).
+
+**Remoto global.** En **Ajustes (`s`) → pestaña «Sesiones compartidas»** se configura un remoto
+que sirve de *fallback* para los proyectos sin enlaces propios. Los enlaces del proyecto ganan
+por completo: un proyecto enlazado al repo de un cliente no publica además al global.
+
+El diálogo de configuración pide proveedor, servidor, repositorio, rama, token y nombre de la
+pestaña, y tiene **`Ctrl+T` para probar la conexión** antes de guardar.
 
 | Proveedor | Qué necesita | Notas |
 |-----------|--------------|-------|
@@ -202,13 +216,18 @@ carpeta por encima de todo lo demás — útil para probar sin tocar tu configur
 
 **Qué hace cada tecla:**
 
-- `u` — publica la fila actual (o todas las marcadas). Antes de subir muestra **la lista
-  de ficheros exactos** que salen de la máquina: el transcript incluye los
-  `tool-results/`, así que una sesión que en su día imprimió un `.env` lo publicaría.
-- `R` — muestra las sesiones publicadas que **no** tienes en local, al final de la lista y
-  marcadas con `☁` y el autor. Las tuyas ya publicadas no reaparecen duplicadas.
-- `Enter` sobre una compartida — la descarga en el directorio de este proyecto
-  preservando su uuid y la reanuda. Si se grabó sobre otro commit, avisa antes de lanzar.
+- `L` — gestiona los repositorios de sesiones enlazados a este proyecto (añadir, quitar).
+- **Pestañas** — `Locales` muestra tus sesiones; cada `☁ nombre` muestra las publicadas en ese
+  repositorio que **no** tienes en local, con su autor. Las tuyas ya publicadas no reaparecen
+  duplicadas. La barra de pestañas se oculta si no hay nada enlazado.
+- `u` — publica la fila actual (o todas las marcadas) **al repositorio de la pestaña activa**.
+  Desde `Locales` solo funciona si hay exactamente un repositorio enlazado; con varios, abre
+  la pestaña del destino (adivinar podría publicar la sesión de un cliente en el repo de otro).
+  Antes de subir muestra **la lista de ficheros exactos** que salen de la máquina: el
+  transcript incluye los `tool-results/`, así que una sesión que imprimió un `.env` lo
+  publicaría.
+- `Enter` sobre una compartida — la descarga en el directorio de este proyecto preservando su
+  uuid y la reanuda. Si se grabó sobre otro commit, avisa antes de lanzar.
 
 Sobre una fila compartida las acciones locales (renombrar, etiquetar, borrar, mover) están
 ocultas: todavía no hay jsonl que tocar.
@@ -287,6 +306,8 @@ que multi-claude necesita controlar (`--resume`, `-c`, `-n`, `-p`, `--bg`, `--fr
 con un error en el modal en vez de colisionar con la sesión que se está reanudando.
 
 ## Ajustes (`s`)
+
+El modal está dividido en pestañas: **Lanzamiento** (modo de Enter y argumentos de `claude`), **Sesiones compartidas** (remoto global) y **Colores** (reglas automáticas).
 
 Modal en la TUI con:
 

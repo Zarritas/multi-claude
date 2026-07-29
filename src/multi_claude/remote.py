@@ -36,6 +36,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol
 
+from multi_claude.project_remotes import RemoteLink
 from multi_claude.session import Session
 
 FORMAT = "multi-claude/remote-session"
@@ -412,6 +413,27 @@ class TokenStore:
 
     def delete(self) -> None:
         self.path.unlink(missing_ok=True)
+
+
+def store_from_link(link: RemoteLink, *, token: str | None = None) -> RemoteStore | None:
+    """Build a store for ``link``, or None when it is off or half-filled.
+
+    Half-filled yields None rather than a store that raises on every call: the UI can then
+    say "not configured" instead of surfacing a network error.
+    """
+    if not link.is_configured:
+        return None
+    if link.kind == "directory":
+        return DirectoryRemote(Path(link.path).expanduser())
+    from multi_claude.remote_http import GitHubRemote, GitLabRemote
+
+    driver = GitLabRemote if link.kind == "gitlab" else GitHubRemote
+    return driver(
+        link.api_host,
+        link.repo,
+        link.branch,
+        token if token is not None else TokenStore().get(),
+    )
 
 
 def store_from_settings(

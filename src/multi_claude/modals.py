@@ -20,18 +20,17 @@ from textual.widgets import Button, Input, Label, RadioButton, RadioSet, Static
 
 from multi_claude.colors import PALETTE, ColorRule
 from multi_claude.config import (
-    DEFAULT_REMOTE_HOSTS,
     VALID_MODES,
     VALID_REMOTE_KINDS,
     ClaudeArgsError,
     Config,
     LaunchMode,
-    RemoteKind,
     alternate_for,
     parse_claude_args,
 )
 from multi_claude.discovery import Project
 from multi_claude.launcher import PLACEMENT_LABELS, preview_dispatch
+from multi_claude.project_remotes import DEFAULT_REMOTE_HOSTS, RemoteLink
 from multi_claude.tags import parse_tag_list
 
 
@@ -800,6 +799,13 @@ class SettingsModal(ModalScreen[Config | None]):
         width: 80;
         height: auto;
     }
+    SettingsModal TabbedContent {
+        height: auto;
+    }
+    SettingsModal TabPane {
+        height: auto;
+        padding: 0 1;
+    }
     SettingsModal Label.title {
         text-style: bold;
     }
@@ -841,58 +847,75 @@ class SettingsModal(ModalScreen[Config | None]):
 
     def compose(self) -> ComposeResult:
         from textual.containers import Horizontal
-        from textual.widgets import Checkbox
+        from textual.widgets import Checkbox, TabbedContent, TabPane
 
         with Vertical():
-            yield Label("Ajustes — lanzamiento de sesiones", classes="title")
+            yield Label("Ajustes", classes="title")
+            with TabbedContent(id="settings-tabs"):
+              with TabPane("Lanzamiento", id="tab-launch"):
+                yield Label("Enter (predeterminado)", classes="section")
+                with RadioSet(id="default-mode"):
+                    for mode in VALID_MODES:
+                        yield RadioButton(
+                            _MODE_LABELS[mode],
+                            value=(mode == self._initial.default_mode),
+                            id=f"default-{mode}",
+                        )
 
-            yield Label("Enter (predeterminado)", classes="section")
-            with RadioSet(id="default-mode"):
-                for mode in VALID_MODES:
-                    yield RadioButton(
-                        _MODE_LABELS[mode],
-                        value=(mode == self._initial.default_mode),
-                        id=f"default-{mode}",
-                    )
+                yield Static(
+                    _MODE_SKETCHES[self._initial.default_mode],
+                    id="mode-sketch",
+                    classes="sketch",
+                    markup=False,
+                )
+                yield Label(
+                    _dispatch_hint(self._initial.default_mode),
+                    id="dispatch-hint",
+                    classes="hint",
+                )
+                yield Label(
+                    self._alt_preview_text(self._initial.default_mode),
+                    id="alt-preview",
+                    classes="alt-preview",
+                )
 
-            yield Static(
-                _MODE_SKETCHES[self._initial.default_mode],
-                id="mode-sketch",
-                classes="sketch",
-                markup=False,
-            )
-            yield Label(
-                _dispatch_hint(self._initial.default_mode),
-                id="dispatch-hint",
-                classes="hint",
-            )
-            yield Label(
-                self._alt_preview_text(self._initial.default_mode),
-                id="alt-preview",
-                classes="alt-preview",
-            )
+                yield Label("Argumentos para `claude`", classes="section")
+                yield Checkbox(
+                    f"Saltar permisos ({_SKIP_PERMISSIONS_FLAG})",
+                    value=self._skip_initial,
+                    id="skip-permissions",
+                )
+                yield Input(
+                    value=" ".join(self._extra_initial),
+                    placeholder="--model opus --effort high --add-dir ../shared",
+                    id="claude-args",
+                )
+                yield Label("Se anteponen a --resume/-n en cada lanzamiento", classes="hint")
+                yield Label("", id="args-error", classes="error")
 
-            yield Label("Argumentos para `claude`", classes="section")
-            yield Checkbox(
-                f"Saltar permisos ({_SKIP_PERMISSIONS_FLAG})",
-                value=self._skip_initial,
-                id="skip-permissions",
-            )
-            yield Input(
-                value=" ".join(self._extra_initial),
-                placeholder="--model opus --effort high --add-dir ../shared",
-                id="claude-args",
-            )
-            yield Label(
-                "Se anteponen a --resume/-n en cada lanzamiento", classes="hint"
-            )
-            yield Label("", id="args-error", classes="error")
+              with TabPane("Sesiones compartidas", id="tab-remote"):
+                  yield Label("Remoto global", classes="section")
+                  yield Label(self._initial.remote_summary(), id="remote-summary", classes="hint")
+                  yield Label(
+                      "Se usa en los proyectos que no tengan repositorios propios "
+                      "enlazados. Para enlazar un proyecto concreto: L en su listado.",
+                      classes="hint",
+                  )
+                  yield Button("Configurar remoto…", id="configure-remote", variant="default")
 
-            yield Label("Sesiones compartidas", classes="section")
-            yield Label(
-                self._initial.remote_summary(), id="remote-summary", classes="hint"
-            )
-            yield Button("Configurar remoto…", id="configure-remote", variant="default")
+              with TabPane("Colores", id="tab-colors"):
+                  yield Label("Reglas automáticas", classes="section")
+                  yield Label(
+                      f"{len(self._initial.color_rules)} regla(s) definida(s)",
+                      id="rules-summary",
+                      classes="hint",
+                  )
+                  yield Label(
+                      "Se evalúan en orden; gana la primera que casa. El color manual "
+                      "de una sesión (c) siempre tiene prioridad.",
+                      classes="hint",
+                  )
+                  yield Button("Editar reglas…", id="edit-rules", variant="default")
 
             yield Label("Enter guarda · Esc cancela", classes="hint")
             with Horizontal():
@@ -926,11 +949,15 @@ class SettingsModal(ModalScreen[Config | None]):
         """
         from multi_claude.remote import TokenStore
 
-        modal = RemoteSettingsModal(self._initial, has_token=TokenStore().has_token())
+        modal = RemoteSettingsModal(
+            self._initial.remote_link(),
+            has_token=TokenStore().has_token(),
+            title="Remoto global (fallback de proyectos sin enlace)",
+        )
         self.app.push_screen(modal, lambda result: self._on_remote_configured(modal, result))
 
     def _on_remote_configured(
-        self, modal: RemoteSettingsModal, result: Config | None
+        self, modal: RemoteSettingsModal, result: RemoteLink | None
     ) -> None:
         if result is None:
             return  # cancelled: leave the remote settings untouched
@@ -941,8 +968,21 @@ class SettingsModal(ModalScreen[Config | None]):
             TokenStore().set(token)
         # ``_collect`` builds on ``_initial``, so updating it is what carries the remote
         # fields into the config this modal eventually returns.
-        self._initial = result
-        self.query_one("#remote-summary", Label).update(result.remote_summary())
+        self._initial = self._initial.with_remote_link(result)
+        self.query_one("#remote-summary", Label).update(result.summary())
+
+    @on(Button.Pressed, "#edit-rules")
+    def _edit_rules(self) -> None:
+        """Edit the colour rules without leaving settings, and fold the result back in."""
+        self.app.push_screen(
+            ColorRulesEditorModal(list(self._initial.color_rules)), self._on_rules_edited
+        )
+
+    def _on_rules_edited(self, result: list[ColorRule] | None) -> None:
+        if result is None:
+            return
+        self._initial = replace(self._initial, color_rules=result)
+        self.query_one("#rules-summary", Label).update(f"{len(result)} regla(s) definida(s)")
 
     @on(Input.Submitted, "#claude-args")
     def _submit_args(self) -> None:
@@ -999,15 +1039,17 @@ _REMOTE_KIND_LABELS: dict[str, str] = {
 }
 
 
-class RemoteSettingsModal(ModalScreen["Config | None"]):
-    """Configure where shared sessions are published.
+class RemoteSettingsModal(ModalScreen["RemoteLink | None"]):
+    """Configure one sessions remote: provider, host, repo, branch, token and tab name.
 
-    Returns the incoming config with only the ``remote_*`` fields replaced, so it composes
-    with :class:`SettingsModal` the same way that one composes with the rest of the prefs.
+    Speaks :class:`RemoteLink` rather than ``Config`` so the same screen serves both the
+    global remote and each per-project link — a project can be linked to several, and they
+    all need exactly these fields.
 
-    The token is the exception: it never enters ``Config``, because that gets written to
-    ``config.json``. It is saved straight to :class:`~multi_claude.remote.TokenStore`, and
-    the field shows whether one exists without ever rendering it.
+    The token is the exception: it never enters the returned value, because that may be
+    written to ``config.json``. It is saved straight to
+    :class:`~multi_claude.remote.TokenStore`, and the field shows whether one exists without
+    ever rendering it.
     """
 
     BINDINGS = [
@@ -1053,37 +1095,39 @@ class RemoteSettingsModal(ModalScreen["Config | None"]):
     }
     """
 
-    def __init__(self, config: Config, *, has_token: bool = False) -> None:
+    def __init__(
+        self, link: RemoteLink, *, has_token: bool = False, title: str | None = None
+    ) -> None:
         super().__init__()
-        self._initial = config
+        self._initial = link
         self._has_token = has_token
-        self._token_value: str | None = None
+        self._title_text = title or "Ajustes — sesiones compartidas"
 
     def compose(self) -> ComposeResult:
         from textual.containers import Horizontal
 
         with Vertical():
-            yield Label("Ajustes — sesiones compartidas", classes="title")
+            yield Label(self._title_text, classes="title")
 
             yield Label("Dónde se publican", classes="section")
             with RadioSet(id="remote-kind"):
                 for kind in VALID_REMOTE_KINDS:
                     yield RadioButton(
                         _REMOTE_KIND_LABELS[kind],
-                        value=(kind == self._initial.remote_kind),
+                        value=(kind == self._initial.kind),
                         id=f"kind-{kind}",
                     )
 
             yield Label("Carpeta (solo para «carpeta compartida»)", classes="section")
             yield Input(
-                value=self._initial.remote_path,
+                value=self._initial.path,
                 placeholder="/mnt/equipo/sesiones-claude",
                 id="remote-path",
             )
 
             yield Label("Servidor de la API (GitLab/GitHub)", classes="section")
             yield Input(
-                value=self._initial.remote_host,
+                value=self._initial.host,
                 placeholder=DEFAULT_REMOTE_HOSTS["gitlab"],
                 id="remote-host",
             )
@@ -1095,13 +1139,20 @@ class RemoteSettingsModal(ModalScreen["Config | None"]):
 
             yield Label("Repositorio de sesiones", classes="section")
             yield Input(
-                value=self._initial.remote_repo,
+                value=self._initial.repo,
                 placeholder="grupo/sesiones-claude",
                 id="remote-repo",
             )
 
             yield Label("Rama", classes="section")
-            yield Input(value=self._initial.remote_branch, placeholder="main", id="remote-branch")
+            yield Input(value=self._initial.branch, placeholder="main", id="remote-branch")
+
+            yield Label("Nombre de la pestaña (opcional)", classes="section")
+            yield Input(
+                value=self._initial.label,
+                placeholder=self._initial.tab_label(),
+                id="remote-label",
+            )
 
             yield Label("Token de acceso", classes="section")
             yield Input(
@@ -1147,40 +1198,33 @@ class RemoteSettingsModal(ModalScreen["Config | None"]):
         Deliberately synchronous: it is a single API call the user just asked for, and a
         worker here would need to survive the modal closing underneath it.
         """
-        from multi_claude.remote import store_from_settings
+        from multi_claude.remote import RemoteError, TokenStore, store_from_link
 
         status = self.query_one("#remote-status", Label)
         candidate = self.collect()
-        if candidate.remote_kind == "none":
+        if candidate.kind == "none":
             self._set_status(status, "Compartir está desactivado", ok=False)
             return
-        store = store_from_settings(
-            candidate.remote_kind,
-            candidate.remote_path,
-            host=candidate.remote_api_host(),
-            repo=candidate.remote_repo,
-            branch=candidate.remote_branch,
-            token=self._typed_token(),
-        )
+        if not candidate.is_configured:
+            self._set_status(status, "Configuración incompleta (falta ruta o repo)", ok=False)
+            return
+        token = self._typed_token() or TokenStore().get()
+        store = store_from_link(candidate, token=token)
         if store is None:
             self._set_status(status, "Configuración incompleta (falta ruta o repo)", ok=False)
             return
         check = getattr(store, "check_connection", None)
         if not callable(check):
             # A directory has nothing to authenticate: existence is the whole check.
-            from pathlib import Path as _Path
-
-            exists = _Path(candidate.remote_path).expanduser().is_dir()
+            exists = Path(candidate.path).expanduser().is_dir()
             self._set_status(
                 status,
-                f"OK · carpeta accesible: {candidate.remote_path}"
+                f"OK · carpeta accesible: {candidate.path}"
                 if exists
-                else f"La carpeta no existe todavía: {candidate.remote_path}",
+                else f"La carpeta no existe todavía: {candidate.path}",
                 ok=exists,
             )
             return
-        from multi_claude.remote import RemoteError
-
         try:
             self._set_status(status, check(), ok=True)
         except RemoteError as exc:
@@ -1201,18 +1245,18 @@ class RemoteSettingsModal(ModalScreen["Config | None"]):
         """The token the caller should persist, or None if the user left it untouched."""
         return self._typed_token()
 
-    def collect(self) -> Config:
-        kind = self._kind_from_radio()
+    def collect(self) -> RemoteLink:
         return replace(
             self._initial,
-            remote_kind=kind,
-            remote_path=self.query_one("#remote-path", Input).value.strip(),
-            remote_host=self.query_one("#remote-host", Input).value.strip().rstrip("/"),
-            remote_repo=self.query_one("#remote-repo", Input).value.strip().strip("/"),
-            remote_branch=self.query_one("#remote-branch", Input).value.strip() or "main",
-        )
+            kind=self._kind_from_radio(),
+            path=self.query_one("#remote-path", Input).value,
+            host=self.query_one("#remote-host", Input).value,
+            repo=self.query_one("#remote-repo", Input).value,
+            branch=self.query_one("#remote-branch", Input).value,
+            label=self.query_one("#remote-label", Input).value,
+        ).normalised()
 
-    def _kind_from_radio(self) -> RemoteKind:
+    def _kind_from_radio(self) -> str:
         pressed = self.query_one("#remote-kind", RadioSet).pressed_button
         radio_id = pressed.id if pressed is not None else None
         if radio_id and radio_id.startswith("kind-"):
@@ -1220,7 +1264,186 @@ class RemoteSettingsModal(ModalScreen["Config | None"]):
             for kind in VALID_REMOTE_KINDS:
                 if candidate == kind:
                     return kind
-        return self._initial.remote_kind
+        return self._initial.kind
+
+
+class ProjectRemotesModal(ModalScreen["list[RemoteLink] | None"]):
+    """Manage which sessions repos a project publishes to.
+
+    A project can be linked to several — one per client, one for product work — and each one
+    becomes a tab in the sessions listing. Returns the final list, or None if cancelled.
+
+    Links are stored against the project's git ``origin``, so linking one worktree links every
+    worktree of that repo. The modal says so, because otherwise the shared effect looks like a
+    bug the first time it happens.
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+        Binding("a", "add", "Añadir"),
+        Binding("delete", "remove", "Quitar"),
+    ]
+
+    DEFAULT_CSS = """
+    ProjectRemotesModal {
+        align: center middle;
+    }
+    ProjectRemotesModal > Vertical {
+        background: $surface;
+        border: thick $primary;
+        padding: 1 2;
+        width: 86;
+        height: auto;
+    }
+    ProjectRemotesModal Label.title {
+        text-style: bold;
+    }
+    ProjectRemotesModal Label.hint {
+        color: $text-muted;
+    }
+    ProjectRemotesModal Label.section {
+        margin-top: 1;
+        text-style: bold;
+        color: $accent;
+    }
+    ProjectRemotesModal Horizontal {
+        align: center middle;
+        height: auto;
+        margin-top: 1;
+    }
+    ProjectRemotesModal Button {
+        margin: 0 1;
+    }
+    """
+
+    def __init__(
+        self, *, project_name: str, links: list[RemoteLink], inherited: bool = False
+    ) -> None:
+        super().__init__()
+        self.project_name = project_name
+        self._links = list(links)
+        # ``inherited`` means what is listed came from the global setting, not from a link of
+        # this project's own. Saving turns it into an explicit link, which is worth saying.
+        self._inherited = inherited
+
+    def compose(self) -> ComposeResult:
+        from textual.containers import Horizontal
+
+        with Vertical():
+            yield Label(f"Repositorios de sesiones — {self.project_name}", classes="title")
+            yield Label(
+                "Cada repositorio enlazado es una pestaña en el listado de sesiones. "
+                "El enlace se guarda contra el origin del repo, así que vale para todos "
+                "sus worktrees.",
+                classes="hint",
+            )
+            if self._inherited:
+                yield Label(
+                    "Ahora mismo este proyecto usa el remoto global; al guardar pasará a "
+                    "tener enlaces propios.",
+                    classes="hint",
+                )
+
+            yield Label("Enlazados", classes="section")
+            yield Label("", id="links-empty", classes="hint")
+            with RadioSet(id="links"):
+                yield from self._link_buttons()
+
+            yield Label("a añade · Supr quita el seleccionado · Enter guarda", classes="hint")
+            with Horizontal():
+                yield Button("Cancelar", id="cancel", variant="default")
+                yield Button("Añadir…", id="add", variant="default")
+                yield Button("Quitar", id="remove", variant="default")
+                yield Button("Guardar", id="save", variant="primary")
+
+    def _link_buttons(self) -> ComposeResult:
+        for index, link in enumerate(self._links):
+            yield RadioButton(
+                f"{link.tab_label()} — {link.summary()}",
+                value=(index == 0),
+                id=f"link-{index}",
+            )
+
+    def on_mount(self) -> None:
+        self._sync_empty_label()
+
+    def _sync_empty_label(self) -> None:
+        label = self.query_one("#links-empty", Label)
+        label.update("(ninguno)" if not self._links else "")
+
+    async def _rebuild(self) -> None:
+        radio_set = self.query_one("#links", RadioSet)
+        await radio_set.remove_children()
+        for index, link in enumerate(self._links):
+            await radio_set.mount(
+                RadioButton(
+                    f"{link.tab_label()} — {link.summary()}",
+                    value=(index == 0),
+                    id=f"link-{index}",
+                )
+            )
+        self._sync_empty_label()
+
+    @on(Button.Pressed, "#cancel")
+    def _cancel(self) -> None:
+        self.dismiss(None)
+
+    @on(Button.Pressed, "#save")
+    def _save(self) -> None:
+        self.dismiss(list(self._links))
+
+    @on(Button.Pressed, "#add")
+    def _add_pressed(self) -> None:
+        self.action_add()
+
+    @on(Button.Pressed, "#remove")
+    def _remove_pressed(self) -> None:
+        self.action_remove()
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def action_add(self) -> None:
+        from multi_claude.remote import TokenStore
+
+        modal = RemoteSettingsModal(
+            RemoteLink(kind="gitlab"),
+            has_token=TokenStore().has_token(),
+            title=f"Añadir repositorio de sesiones — {self.project_name}",
+        )
+        self.app.push_screen(modal, lambda result: self._on_added(modal, result))
+
+    def _on_added(self, modal: RemoteSettingsModal, result: RemoteLink | None) -> None:
+        if result is None or not result.is_configured:
+            return
+        from multi_claude.remote import TokenStore
+
+        token = modal.token_to_save()
+        if token:
+            TokenStore().set(token)
+        # Re-adding the same target replaces it, so one repo can never own two tabs.
+        for index, current in enumerate(self._links):
+            if current.same_target(result):
+                self._links[index] = result
+                break
+        else:
+            self._links.append(result)
+        self.run_worker(self._rebuild(), exclusive=False)
+
+    def action_remove(self) -> None:
+        index = self._selected_index()
+        if index is None:
+            return
+        del self._links[index]
+        self.run_worker(self._rebuild(), exclusive=False)
+
+    def _selected_index(self) -> int | None:
+        pressed = self.query_one("#links", RadioSet).pressed_button
+        radio_id = pressed.id if pressed is not None else None
+        if not radio_id or not radio_id.startswith("link-"):
+            return None
+        index = int(radio_id.split("-", 1)[1])
+        return index if 0 <= index < len(self._links) else None
 
 
 class ConfirmDeleteModal(ModalScreen[bool]):

@@ -380,3 +380,16 @@ def _git_line(path: Path, args: list[str]) -> str | None:
     if result.returncode != 0:
         return None
     return result.stdout.strip() or None
+
+
+def project_remote_key(path: Path) -> str:
+    """Stable key under which a project's sessions-repo links are stored.
+
+    The repo's ``origin`` when there is one, normalised so ssh and https forms agree and so
+    every worktree of the repo resolves to the same key. Otherwise the absolute path, which
+    still works on one machine but does not carry between checkouts.
+    """
+    from multi_claude.project_remotes import normalize_git_remote
+
+    normalised = normalize_git_remote(resolve_git_remote(path))
+    return normalised or str(path)

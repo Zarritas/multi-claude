@@ -39,6 +39,8 @@ compañero y la carpeta de proyecto local.
 | uuid | Se preserva tal cual (uuid v4, no colisionan entre empleados) |
 | `cwd` embebido | No se reescribe: es histórico y Claude lo ignora (validado, ver Fase 0) |
 | Backends | Carpeta (`DirectoryRemote`), GitLab y GitHub (`remote_http.py`) |
+| Alcance | **Por proyecto**: cada proyecto se enlaza a uno o varios repos de sesiones, cada uno una pestaña. El remoto global solo es fallback |
+| Clave del enlace | El `origin` normalizado del repo, así que todos sus worktrees comparten enlace |
 | Credenciales | Fichero `remote-token` con permisos `0600`, o `$MULTI_CLAUDE_REMOTE_TOKEN`; **nunca** en `config.json` |
 | Compresión | gzip de la stdlib (medido ~3,7:1 sobre una sesión real de 4,6 MB) |
 | Manifests | Uno por sesión, nunca un manifest global (evita conflictos de escritura) |
@@ -110,12 +112,17 @@ reconciliación de proyectos por remote URL que DESIGN.md deja fuera de alcance.
 Un módulo nuevo:
 
 ```
+src/multi_claude/project_remotes.py
+    RemoteLink              qué es un remoto: kind/path/host/repo/branch/label
+    ProjectRemotesStore     proyecto -> [RemoteLink, ...], indexado por origin normalizado
+    normalize_git_remote()  ssh y https del mismo repo dan la misma clave
+
 src/multi_claude/remote.py
     RemoteStore(Protocol)   list_sessions() / fetch() / publish()
     DirectoryRemote         driver de carpeta
-    RemoteSession           dataclass de metadatos
+    RemoteSession           dataclass de metadatos de una sesión publicada
     TokenStore              token de API, fichero aparte con permisos 0600
-    store_from_settings()   factoría; $MULTI_CLAUDE_REMOTE_DIR gana sobre el config
+    store_from_link()       factoría a partir de un RemoteLink
 
 src/multi_claude/remote_http.py
     HttpRepoRemote          maquinaria común: listar / leer / escribir un fichero del repo
@@ -165,12 +172,17 @@ Tampoco hay listado incremental por commit sha: cada `R` relista los manifests. 
 "Desviaciones del plan". Consecuencia asumida: las sesiones compartidas **no** entran en el
 FTS global (`?`) hasta que se hidratan.
 
-**`screens/sessions.py`** — dos bindings nuevos (`u` y `R` están libres):
+**`screens/sessions.py`** — una barra de pestañas y dos bindings:
 
-| Tecla | Acción |
-|-------|--------|
-| `u` | Publicar la sesión bajo el cursor, o todas las marcadas con `space` |
-| `R` | Alternar la visibilidad de las sesiones remotas en el listado |
+| Elemento | Acción |
+|----------|--------|
+| Pestaña `Locales` | Las sesiones de este proyecto en disco |
+| Pestaña `☁ nombre` | Las publicadas en ese repo que no están en local |
+| `u` | Publicar al repo de la pestaña activa (ver "Publicar con varias pestañas") |
+| `L` | Gestionar los repos enlazados a este proyecto |
+
+Las pestañas iniciales se construyen en `compose`, no tras montar: hacerlo desde un worker dejaba
+la pantalla brevemente incompleta y volvía inestables los tests que navegan a ella.
 
 **`screens/sessions.py`, acción `Enter`** — si la fila es remota: hidratar en `project_dir` y luego
 `launch_claude(cwd, session_id=...)`, cuya firma ya sirve sin cambios.
@@ -268,6 +280,41 @@ hidrata, continúa y republica) no se pierde nada, porque su jsonl contiene la h
 otro más su continuación. Pero si dos personas continúan la misma sesión en paralelo, la
 segunda publicación pisa a la primera en el remoto. Es el riesgo conocido del MVP y está
 declarado como limitación en el README.
+
+## Enlaces por proyecto
+
+Un solo remoto global no sobrevive al trabajo real: las sesiones sobre el código de un cliente no
+deben acabar en el mismo repo que las de otro, y la razón de preferir un repo privado a una carpeta
+es justamente que sus permisos ya expresan eso.
+
+Así que cada proyecto se enlaza a **uno o varios** repos de sesiones (`L`), y cada enlace es una
+**pestaña** en el listado. Resolución, primero que gana:
+
+1. `$MULTI_CLAUDE_REMOTE_DIR` — override total a una carpeta, para pruebas.
+2. Los enlaces propios del proyecto.
+3. El remoto global de `config.json`.
+
+Los propios ganan **por completo** sobre el global, no se suman: un proyecto enlazado al repo de un
+cliente no debe publicar además al repo por defecto.
+
+### Por qué la clave es el `origin` y no la ruta
+
+`project_remote_key` usa el `origin` normalizado (`normalize_git_remote`), con la ruta absoluta como
+fallback. Dos consecuencias, ambas buscadas:
+
+- **Todos los worktrees de un repo comparten enlace.** `repo`, `repo/.claude/worktrees/x` y un
+  checkout hermano tienen el mismo `origin`, que es como ya los trata la agrupación de worktrees.
+- **`git@host:g/r.git` y `https://host/g/r.git` son la misma clave**, porque son el mismo
+  repositorio y nadie debería tener que enlazarlo dos veces.
+
+Un proyecto sin `origin` se indexa por ruta: sigue sirviendo en una máquina, pero no viaja entre
+checkouts.
+
+### Publicar con varias pestañas
+
+`u` publica al repo de la **pestaña activa**. Desde la pestaña local solo es inequívoco cuando hay
+exactamente un repo enlazado; con varios se pide abrir la pestaña del destino, porque adivinar
+podría publicar la sesión de un cliente en el repo de otro.
 
 ## Cómo probarlo
 

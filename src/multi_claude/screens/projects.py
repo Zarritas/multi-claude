@@ -24,6 +24,7 @@ from multi_claude.discovery import (
     WorktreeGroup,
     group_into_folders,
     group_worktrees,
+    project_remote_key,
     scan_projects,
 )
 from multi_claude.filtering import FilterQuery, matches_fuzzy, parse_query
@@ -37,9 +38,11 @@ from multi_claude.modals import (
     FilePathModal,
     ImportTargetModal,
     MergeProjectModal,
+    ProjectRemotesModal,
     RenameModal,
     SettingsModal,
 )
+from multi_claude.project_remotes import RemoteLink
 from multi_claude.transfer import ArchiveError, ManifestSession, import_archive, read_manifest
 
 # Sort keys exposed via number keys. Order = column order in the table.
@@ -66,6 +69,7 @@ class ProjectsScreen(Screen[None]):
         Binding("g", "toggle_groups", "Group worktrees"),
         Binding("f", "assign_folder", "Folder"),
         Binding("i", "import_archive", "Importar"),
+        Binding("L", "link_remotes", "Repos sesiones"),
         Binding("m", "merge_orphan", "Merge orphan"),
         Binding("question_mark", "search_global", "FTS global", show=False),
         Binding("ctrl+q", "quit", "Quit"),
@@ -367,7 +371,7 @@ class ProjectsScreen(Screen[None]):
             return False
         if action == "rename" and self._selected_row() is None:
             return False
-        if action == "assign_folder" and self._selected_project() is None:
+        if action in ("assign_folder", "link_remotes") and self._selected_project() is None:
             return False
         if action == "merge_orphan":
             project = self._selected_project()
@@ -503,6 +507,40 @@ class ProjectsScreen(Screen[None]):
             store.set_for_project(project.encoded_path, result)
             self.notify(f"Proyecto renombrado: {result}")
         self._repaint()
+
+    def action_link_remotes(self) -> None:
+        """Link the project under the cursor to one or more sessions repos.
+
+        Also reachable from inside the project (``L`` in the sessions screen); offered here so
+        a project can be set up without opening it first.
+        """
+        project = self._selected_project()
+        if project is None:
+            self.notify(
+                "Selecciona un proyecto individual (no un grupo ni una carpeta)",
+                severity="warning",
+            )
+            return
+        key = project_remote_key(project.path)
+        own = self._claude_app.project_remotes.get(key)
+        self.app.push_screen(
+            ProjectRemotesModal(
+                project_name=project.name,
+                links=list(own or self._claude_app.remote_links_for(project)),
+                inherited=not own,
+            ),
+            lambda links: self._apply_links(key, links),
+        )
+
+    def _apply_links(self, key: str, links: list[RemoteLink] | None) -> None:
+        if links is None:
+            return  # cancelled
+        self._claude_app.project_remotes.set_all(key, links)
+        self.notify(
+            f"{len(links)} repositorio(s) de sesiones enlazado(s)"
+            if links
+            else "Enlaces borrados (se usa el remoto global)"
+        )
 
     def action_assign_folder(self) -> None:
         project = self._selected_project()

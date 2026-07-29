@@ -12,7 +12,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal
 from textual.screen import Screen
-from textual.widgets import DataTable, Footer, Header, Input
+from textual.widgets import DataTable, Footer, Header, Input, Tab, Tabs
 
 from multi_claude.app_protocol import AppProtocol
 from multi_claude.clipboard import ClipboardError, copy_to_clipboard
@@ -27,6 +27,7 @@ from multi_claude.deletion import (
 )
 from multi_claude.discovery import (
     Project,
+    project_remote_key,
     resolve_git_head,
     resolve_git_remote,
     resolve_git_user_email,
@@ -43,14 +44,15 @@ from multi_claude.modals import (
     ConfirmDeleteModal,
     FilePathModal,
     MoveSessionModal,
+    ProjectRemotesModal,
     RenameModal,
     SettingsModal,
     TagEditorModal,
 )
+from multi_claude.project_remotes import RemoteLink
 from multi_claude.remote import (
     RemoteError,
     RemoteSession,
-    RemoteStore,
     collect_session_files,
     session_to_remote,
 )
@@ -61,6 +63,10 @@ from multi_claude.widgets.preview import SessionPreview
 # How many file paths the publish confirmation lists before collapsing the rest into a
 # count. Enough to spot a stray tool-results dump, short enough to stay on screen.
 _PUBLISH_PREVIEW_LIMIT = 12
+
+# Tab ids. The local listing is always tab 0; each linked sessions repo follows in link order.
+_LOCAL_TAB_ID = "tab-local"
+_REMOTE_TAB_PREFIX = "tab-remote-"
 
 _SORT_KEYS_BY_COLUMN: tuple[str, ...] = (
     "prompt",
@@ -86,7 +92,7 @@ class SessionsScreen(Screen[None]):
         Binding("m", "move", "Mover"),
         Binding("x", "export", "Exportar"),
         Binding("u", "publish", "Publicar"),
-        Binding("R", "toggle_remote", "Compartidas"),
+        Binding("L", "link_remotes", "Repos sesiones"),
         Binding("d", "delete", "Delete"),
         Binding("D", "cleanup", "Limpieza"),
         Binding("y", "yank_id", "Copiar id"),
@@ -117,7 +123,9 @@ class SessionsScreen(Screen[None]):
         self._active_session_ids: set[str] = set()
         self._marked: set[str] = set()
         self._remote_sessions: list[RemoteSession] = []
-        self._show_remote = False
+        self._remote_links: tuple[RemoteLink, ...] = ()
+        # None while the local tab is selected; otherwise the index into ``_remote_links``.
+        self._active_remote: int | None = None
 
     @property
     def _claude_app(self) -> AppProtocol:
@@ -125,6 +133,17 @@ class SessionsScreen(Screen[None]):
 
     def compose(self) -> ComposeResult:
         yield Header()
+        # Built here rather than after mount: the tab bar is part of the initial layout, and
+        # populating it from a worker made the screen briefly incomplete.
+        self._remote_links = self._claude_app.remote_links_for(self.project)
+        yield Tabs(
+            Tab("Locales", id=_LOCAL_TAB_ID),
+            *(
+                Tab(f"☁ {link.tab_label()}", id=f"{_REMOTE_TAB_PREFIX}{index}")
+                for index, link in enumerate(self._remote_links)
+            ),
+            id="session-tabs",
+        )
         with Horizontal(id="sessions-body"):
             yield DataTable(id="sessions", cursor_type="row", zebra_stripes=True)
             yield SessionPreview(id="preview")
@@ -138,6 +157,7 @@ class SessionsScreen(Screen[None]):
         table = self.query_one("#sessions", DataTable)
         table.add_columns("Prompt", "Branch", "Tags", "Msgs", "Tamaño", "Última")
         self._apply_preview_visibility()
+        self.query_one("#session-tabs", Tabs).display = bool(self._remote_links)
         self._populate()
 
     def _apply_preview_visibility(self) -> None:
@@ -165,9 +185,8 @@ class SessionsScreen(Screen[None]):
         self._apply_sort()
         # A session that just landed locally (hydrated, or published by us) must stop
         # being offered as remote, so drop those before repainting.
-        local_ids = {s.id for s in sessions}
         self._remote_sessions = [
-            r for r in self._remote_sessions if r.session_id not in local_ids
+            r for r in self._remote_sessions if not self._is_local(r.session_id)
         ]
         self._repaint()
 
@@ -178,6 +197,9 @@ class SessionsScreen(Screen[None]):
     def _repaint(self) -> None:
         from rich.text import Text
 
+        if self._active_remote is not None:
+            self._repaint_remote()
+            return
         table = self.query_one("#sessions", DataTable)
         table.clear()
         raw_query = self.query_one("#filter", Input).value
@@ -210,8 +232,39 @@ class SessionsScreen(Screen[None]):
             )
             table.add_row(*row, key=str(idx))
             self._rows.append((False, idx))
-        if self._show_remote:
-            self._paint_remote_rows(table, query)
+        filter_input = self.query_one("#filter", Input)
+        if self._rows and not filter_input.has_focus:
+            table.focus()
+
+    async def _refresh_remote_tabs(self) -> None:
+        """Rebuild the tab bar after the user changes which repos are linked.
+
+        The initial bar is built in ``compose``; this is only for changes made from the link
+        modal. Hidden entirely when nothing is linked: a lone "Locales" tab would be chrome
+        that explains nothing. Selection returns to local, since the old tabs are gone.
+
+        Async because ``Tabs.clear`` and ``add_tab`` complete on later frames; adding before
+        the clear lands raises DuplicateIds.
+        """
+        self._remote_links = self._claude_app.remote_links_for(self.project)
+        self._active_remote = None
+        self._remote_sessions = []
+        tabs = self.query_one("#session-tabs", Tabs)
+        await tabs.clear()
+        await tabs.add_tab(Tab("Locales", id=_LOCAL_TAB_ID))
+        for index, link in enumerate(self._remote_links):
+            await tabs.add_tab(
+                Tab(f"☁ {link.tab_label()}", id=f"{_REMOTE_TAB_PREFIX}{index}")
+            )
+        tabs.display = bool(self._remote_links)
+
+    def _repaint_remote(self) -> None:
+        """Paint the selected remote's sessions in place of the local ones."""
+        table = self.query_one("#sessions", DataTable)
+        table.clear()
+        query = parse_query(self.query_one("#filter", Input).value)
+        self._rows = []
+        self._paint_remote_rows(table, query)
         filter_input = self.query_one("#filter", Input)
         if self._rows and not filter_input.has_focus:
             table.focus()
@@ -526,6 +579,42 @@ class SessionsScreen(Screen[None]):
 
     # --- shared sessions ------------------------------------------------------------
 
+    def _is_local(self, session_id: str) -> bool:
+        """Whether this session already exists in this project's dir on disk."""
+        return (self.project.encoded_path / f"{session_id}.jsonl").exists()
+
+    def _active_link(self) -> RemoteLink | None:
+        """The remote whose tab is selected, or None while the local tab is."""
+        if self._active_remote is None:
+            return None
+        if self._active_remote >= len(self._remote_links):
+            return None
+        return self._remote_links[self._active_remote]
+
+    def _publish_target(self) -> RemoteLink | None:
+        """Which remote ``u`` publishes to, or None with a reason already notified.
+
+        The selected tab decides. From the local tab it is unambiguous only when exactly one
+        remote is linked; with several, guessing would publish a client's session to the wrong
+        repo, so the user is asked to pick the tab instead.
+        """
+        active = self._active_link()
+        if active is not None:
+            return active
+        if not self._remote_links:
+            self.notify(
+                "Este proyecto no tiene repositorio de sesiones enlazado (pulsa L)",
+                severity="warning",
+            )
+            return None
+        if len(self._remote_links) > 1:
+            self.notify(
+                "Varios repositorios enlazados: abre la pestaña del destino para publicar",
+                severity="warning",
+            )
+            return None
+        return self._remote_links[0]
+
     def _notify_error(self, message: str) -> None:
         """Named so worker threads can post an error via ``call_from_thread``.
 
@@ -533,19 +622,13 @@ class SessionsScreen(Screen[None]):
         """
         self.notify(message, severity="error")
 
-    def _remote_store(self) -> RemoteStore | None:
-        store = self._claude_app.remote
-        if store is None:
-            self.notify(
-                "No hay remoto configurado (remote_kind/remote_path, "
-                "o $MULTI_CLAUDE_REMOTE_DIR)",
-                severity="warning",
-            )
-        return store
-
     def action_publish(self) -> None:
-        store = self._remote_store()
+        link = self._publish_target()
+        if link is None:
+            return
+        store = self._claude_app.store_for_link(link)
         if store is None:
+            self.notify(f"«{link.tab_label()}» está mal configurado", severity="warning")
             return
         targets = self._selected_sessions()
         if not targets:
@@ -570,23 +653,25 @@ class SessionsScreen(Screen[None]):
             listed.append(f"… y {len(files) - _PUBLISH_PREVIEW_LIMIT} más")
         modal = ConfirmDeleteModal(
             title=f"Publicar {len(targets)} sesión(es) · {len(files)} ficheros",
-            details=[f"Destino: {store}", "", *listed],
+            details=[f"Destino: {link.tab_label()} — {link.summary()}", "", *listed],
             warning=(
                 "Se sube el transcript completo, incluidos los tool-results. "
                 "Revisa que no haya secretos."
             ),
         )
-        self.app.push_screen(modal, lambda ok: self._apply_publish(targets, ok))
+        self.app.push_screen(modal, lambda ok: self._apply_publish(targets, link, ok))
 
-    def _apply_publish(self, targets: list[Session], confirmed: bool | None) -> None:
+    def _apply_publish(
+        self, targets: list[Session], link: RemoteLink, confirmed: bool | None
+    ) -> None:
         if not confirmed:
             return
-        self.notify(f"Publicando {len(targets)} sesión(es)…")
-        self._publish_worker(targets)
+        self.notify(f"Publicando {len(targets)} sesión(es) en «{link.tab_label()}»…")
+        self._publish_worker(targets, link)
 
     @work(thread=True, exclusive=True, group="publish-sessions")
-    def _publish_worker(self, targets: list[Session]) -> None:
-        store = self._claude_app.remote
+    def _publish_worker(self, targets: list[Session], link: RemoteLink) -> None:
+        store = self._claude_app.store_for_link(link)
         if store is None:
             return
         published_by = resolve_git_user_email(self.project.path)
@@ -617,58 +702,82 @@ class SessionsScreen(Screen[None]):
             )
         else:
             self.notify(f"Publicadas {done} sesión(es)")
-        if self._show_remote:
-            self._load_remote_worker()
+        if self._active_remote is not None:
+            self._load_remote_worker(self._active_remote)
         else:
             self._repaint()
 
-    def action_toggle_remote(self) -> None:
-        if not self._show_remote and self._remote_store() is None:
-            return
-        self._show_remote = not self._show_remote
-        if self._show_remote:
-            self.notify("Cargando sesiones compartidas…")
-            self._load_remote_worker()
-        else:
+    @on(Tabs.TabActivated)
+    def _on_tab_activated(self, event: Tabs.TabActivated) -> None:
+        """Switch between the local listing and one remote's listing."""
+        tab_id = event.tab.id or ""
+        if tab_id == _LOCAL_TAB_ID:
+            self._active_remote = None
             self._remote_sessions = []
             self._repaint()
-            self.notify("Compartidas ocultas")
+            return
+        if not tab_id.startswith(_REMOTE_TAB_PREFIX):
+            return
+        index = int(tab_id[len(_REMOTE_TAB_PREFIX) :])
+        if index >= len(self._remote_links):
+            return
+        self._active_remote = index
+        self._remote_sessions = []
+        self._repaint()
+        self.notify(f"Cargando «{self._remote_links[index].tab_label()}»…")
+        self._load_remote_worker(index)
 
     @work(thread=True, exclusive=True, group="load-remote")
-    def _load_remote_worker(self) -> None:
-        store = self._claude_app.remote
+    def _load_remote_worker(self, index: int) -> None:
+        if index >= len(self._remote_links):
+            return
+        link = self._remote_links[index]
+        store = self._claude_app.store_for_link(link)
         if store is None:
+            self.app.call_from_thread(
+                self._on_remote_failed, index, f"«{link.tab_label()}» está mal configurado"
+            )
             return
         try:
             listed = store.list_sessions()
         except (RemoteError, OSError) as exc:
-            self.app.call_from_thread(self._on_remote_failed, str(exc))
+            self.app.call_from_thread(self._on_remote_failed, index, str(exc))
             return
-        self.app.call_from_thread(self._on_remote_loaded, list(listed))
+        self.app.call_from_thread(self._on_remote_loaded, index, list(listed))
 
-    def _on_remote_loaded(self, listed: list[RemoteSession]) -> None:
+    def _on_remote_loaded(self, index: int, listed: list[RemoteSession]) -> None:
+        # A late reply from a tab the user already left must not overwrite what is on screen.
+        if index != self._active_remote:
+            return
         # Sessions already on this machine are hidden: seeing your own publications
         # duplicated under a cloud icon is noise, and hydrating them would fail anyway.
-        local_ids = {s.id for s in self._sessions}
-        self._remote_sessions = [r for r in listed if r.session_id not in local_ids]
+        # Checked against disk rather than the scanned list, so a listing that arrives while
+        # the local scan is still running does not briefly offer sessions we already have.
+        self._remote_sessions = [r for r in listed if not self._is_local(r.session_id)]
         self._repaint()
         hidden = len(listed) - len(self._remote_sessions)
         suffix = f" ({hidden} ya en local)" if hidden else ""
         self.notify(f"{len(self._remote_sessions)} sesión(es) compartida(s){suffix}")
 
-    def _on_remote_failed(self, message: str) -> None:
-        self._show_remote = False
+    def _on_remote_failed(self, index: int, message: str) -> None:
+        if index != self._active_remote:
+            return
         self._remote_sessions = []
         self._repaint()
         self.notify(f"No se pudo leer el remoto: {message}", severity="error")
 
     def _hydrate_and_launch(self, remote: RemoteSession, mode: LaunchMode) -> None:
+        link = self._active_link()
+        if link is None:
+            return
         self.notify(f"Trayendo {remote.session_id[:8]}…")
-        self._hydrate_worker(remote, mode)
+        self._hydrate_worker(remote, link, mode)
 
     @work(thread=True, exclusive=True, group="hydrate-session")
-    def _hydrate_worker(self, remote: RemoteSession, mode: LaunchMode) -> None:
-        store = self._claude_app.remote
+    def _hydrate_worker(
+        self, remote: RemoteSession, link: RemoteLink, mode: LaunchMode
+    ) -> None:
+        store = self._claude_app.store_for_link(link)
         if store is None:
             return
         try:
@@ -693,6 +802,32 @@ class SessionsScreen(Screen[None]):
             )
         self._launch(remote.session_id, remote.display_name, mode)
         self._populate()
+
+    def action_link_remotes(self) -> None:
+        """Manage which sessions repos this project publishes to."""
+        self.app.push_screen(
+            ProjectRemotesModal(
+                project_name=self.project.name,
+                links=list(self._remote_links),
+                inherited=not self._claude_app.project_remotes.get(self._remote_key()),
+            ),
+            self._apply_links,
+        )
+
+    def _remote_key(self) -> str:
+        return project_remote_key(self.project.path)
+
+    def _apply_links(self, links: list[RemoteLink] | None) -> None:
+        if links is None:
+            return  # cancelled
+        self._claude_app.project_remotes.set_all(self._remote_key(), links)
+        self.run_worker(self._refresh_remote_tabs(), exclusive=False)
+        self.notify(
+            f"{len(links)} repositorio(s) de sesiones enlazado(s)"
+            if links
+            else "Enlaces borrados (se usa el remoto global)"
+        )
+
 
     def action_edit_tags(self) -> None:
         session = self._selected_session()
@@ -924,7 +1059,7 @@ class SessionsScreen(Screen[None]):
             return False
         if action in ("move", "export", "publish") and not self._selected_sessions():
             return False
-        if action == "publish" and self._claude_app.remote is None:
+        if action == "publish" and not self._remote_links:
             return False
         return not (action == "cleanup" and not self._sessions)
 

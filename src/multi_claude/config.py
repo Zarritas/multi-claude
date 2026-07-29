@@ -7,7 +7,9 @@ Stored settings:
 - ``projects_sort`` / ``sessions_sort`` — column + direction for each screen.
 - ``preview_visible`` — whether the session preview panel is shown.
 - ``group_worktrees`` — whether to collapse multiple worktrees of the same repo.
-- ``remote_kind`` / ``remote_path`` — where shared sessions are published, if anywhere.
+- ``remote_*`` — the **global** remote for shared sessions, used when a project has no link
+  of its own (see :mod:`multi_claude.project_remotes`). The auth token is deliberately not
+  here: see :class:`multi_claude.remote.TokenStore`.
 """
 
 from __future__ import annotations
@@ -16,11 +18,12 @@ import json
 import os
 import shlex
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Literal
 
 from multi_claude.colors import ColorRule
+from multi_claude.project_remotes import RemoteLink
 
 # Where the session lands. ``split``/``tab`` reuse the current window, ``window``
 # opens a new one, ``suspend`` runs inline after suspending the TUI, ``auto``
@@ -51,12 +54,6 @@ RESERVED_CLAUDE_FLAGS: frozenset[str] = frozenset(
 # API. The auth token is deliberately *not* part of this config — see ``remote.TokenStore``.
 RemoteKind = Literal["none", "directory", "gitlab", "github"]
 VALID_REMOTE_KINDS: tuple[RemoteKind, ...] = ("none", "directory", "gitlab", "github")
-
-# Default API hosts per provider, so the user only has to type one for self-hosted GitLab.
-DEFAULT_REMOTE_HOSTS: dict[str, str] = {
-    "gitlab": "https://gitlab.com",
-    "github": "https://api.github.com",
-}
 
 ProjectSortKey = Literal["name", "path", "session_count", "last_activity"]
 VALID_PROJECT_SORT: tuple[ProjectSortKey, ...] = (
@@ -120,18 +117,35 @@ class Config:
             "remote_branch": self.remote_branch,
         }
 
+    def remote_link(self) -> RemoteLink:
+        """The global remote as a :class:`RemoteLink`, the shape everything else speaks."""
+        return RemoteLink(
+            kind=self.remote_kind,
+            path=self.remote_path,
+            host=self.remote_host,
+            repo=self.remote_repo,
+            branch=self.remote_branch,
+        )
+
+    def with_remote_link(self, link: RemoteLink) -> Config:
+        """This config with its ``remote_*`` fields taken from ``link``."""
+        clean = link.normalised()
+        return replace(
+            self,
+            remote_kind=_coerce_remote_kind(clean.kind),
+            remote_path=clean.path,
+            remote_host=clean.host,
+            remote_repo=clean.repo,
+            remote_branch=clean.branch,
+        )
+
     def remote_api_host(self) -> str:
         """The API base URL to use: the configured one, or the provider's default."""
-        return self.remote_host or DEFAULT_REMOTE_HOSTS.get(self.remote_kind, "")
+        return self.remote_link().api_host
 
     def remote_summary(self) -> str:
         """One-line description of the configured remote, for the settings screen."""
-        if self.remote_kind == "none":
-            return "desactivado"
-        if self.remote_kind == "directory":
-            return f"carpeta · {self.remote_path or '(sin ruta)'}"
-        host = self.remote_api_host().replace("https://", "").rstrip("/")
-        return f"{self.remote_kind} · {host}/{self.remote_repo or '(sin repo)'}"
+        return self.remote_link().summary()
 
 
 _OPPOSITE: dict[LaunchMode, LaunchMode] = {
