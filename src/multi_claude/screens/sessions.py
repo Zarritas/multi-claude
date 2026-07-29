@@ -64,6 +64,15 @@ from multi_claude.widgets.preview import SessionPreview
 # count. Enough to spot a stray tool-results dump, short enough to stay on screen.
 _PUBLISH_PREVIEW_LIMIT = 12
 
+# How a published session's row is marked, by how the local copy compares to it. The note is
+# spelled out because a glyph alone does not say which side is behind.
+_STATE_MARKS: dict[str, tuple[str, str, str]] = {
+    "absent": ("☁ ", "bold blue", ""),
+    "current": ("✓ ", "bold green", "(descargada)"),
+    "stale": ("↻ ", "bold yellow", "(descargada · hay versión más reciente)"),
+    "ahead": ("↑ ", "bold magenta", "(descargada · tienes cambios sin publicar)"),
+}
+
 # Tab ids. The local listing is always tab 0; each linked sessions repo follows in link order.
 _LOCAL_TAB_ID = "tab-local"
 _REMOTE_TAB_PREFIX = "tab-remote-"
@@ -183,11 +192,8 @@ class SessionsScreen(Screen[None]):
         self._active_session_ids = list_active_sessions()
         self.sub_title = f"{self.project.name} — {self.project.path}"
         self._apply_sort()
-        # A session that just landed locally (hydrated, or published by us) must stop
-        # being offered as remote, so drop those before repainting.
-        self._remote_sessions = [
-            r for r in self._remote_sessions if not self._is_local(r.session_id)
-        ]
+        # Remote rows survive a local rescan; what changes is their ✓/☁ mark, which
+        # ``_paint_remote_rows`` derives from disk on every repaint.
         self._repaint()
 
     def _apply_sort(self) -> None:
@@ -270,22 +276,26 @@ class SessionsScreen(Screen[None]):
             table.focus()
 
     def _paint_remote_rows(self, table: DataTable[Any], query: FilterQuery) -> None:
-        """Append the published sessions that aren't on this machine yet.
+        """Paint everything published to this remote, marking what is already here.
 
-        They go last rather than being merged into the sort: a row you cannot rename,
-        tag or delete reads better as a separate block than interleaved among the ones
-        you can, and it keeps the local sort meaning what it says.
+        Sessions you already have are listed rather than hidden: the tab is a view of the
+        repo, and seeing your own session in it is how you confirm a publish worked. They are
+        marked ``✓`` instead of ``☁``, and Enter resumes them straight from disk.
         """
         from rich.text import Text
 
         for idx, remote in enumerate(self._remote_sessions):
             if not query.is_empty and not _remote_matches(remote, query):
                 continue
+            state = self._local_state(remote)
+            glyph, glyph_style, note = _STATE_MARKS[state]
             label = Text()
-            label.append("☁ ", style="bold blue")
+            label.append(glyph, style=glyph_style)
             who = (remote.published_by or "?").split("@")[0]
             label.append(f"{who} · ", style="dim")
             label.append(remote.display_name or remote.first_prompt or remote.session_id)
+            if note:
+                label.append(f"  {note}", style="dim")
             table.add_row(
                 label,
                 remote.branch or "—",
@@ -583,6 +593,26 @@ class SessionsScreen(Screen[None]):
         """Whether this session already exists in this project's dir on disk."""
         return (self.project.encoded_path / f"{session_id}.jsonl").exists()
 
+    def _local_state(self, remote: RemoteSession) -> str:
+        """How the copy on disk compares to what is published: the row's indicator.
+
+        The jsonl only ever grows, so comparing its size against the ``size_bytes`` recorded
+        in the manifest is enough to tell the three cases apart — and all three matter:
+        a stale copy means someone continued the session after you fetched it, and an ahead
+        copy means you have work nobody else can see yet.
+
+        ``absent`` not downloaded · ``current`` same as published ·
+        ``stale`` published is longer · ``ahead`` local is longer
+        """
+        jsonl = self.project.encoded_path / f"{remote.session_id}.jsonl"
+        try:
+            local_size = jsonl.stat().st_size
+        except OSError:
+            return "absent"
+        if not remote.size_bytes or local_size == remote.size_bytes:
+            return "current"
+        return "stale" if remote.size_bytes > local_size else "ahead"
+
     def _active_link(self) -> RemoteLink | None:
         """The remote whose tab is selected, or None while the local tab is."""
         if self._active_remote is None:
@@ -749,15 +779,17 @@ class SessionsScreen(Screen[None]):
         # A late reply from a tab the user already left must not overwrite what is on screen.
         if index != self._active_remote:
             return
-        # Sessions already on this machine are hidden: seeing your own publications
-        # duplicated under a cloud icon is noise, and hydrating them would fail anyway.
-        # Checked against disk rather than the scanned list, so a listing that arrives while
-        # the local scan is still running does not briefly offer sessions we already have.
-        self._remote_sessions = [r for r in listed if not self._is_local(r.session_id)]
+        self._remote_sessions = listed
         self._repaint()
-        hidden = len(listed) - len(self._remote_sessions)
-        suffix = f" ({hidden} ya en local)" if hidden else ""
-        self.notify(f"{len(self._remote_sessions)} sesión(es) compartida(s){suffix}")
+        states = [self._local_state(r) for r in listed]
+        parts = [f"{len(listed)} publicada(s)"]
+        downloaded = sum(1 for s in states if s != "absent")
+        if downloaded:
+            parts.append(f"{downloaded} descargada(s)")
+        stale = states.count("stale")
+        if stale:
+            parts.append(f"{stale} con versión más reciente")
+        self.notify(" · ".join(parts))
 
     def _on_remote_failed(self, index: int, message: str) -> None:
         if index != self._active_remote:
@@ -769,6 +801,18 @@ class SessionsScreen(Screen[None]):
     def _hydrate_and_launch(self, remote: RemoteSession, mode: LaunchMode) -> None:
         link = self._active_link()
         if link is None:
+            return
+        state = self._local_state(remote)
+        if state != "absent":
+            # Already on disk (we published it, or fetched it earlier). Fetching would refuse
+            # to overwrite, so resume the local copy — which is the same session.
+            if state == "stale":
+                self.notify(
+                    "Tu copia es anterior a la publicada; se reanuda la local "
+                    "(traer los turnos nuevos aún no está implementado)",
+                    severity="warning",
+                )
+            self._launch(remote.session_id, remote.display_name, mode)
             return
         self.notify(f"Trayendo {remote.session_id[:8]}…")
         self._hydrate_worker(remote, link, mode)

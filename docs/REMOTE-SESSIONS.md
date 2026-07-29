@@ -177,7 +177,7 @@ FTS global (`?`) hasta que se hidratan.
 | Elemento | Acción |
 |----------|--------|
 | Pestaña `Locales` | Las sesiones de este proyecto en disco |
-| Pestaña `☁ nombre` | Las publicadas en ese repo que no están en local |
+| Pestaña `☁ nombre` | **Todo** lo publicado en ese repo, con el estado de la copia local |
 | `u` | Publicar al repo de la pestaña activa (ver "Publicar con varias pestañas") |
 | `L` | Gestionar los repos enlazados a este proyecto |
 
@@ -216,6 +216,29 @@ nuevo: `y` copia el uuid al portapapeles y el filtro soporta `id:`.
 **Reanudar** (`Enter` sobre remota): descargar → descomprimir en `project_dir` con el uuid intacto →
 comparar `git_remote`/`git_head` del manifest con el estado local → si divergen, avisar antes de
 lanzar → `launch_claude`.
+
+## Estado de la copia local
+
+La pestaña de un repo lista **todo** lo publicado, no solo lo que no tienes. Ocultar lo que ya
+está en disco parecía evitar duplicados, pero rompía lo primero que uno quiere después de
+publicar: ver su sesión ahí como confirmación de que la subida funcionó.
+
+Cada fila lleva entonces un indicador de cómo está tu copia respecto a la publicada:
+
+| Marca | Estado | Cómo se decide |
+|-------|--------|----------------|
+| `☁` | `absent` | No hay `.jsonl` local con ese uuid |
+| `✓` | `current` | El tamaño local coincide con `size_bytes` del manifest |
+| `↻` | `stale` | El manifest declara más bytes: alguien la continuó y republicó |
+| `↑` | `ahead` | El local tiene más bytes: has seguido trabajando sin publicar |
+
+Comparar tamaños basta porque el jsonl es append-only (verificado en la Fase 0: 0 uuids
+duplicados, nunca se reescribe), así que cualquier diferencia es contenido real y no una
+reescritura. El coste es un `stat` por fila.
+
+`Enter` sobre una fila ya descargada reanuda la copia local en lugar de intentar traerla: el
+`fetch` se niega a sobrescribir, y de todos modos es la misma sesión. Sobre una `↻` avisa
+primero, porque traer los turnos que faltan es el merge que sigue pendiente.
 
 ## Concurrencia
 

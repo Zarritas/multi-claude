@@ -217,17 +217,29 @@ carpeta por encima de todo lo demás — útil para probar sin tocar tu configur
 **Qué hace cada tecla:**
 
 - `L` — gestiona los repositorios de sesiones enlazados a este proyecto (añadir, quitar).
-- **Pestañas** — `Locales` muestra tus sesiones; cada `☁ nombre` muestra las publicadas en ese
-  repositorio que **no** tienes en local, con su autor. Las tuyas ya publicadas no reaparecen
-  duplicadas. La barra de pestañas se oculta si no hay nada enlazado.
+- **Pestañas** — `Locales` muestra tus sesiones; cada `☁ nombre` es una vista del repositorio:
+  **todo lo publicado en él**, con su autor y un indicador del estado de tu copia local. La barra
+  se oculta si no hay nada enlazado.
+
+  | Marca | Significado |
+  |-------|-------------|
+  | `☁` | Publicada, no la tienes en local. `Enter` la trae y la reanuda |
+  | `✓` | Descargada y al día con lo publicado |
+  | `↻` | Descargada, pero alguien la continuó después: **hay versión más reciente** |
+  | `↑` | Descargada y la has continuado tú: **tienes turnos sin publicar** |
+
+  El estado se calcula comparando el tamaño de tu `.jsonl` con el que registra el manifest.
+  Como el transcript solo crece, cualquier diferencia es contenido real.
 - `u` — publica la fila actual (o todas las marcadas) **al repositorio de la pestaña activa**.
   Desde `Locales` solo funciona si hay exactamente un repositorio enlazado; con varios, abre
   la pestaña del destino (adivinar podría publicar la sesión de un cliente en el repo de otro).
   Antes de subir muestra **la lista de ficheros exactos** que salen de la máquina: el
   transcript incluye los `tool-results/`, así que una sesión que imprimió un `.env` lo
   publicaría.
-- `Enter` sobre una compartida — la descarga en el directorio de este proyecto preservando su
-  uuid y la reanuda. Si se grabó sobre otro commit, avisa antes de lanzar.
+- `Enter` sobre una compartida — si no la tienes (`☁`), la descarga en el directorio de este
+  proyecto preservando su uuid y la reanuda; si ya la tienes, reanuda tu copia local. Avisa antes
+  de lanzar cuando se grabó sobre otro commit, o cuando tu copia está por detrás de la publicada
+  (traer los turnos nuevos de una sesión ya descargada todavía no está implementado).
 
 Sobre una fila compartida las acciones locales (renombrar, etiquetar, borrar, mover) están
 ocultas: todavía no hay jsonl que tocar.

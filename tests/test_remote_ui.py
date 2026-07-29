@@ -191,8 +191,8 @@ async def test_a_colleagues_session_shows_up_and_hydrates_on_enter(world: Path) 
         assert launched and launched[-1][1] == "ses-de-carlos"
 
 
-async def test_already_local_sessions_are_not_offered_as_shared(world: Path) -> None:
-    """Your own publications must not come back as duplicate cloud rows."""
+async def test_a_published_session_shows_up_in_its_tab(world: Path) -> None:
+    """The confirmation that a publish worked: your session appears in the repo's tab."""
     app = ClaudeBrowserApp()
     async with app.run_test() as pilot:
         screen = await _open_sessions(pilot)
@@ -205,7 +205,126 @@ async def test_already_local_sessions_are_not_offered_as_shared(world: Path) -> 
 
         await _open_remote_tab(pilot, screen)
 
-        assert screen._remote_sessions == []
+        assert [r.session_id for r in screen._remote_sessions] == ["ses-1"]
+        assert screen._rows == [(True, 0)]
+
+
+async def test_a_session_you_already_have_is_marked_not_hidden(world: Path) -> None:
+    """It is listed with ✓ instead of ☁, because the tab is a view of the repo."""
+    from textual.widgets import DataTable
+
+    app = ClaudeBrowserApp()
+    async with app.run_test() as pilot:
+        screen = await _open_sessions(pilot)
+
+        await pilot.press("u")
+        await pilot.pause()
+        await pilot.press("y")
+        for _ in range(20):
+            await pilot.pause()
+        await _open_remote_tab(pilot, screen)
+
+        table = screen.query_one("#sessions", DataTable)
+        rendered = str(table.get_row_at(0)[0])
+        assert "✓" in rendered
+        assert "descargada" in rendered
+
+
+async def test_the_row_says_when_the_published_version_is_newer(world: Path) -> None:
+    """Someone continued the session after you fetched it: the row has to say so."""
+    from textual.widgets import DataTable
+
+    remote = DirectoryRemote(world / "remote")
+    other = world / "otro"
+    jsonl = write_session(other, session_id="ses-compartida", cwd="/home/otro/repo")
+    # Publish a manifest claiming more bytes than the copy that will land locally.
+    remote.publish(
+        RemoteSession(
+            session_id="ses-compartida",
+            published_at="2026-07-28T10:00:00+00:00",
+            published_by="ana@example.com",
+            size_bytes=jsonl.stat().st_size * 4,
+        ),
+        other,
+    )
+
+    app = ClaudeBrowserApp()
+    async with app.run_test() as pilot:
+        screen = await _open_sessions(pilot)
+        await _open_remote_tab(pilot, screen)
+
+        # Not downloaded yet → cloud, no note about the local copy.
+        assert screen._local_state(screen._remote_sessions[0]) == "absent"
+        assert "☁" in str(screen.query_one("#sessions", DataTable).get_row_at(0)[0])
+
+        # Fetch it: the local copy is now shorter than what the manifest advertises.
+        remote.fetch("ses-compartida", screen.project.encoded_path)
+        screen._repaint()
+        await pilot.pause()
+
+        assert screen._local_state(screen._remote_sessions[0]) == "stale"
+        rendered = str(screen.query_one("#sessions", DataTable).get_row_at(0)[0])
+        assert "↻" in rendered
+        assert "versión más reciente" in rendered
+
+
+async def test_the_row_says_when_you_have_unpublished_turns(world: Path) -> None:
+    """You continued a session you published; nobody else can see that work yet."""
+    from textual.widgets import DataTable
+
+    app = ClaudeBrowserApp()
+    async with app.run_test() as pilot:
+        screen = await _open_sessions(pilot)
+        await pilot.press("u")
+        await pilot.pause()
+        await pilot.press("y")
+        for _ in range(20):
+            await pilot.pause()
+        await _open_remote_tab(pilot, screen)
+        assert screen._local_state(screen._remote_sessions[0]) == "current"
+
+        # Simulate resuming it: Claude appends to the same jsonl.
+        jsonl = screen.project.encoded_path / "ses-1.jsonl"
+        with jsonl.open("a", encoding="utf-8") as f:
+            f.write(json.dumps({"type": "assistant", "sessionId": "ses-1"}) + "\n")
+        screen._repaint()
+        await pilot.pause()
+
+        assert screen._local_state(screen._remote_sessions[0]) == "ahead"
+        rendered = str(screen.query_one("#sessions", DataTable).get_row_at(0)[0])
+        assert "↑" in rendered
+        assert "sin publicar" in rendered
+
+
+async def test_enter_on_a_session_you_already_have_resumes_it_locally(world: Path) -> None:
+    """Fetching would refuse to overwrite, so it must resume the copy on disk instead."""
+    launched: list[str | None] = []
+
+    def fake_launch(cwd: Path, session_id: str | None = None, **kwargs: object) -> LaunchOutcome:
+        launched.append(session_id)
+        return LaunchOutcome("window", "fake-emulator")
+
+    app = ClaudeBrowserApp()
+    async with app.run_test() as pilot:
+        screen = await _open_sessions(pilot)
+        await pilot.press("u")
+        await pilot.pause()
+        await pilot.press("y")
+        for _ in range(20):
+            await pilot.pause()
+        await _open_remote_tab(pilot, screen)
+
+        from textual.widgets import DataTable
+
+        table = screen.query_one("#sessions", DataTable)
+        table.move_cursor(row=0)
+        await pilot.pause()
+        with patch("multi_claude.screens.sessions.launch_claude", side_effect=fake_launch):
+            table.action_select_cursor()
+            for _ in range(20):
+                await pilot.pause()
+
+        assert launched == ["ses-1"]
 
 
 async def test_going_back_to_the_local_tab_clears_the_remote_rows(world: Path) -> None:
