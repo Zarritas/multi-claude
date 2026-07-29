@@ -60,7 +60,9 @@ class ClaudeBrowserApp(App[None]):
         """
         env = os.environ.get(REMOTE_DIR_ENV)
         if env:
-            return (RemoteLink(kind="directory", path=env, label="local"),)
+            # No label: RemoteLink derives one from the folder name, which reads better in a
+            # tab and in sentences like "publicada en <label>" than a hardcoded word would.
+            return (RemoteLink(kind="directory", path=env),)
         own = self.project_remotes.get(project_remote_key(project.path))
         if own:
             return own

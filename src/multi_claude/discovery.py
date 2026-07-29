@@ -83,12 +83,17 @@ def encode_cwd(cwd: str) -> str:
 def resolve_real_cwd(project_dir: Path) -> Path | None:
     """Resolve the project's real cwd by reading the `cwd` field of its sessions.
 
-    Iterates files newest first. A session that was *moved/resumed across cwds*
-    (its first event records an old cwd, e.g. the repo root, while it now lives in a
-    subdir's dir) would otherwise flip the whole project's identity, because the
-    naive "newest file's first cwd" is stale. To stay robust we prefer the candidate
-    cwd whose encoding matches ``project_dir.name`` (the dir Claude named after that
-    very cwd); only if none matches do we fall back to the newest file's first cwd.
+    Candidates are read newest first, and picked in this order:
+
+    1. One whose encoding matches ``project_dir.name`` — the dir Claude named after that very
+       cwd. A session *moved or resumed across cwds* records an older cwd in its first event,
+       and would otherwise flip the whole project's identity.
+    2. One that **exists on disk**. A session published by a colleague carries their ``$HOME``,
+       which exists on their machine and not here; hydrating it into your project would
+       otherwise make the newest file's foreign cwd win and mark the project orphaned —
+       unopenable, for a session you just asked for.
+    3. The newest file's cwd, as a last resort.
+
     Returns None if no jsonl yields a cwd.
     """
     jsonl_files = sorted(
@@ -96,16 +101,20 @@ def resolve_real_cwd(project_dir: Path) -> Path | None:
         key=lambda p: p.stat().st_mtime,
         reverse=True,
     )
-    fallback: str | None = None
+    newest: str | None = None
+    existing: str | None = None
     for jsonl in jsonl_files:
         cwd = _first_cwd(jsonl)
         if cwd is None:
             continue
-        if fallback is None:
-            fallback = cwd
+        if newest is None:
+            newest = cwd
         if encode_cwd(cwd) == project_dir.name:
             return Path(cwd)
-    return Path(fallback) if fallback is not None else None
+        if existing is None and Path(cwd).is_dir():
+            existing = cwd
+    chosen = existing or newest
+    return Path(chosen) if chosen is not None else None
 
 
 def _first_cwd(jsonl: Path) -> str | None:

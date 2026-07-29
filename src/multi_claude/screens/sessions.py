@@ -133,6 +133,10 @@ class SessionsScreen(Screen[None]):
         self._marked: set[str] = set()
         self._remote_sessions: list[RemoteSession] = []
         self._remote_links: tuple[RemoteLink, ...] = ()
+        # session_id -> (manifest, etiqueta del remoto donde está). Poblado en segundo plano;
+        # es lo que permite marcar en la pestaña local qué sesiones están compartidas.
+        self._published: dict[str, tuple[RemoteSession, str]] = {}
+        self._own_email: str | None = None
         # None while the local tab is selected; otherwise the index into ``_remote_links``.
         self._active_remote: int | None = None
 
@@ -195,6 +199,8 @@ class SessionsScreen(Screen[None]):
         # Remote rows survive a local rescan; what changes is their ✓/☁ mark, which
         # ``_paint_remote_rows`` derives from disk on every repaint.
         self._repaint()
+        if self._remote_links:
+            self._load_published_index_worker()
 
     def _apply_sort(self) -> None:
         spec = self._claude_app.prefs.sessions_sort
@@ -219,12 +225,18 @@ class SessionsScreen(Screen[None]):
             is_active = session.id in self._active_session_ids
             style = resolve_style(session, manual=manual, rules=rules, is_active=is_active)
             label = session.display_name or session.first_prompt
+            glyph, glyph_style, note = self._shared_mark(session)
             label_cell: Text | str
-            if session.id in self._marked:
-                marked_cell = Text()
-                marked_cell.append("✓ ", style="bold green")
-                marked_cell.append(label, style=style or "")
-                label_cell = marked_cell
+            if session.id in self._marked or glyph:
+                cell = Text()
+                if session.id in self._marked:
+                    cell.append("● ", style="bold green")
+                if glyph:
+                    cell.append(glyph, style=f"bold {glyph_style}")
+                cell.append(label, style=style or "")
+                if note:
+                    cell.append(f"  ({note})", style="dim")
+                label_cell = cell
             else:
                 label_cell = Text(label, style=style) if style else label
             tags_cell = self._format_tags_cell(session.tags)
@@ -589,6 +601,57 @@ class SessionsScreen(Screen[None]):
 
     # --- shared sessions ------------------------------------------------------------
 
+    @work(thread=True, exclusive=True, group="published-index")
+    def _load_published_index_worker(self) -> None:
+        """Ask every linked remote what it has, so local rows can show if they are shared.
+
+        Runs in the background and repaints when done: the local listing must not wait on the
+        network to appear. Failures are silent — not knowing whether a session is published is
+        a missing mark, not an error worth interrupting the user for.
+        """
+        index: dict[str, tuple[RemoteSession, str]] = {}
+        for link in self._remote_links:
+            store = self._claude_app.store_for_link(link)
+            if store is None:
+                continue
+            try:
+                listed = store.list_sessions()
+            except (RemoteError, OSError):
+                continue
+            for remote in listed:
+                # First remote wins when a session is published to several: the mark says
+                # "shared", and naming one of them is enough for that.
+                index.setdefault(remote.session_id, (remote, link.tab_label()))
+        email = resolve_git_user_email(self.project.path)
+        self.app.call_from_thread(self._on_published_index, index, email)
+
+    def _on_published_index(
+        self, index: dict[str, tuple[RemoteSession, str]], email: str | None
+    ) -> None:
+        self._published = index
+        self._own_email = email
+        self._repaint()
+
+    def _shared_mark(self, session: Session) -> tuple[str, str, str]:
+        """Glyph, style and note for a local row, from what the remotes report.
+
+        Same vocabulary as the remote tabs, so ``↻`` means the same thing on both sides.
+        """
+        entry = self._published.get(session.id)
+        if entry is None:
+            return ("", "", "")
+        remote, where = entry
+        if not remote.size_bytes or session.size_bytes == remote.size_bytes:
+            glyph, style, note = "✓ ", "green", f"publicada en {where}"
+        elif remote.size_bytes > session.size_bytes:
+            glyph, style, note = "↻ ", "yellow", f"{where} tiene una versión más reciente"
+        else:
+            glyph, style, note = "↑ ", "magenta", f"con cambios sin publicar en {where}"
+        author = remote.published_by
+        if author and self._own_email and author != self._own_email:
+            note = f"{note} · de {author.split('@')[0]}"
+        return (glyph, style, note)
+
     def _is_local(self, session_id: str) -> bool:
         """Whether this session already exists in this project's dir on disk."""
         return (self.project.encoded_path / f"{session_id}.jsonl").exists()
@@ -736,6 +799,8 @@ class SessionsScreen(Screen[None]):
             self._load_remote_worker(self._active_remote)
         else:
             self._repaint()
+        # What we just uploaded has to show as published on the local tab too.
+        self._load_published_index_worker()
 
     @on(Tabs.TabActivated)
     def _on_tab_activated(self, event: Tabs.TabActivated) -> None:

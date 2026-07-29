@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import stat
+from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import patch
 
@@ -52,15 +53,25 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 async def _open_sessions(pilot: object) -> SessionsScreen:
-    """Navigate ProjectsScreen → SessionsScreen and return it."""
+    """Navigate ProjectsScreen → SessionsScreen and return it.
+
+    Waits for the push to land instead of assuming one frame is enough: the projects scan runs
+    in a worker, so how long it takes depends on how much the fixture put on disk.
+    """
     from textual.widgets import DataTable
 
-    await pilot.pause()  # type: ignore[attr-defined]
-    table = pilot.app.screen.query_one("#projects", DataTable)  # type: ignore[attr-defined]
-    table.action_select_cursor()
-    await pilot.pause()  # type: ignore[attr-defined]
+    for _ in range(20):
+        await pilot.pause()  # type: ignore[attr-defined]
+        if isinstance(pilot.app.screen, SessionsScreen):  # type: ignore[attr-defined]
+            break
+        try:
+            table = pilot.app.screen.query_one("#projects", DataTable)  # type: ignore[attr-defined]
+        except Exception:
+            continue
+        if table.row_count:
+            table.action_select_cursor()
     screen = pilot.app.screen  # type: ignore[attr-defined]
-    assert isinstance(screen, SessionsScreen)
+    assert isinstance(screen, SessionsScreen), f"no se abrió la pantalla: {screen}"
     return screen
 
 
@@ -628,3 +639,145 @@ async def test_editing_colour_rules_from_settings_keeps_them(world: Path) -> Non
         settings._on_rules_edited([ColorRule(when="branch=main", color="bold red")])
         await pilot.pause()
         assert len(settings._collect().color_rules) == 1
+
+
+# --- the local tab knows what is shared ---------------------------------------------
+
+
+async def _wait(pilot: object, turns: int = 25) -> None:
+    for _ in range(turns):
+        await pilot.pause()  # type: ignore[attr-defined]
+
+
+async def _wait_until(pilot: object, condition: Callable[[], bool], turns: int = 60) -> None:
+    """Pump frames until ``condition`` holds.
+
+    Background workers finish whenever they finish; a fixed number of frames passes on an idle
+    machine and fails under load, which is a flaky test rather than a real signal.
+    """
+    for _ in range(turns):
+        await pilot.pause()  # type: ignore[attr-defined]
+        if condition():
+            return
+    raise AssertionError("la condición no se cumplió a tiempo")
+
+
+async def test_local_rows_show_which_sessions_are_published(world: Path) -> None:
+    """After publishing, the local row says so — you should not have to switch tabs."""
+    from textual.widgets import DataTable
+
+    app = ClaudeBrowserApp()
+    async with app.run_test() as pilot:
+        screen = await _open_sessions(pilot)
+        table = screen.query_one("#sessions", DataTable)
+
+        # Nothing published yet: no mark.
+        assert "✓" not in str(table.get_row_at(0)[0])
+
+        await pilot.press("u")
+        await pilot.pause()
+        await pilot.press("y")
+        await _wait_until(pilot, lambda: "ses-1" in screen._published)
+
+        row = str(table.get_row_at(0)[0])
+        assert "✓" in row
+        assert "publicada en" in row
+
+
+async def test_an_unpublished_session_stays_unmarked(world: Path) -> None:
+    """Only one of the two sessions is published; the other must not be marked."""
+    from textual.widgets import DataTable
+
+    app = ClaudeBrowserApp()
+    async with app.run_test() as pilot:
+        screen = await _open_sessions(pilot)
+        await pilot.press("u")  # publishes the cursor row only
+        await pilot.pause()
+        await pilot.press("y")
+        await _wait_until(pilot, lambda: bool(screen._published))
+
+        table = screen.query_one("#sessions", DataTable)
+        marked = [str(table.get_row_at(i)[0]) for i in range(table.row_count)]
+        assert sum("publicada en" in row for row in marked) == 1
+
+
+async def test_a_local_row_says_when_it_has_unpublished_turns(world: Path) -> None:
+    from textual.widgets import DataTable
+
+    app = ClaudeBrowserApp()
+    async with app.run_test() as pilot:
+        screen = await _open_sessions(pilot)
+        await pilot.press("u")
+        await pilot.pause()
+        await pilot.press("y")
+        await _wait_until(pilot, lambda: "ses-1" in screen._published)
+
+        # Continuing the session appends to its jsonl, making it longer than what is published.
+        jsonl = screen.project.encoded_path / "ses-1.jsonl"
+        with jsonl.open("a", encoding="utf-8") as f:
+            f.write(json.dumps({"type": "assistant", "sessionId": "ses-1"}) + "\n")
+        screen._populate()
+        await _wait_until(
+            pilot, lambda: "↑" in str(screen.query_one("#sessions", DataTable).get_row_at(0)[0])
+        )
+
+        row = str(screen.query_one("#sessions", DataTable).get_row_at(0)[0])
+        assert "↑" in row
+        assert "cambios sin publicar" in row
+
+
+async def test_a_local_row_says_when_it_came_from_someone_else(world: Path) -> None:
+    """A session fetched from a colleague should be recognisable among your own."""
+    from textual.widgets import DataTable
+
+    remote = DirectoryRemote(world / "remote")
+    other = world / "otro"
+    write_session(other, session_id="de-ana", cwd="/home/ana/repo", first_prompt="lo de Ana")
+    remote.publish(
+        RemoteSession(
+            session_id="de-ana",
+            published_at="2026-07-28T09:00:00+00:00",
+            published_by="ana@factorlibre.com",
+            size_bytes=(other / "de-ana.jsonl").stat().st_size,
+        ),
+        other,
+    )
+    # Simulate having fetched it: same bytes, so it is "current", but published by Ana.
+    remote.fetch("de-ana", world / "projects" / "-repo")
+
+    app = ClaudeBrowserApp()
+    async with app.run_test() as pilot:
+        screen = await _open_sessions(pilot)
+        await _wait_until(pilot, lambda: "de-ana" in screen._published)
+
+        table = screen.query_one("#sessions", DataTable)
+        rows = [str(table.get_row_at(i)[0]) for i in range(table.row_count)]
+        theirs = [r for r in rows if "de ana" in r]
+        assert theirs, f"ninguna fila atribuida a Ana: {rows}"
+        assert "✓" in theirs[0]
+
+
+async def test_the_published_index_survives_a_remote_that_fails(
+    world: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unreachable remote must cost a missing mark, not a broken listing."""
+    from textual.widgets import DataTable
+
+    from multi_claude.project_remotes import RemoteLink
+
+    monkeypatch.delenv(REMOTE_DIR_ENV, raising=False)
+    app = ClaudeBrowserApp()
+    async with app.run_test() as pilot:
+        screen = await _open_sessions(pilot)
+        app.project_remotes.set_all(
+            screen._remote_key(),
+            [RemoteLink(kind="gitlab", host="http://127.0.0.1:1", repo="g/s", label="caido")],
+        )
+        await screen._refresh_remote_tabs()
+        screen._populate()
+        await _wait(pilot)
+
+        # Sessions still listed, just without any shared mark.
+        table = screen.query_one("#sessions", DataTable)
+        assert table.row_count == 2
+        assert screen._published == {}

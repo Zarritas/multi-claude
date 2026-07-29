@@ -240,6 +240,25 @@ reescritura. El coste es un `stat` por fila.
 `fetch` se niega a sobrescribir, y de todos modos es la misma sesión. Sobre una `↻` avisa
 primero, porque traer los turnos que faltan es el merge que sigue pendiente.
 
+### La misma información en la pestaña local
+
+Saber si una sesión propia está compartida exige preguntar a los remotos, así que se construye
+un índice `session_id -> (manifest, remoto)` en un worker al entrar en el proyecto y tras cada
+publicación. La lista local se pinta sin esperarlo y se repinta cuando llega; si un remoto falla,
+el coste es una marca ausente, no un listado roto.
+
+Las marcas son las mismas (`✓ ↻ ↑`) para que signifiquen lo mismo en los dos lados, y se añade
+la autoría cuando quien publicó no eres tú — que es lo que distingue «mía y compartida» de
+«traída de un compañero».
+
+### Efecto secundario: hidratar no debe dejar el proyecto huérfano
+
+El jsonl de un compañero lleva **su** `$HOME`, que aquí no existe. Al ser el fichero más
+reciente, ganaba el desempate de `resolve_real_cwd` y el proyecto pasaba a resolverse a una ruta
+inexistente: marcado como huérfano y por tanto no abrible — justo la sesión que acababas de
+traer. Ahora la resolución prefiere, por este orden, el candidato cuyo nombre codificado coincide
+con el directorio, luego **uno que exista en disco**, y solo después el más reciente.
+
 ## Concurrencia
 
 En v1 **no hay merge**. El plan es que si dos empleados continúan la misma sesión, la segunda

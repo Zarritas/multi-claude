@@ -217,3 +217,32 @@ def test_git_remote_is_none_when_no_origin_is_configured(tmp_path: Path) -> None
     repo.mkdir()
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
     assert resolve_git_remote(repo) is None
+
+
+def test_a_hydrated_foreign_session_does_not_orphan_the_project(tmp_path: Path) -> None:
+    """Regression: fetching a colleague's session must not make the project unopenable.
+
+    Their jsonl carries their ``$HOME``, which does not exist here. As the newest file it used
+    to win the tiebreak, so the project resolved to a path that is not on disk and was marked
+    orphaned — locking you out of the very session you just fetched.
+    """
+    real = tmp_path / "mi-repo"
+    real.mkdir()
+    project_dir = tmp_path / "projects" / "-mi-repo"
+    write_session(project_dir, session_id="mia", cwd=str(real), mtime=1000.0)
+    write_session(project_dir, session_id="de-ana", cwd="/home/ana/proyectos/repo", mtime=9000.0)
+
+    assert resolve_real_cwd(project_dir) == real
+
+
+def test_a_matching_encoded_name_still_wins_over_mere_existence(tmp_path: Path) -> None:
+    """The dir Claude named after a cwd remains the strongest signal."""
+    named = tmp_path / "named"
+    named.mkdir()
+    other = tmp_path / "other"
+    other.mkdir()
+    project_dir = tmp_path / "projects" / encode_cwd(str(named))
+    write_session(project_dir, session_id="a", cwd=str(other), mtime=9000.0)
+    write_session(project_dir, session_id="b", cwd=str(named), mtime=1000.0)
+
+    assert resolve_real_cwd(project_dir) == named

@@ -230,6 +230,20 @@ carpeta por encima de todo lo demás — útil para probar sin tocar tu configur
 
   El estado se calcula comparando el tamaño de tu `.jsonl` con el que registra el manifest.
   Como el transcript solo crece, cualquier diferencia es contenido real.
+
+- **En la pestaña `Locales`** también se ve qué sesiones están compartidas, con el mismo
+  vocabulario visto desde el otro lado:
+
+  | Marca | Significado |
+  |-------|-------------|
+  | (sin marca) | Solo tuya, no está en ningún repositorio |
+  | `✓` | Publicada y al día. Si la subió otra persona, se indica: `· de ana` |
+  | `↻` | El repositorio tiene una versión más reciente que tu copia |
+  | `↑` | Tienes turnos que no has publicado |
+
+  Se consulta a los repositorios enlazados en segundo plano, así que la lista aparece al
+  instante y las marcas se pintan al llegar. Si un repositorio no responde, te quedas sin
+  esa marca, no sin listado.
 - `u` — publica la fila actual (o todas las marcadas) **al repositorio de la pestaña activa**.
   Desde `Locales` solo funciona si hay exactamente un repositorio enlazado; con varios, abre
   la pestaña del destino (adivinar podría publicar la sesión de un cliente en el repo de otro).
