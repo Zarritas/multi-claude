@@ -267,3 +267,69 @@ def _git_message(stderr: str, url: str) -> str:
     ):
         return f"{url} no existe o no es un repositorio"
     return text or f"git falló contra {url}"
+
+def probe_ssh_access(host: str, user: str = "git", *, timeout: int = PROBE_TIMEOUT) -> str:
+    """Verify SSH access to a git host and return who you are authenticated as.
+
+    ``ssh -T`` is the canonical way GitHub and GitLab expect this to be checked: it needs no
+    repository, and both answer with the account name, which is far more useful than "some repo
+    was not found". Note GitHub exits non-zero on *success* ("does not provide shell access"),
+    so the exit code says nothing and only the greeting does.
+
+    Raises :class:`RemoteError` with an actionable message when the key is not accepted.
+    """
+    env = {
+        **os.environ,
+        "LC_ALL": "C",
+        "LANG": "C",
+        "GIT_TERMINAL_PROMPT": "0",
+    }
+    try:
+        result = subprocess.run(
+            [
+                "ssh",
+                "-T",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "StrictHostKeyChecking=accept-new",
+                f"{user}@{host}",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+            env=env,
+        )
+    except FileNotFoundError as exc:
+        raise RemoteError("ssh no está en el PATH") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise RemoteError(f"{host} no respondió en {timeout}s") from exc
+
+    output = " ".join(f"{result.stdout} {result.stderr}".split())
+    lowered = output.lower()
+
+    if "successfully authenticated" in lowered:  # GitHub
+        who = output.split("Hi ", 1)[1].split("!", 1)[0] if "Hi " in output else "?"
+        return f"autenticado en {host} como {who}"
+    if "welcome to gitlab" in lowered:  # GitLab
+        who = output.split("@", 1)[1].split("!", 1)[0] if "@" in output else "?"
+        return f"autenticado en {host} como {who}"
+    if "permission denied" in lowered:
+        hint = ""
+        if user != "git" and host.endswith(("github.com", "gitlab.com")):
+            hint = f" — en {host} el usuario SSH es «git», no «{user}»"
+        return _raise(f"{host} rechazó tu clave SSH{hint}")
+    if "could not resolve hostname" in lowered:
+        return _raise(f"no se pudo resolver {host}")
+    if "host key verification failed" in lowered:
+        return _raise(f"la clave del host de {host} no está aceptada")
+    if result.returncode == 0:
+        # Some self-hosted setups answer with something else entirely, but a clean exit over
+        # BatchMode means the key was accepted.
+        return f"{host} acepta tu clave SSH"
+    return _raise(output or f"ssh falló contra {host}")
+
+
+def _raise(message: str) -> str:
+    raise RemoteError(message)

@@ -1053,20 +1053,23 @@ def _probe_server(server: RemoteServer, token: str | None) -> tuple[str, bool]:
     the credential was accepted, which is exactly what is being verified.
     """
     from multi_claude.remote import RemoteError, store_from_link
-    from multi_claude.remote_git import PROBE_TIMEOUT, GitSshRemote
+    from multi_claude.remote_git import probe_ssh_access
+
+    if server.uses_ssh:
+        # ``ssh -T`` instead of a made-up repo: it needs no repository and both providers
+        # answer with the account name, which is what the user actually wants confirmed.
+        try:
+            return (f"OK · {probe_ssh_access(server.ssh_host, server.ssh_user)}", True)
+        except RemoteError as exc:
+            return (str(exc), False)
 
     probe = RemoteLink(
-        kind="ssh" if server.uses_ssh else server.kind,
-        host=server.ssh_host if server.uses_ssh else server.api_host,
-        ssh_user=server.ssh_user,
+        kind=server.kind,
+        host=server.api_host,
         repo="multi-claude/_probe",
         branch="main",
     )
-    store: object | None
-    if server.uses_ssh:
-        store = GitSshRemote(probe, timeout=PROBE_TIMEOUT)
-    else:
-        store = store_from_link(probe, token=token)
+    store = store_from_link(probe, token=token)
     check = getattr(store, "check_connection", None)
     if not callable(check):
         return ("Configuración incompleta", False)
@@ -1182,12 +1185,18 @@ class ServerEditModal(ModalScreen["RemoteServer | None"]):
                 )
 
                 with Vertical(id="server-ssh-fields"):
-                    yield Label("Usuario SSH", classes="section")
+                    yield Label(
+                        "No hace falta token: se usan las claves SSH que ya tengas.",
+                        classes="hint",
+                    )
+                    yield Label("Usuario SSH — déjalo en «git»", classes="section")
                     yield Input(
                         value=self._initial.ssh_user, placeholder="git", id="server-ssh-user"
                     )
                     yield Label(
-                        "No hace falta token: se usan las claves SSH que ya tengas.",
+                        "En GitHub y GitLab siempre es «git», no tu usuario: en "
+                        "git@github.com:Zarritas/repo.git, «Zarritas» es parte del "
+                        "repositorio. Cámbialo solo en instalaciones que usen otro.",
                         classes="hint",
                     )
 
@@ -1349,6 +1358,8 @@ class ServersModal(ModalScreen["list[RemoteServer] | None"]):
     def __init__(self, servers: list[RemoteServer]) -> None:
         super().__init__()
         self._servers = list(servers)
+        # Index being edited, so saving replaces it even if the name changed.
+        self._editing: int | None = None
 
     def compose(self) -> ComposeResult:
         from textual.containers import Horizontal
@@ -1360,13 +1371,20 @@ class ServersModal(ModalScreen["list[RemoteServer] | None"]):
                 "a un proyecto.",
                 classes="hint",
             )
-            yield Label("a añade · e edita · Supr quita · Enter guarda", classes="hint")
+            yield Label(
+                "a añade · e edita · Supr quita · Enter guarda · Esc cancela", classes="hint"
+            )
             yield Label("", id="servers-empty", classes="hint")
             with RadioSet(id="servers"):
                 yield from self._buttons()
-            with Horizontal():
+            # Two rows: five buttons on one line overflow 80 columns and the last one — Guardar,
+            # of all things — was the one that fell off.
+            with Horizontal(id="server-actions"):
+                yield Button("Añadir", id="add", variant="default")
+                yield Button("Editar", id="edit", variant="default")
+                yield Button("Quitar", id="remove", variant="default")
+            with Horizontal(id="server-close"):
                 yield Button("Cancelar", id="cancel", variant="default")
-                yield Button("Añadir…", id="add", variant="default")
                 yield Button("Guardar", id="save", variant="primary")
 
     def _buttons(self) -> ComposeResult:
@@ -1408,19 +1426,31 @@ class ServersModal(ModalScreen["list[RemoteServer] | None"]):
     def _add_pressed(self) -> None:
         self.action_add()
 
+    @on(Button.Pressed, "#edit")
+    def _edit_pressed(self) -> None:
+        self.action_edit()
+
+    @on(Button.Pressed, "#remove")
+    def _remove_pressed(self) -> None:
+        self.action_remove()
+
     def action_cancel(self) -> None:
         self.dismiss(None)
 
     def action_add(self) -> None:
+        self._editing = None
         self.app.push_screen(ServerEditModal(RemoteServer(name="")), self._on_saved)
 
     def action_edit(self) -> None:
         index = self._selected_index()
         if index is None:
+            self.notify("Selecciona un servidor para editarlo", severity="warning")
             return
         from multi_claude.remote import TokenStore
 
         current = self._servers[index]
+        # Remembered so a rename replaces this entry instead of adding a second one.
+        self._editing = index
         self.app.push_screen(
             ServerEditModal(current, has_token=TokenStore().has_token(current.name)),
             self._on_saved,
@@ -1429,6 +1459,7 @@ class ServersModal(ModalScreen["list[RemoteServer] | None"]):
     def action_remove(self) -> None:
         index = self._selected_index()
         if index is None:
+            self.notify("Selecciona un servidor para quitarlo", severity="warning")
             return
         del self._servers[index]
         self.run_worker(self._rebuild(), exclusive=False)
@@ -1436,13 +1467,31 @@ class ServersModal(ModalScreen["list[RemoteServer] | None"]):
     def _on_saved(self, server: RemoteServer | None) -> None:
         if server is None or not server.name:
             return
-        for index, current in enumerate(self._servers):
-            if current.name == server.name:
-                self._servers[index] = server
-                break
+        editing, self._editing = self._editing, None
+        if editing is not None and 0 <= editing < len(self._servers):
+            previous = self._servers[editing]
+            self._servers[editing] = server
+            if previous.name != server.name:
+                self._carry_token(previous.name, server.name)
         else:
-            self._servers.append(server)
+            for index, current in enumerate(self._servers):
+                if current.name == server.name:
+                    self._servers[index] = server
+                    break
+            else:
+                self._servers.append(server)
         self.run_worker(self._rebuild(), exclusive=False)
+
+    @staticmethod
+    def _carry_token(old_name: str, new_name: str) -> None:
+        """Move a stored token when a server is renamed, so links keep authenticating."""
+        from multi_claude.remote import TokenStore
+
+        store = TokenStore()
+        token = store.get(old_name)
+        if token:
+            store.set(token, new_name)
+            store.delete(old_name)
 
     def _selected_index(self) -> int | None:
         pressed = self.query_one("#servers", RadioSet).pressed_button

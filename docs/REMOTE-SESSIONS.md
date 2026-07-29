@@ -230,6 +230,26 @@ Los enlaces referencian el servidor **por nombre**, así que corregir una URL o 
 arregla todos los repos que apuntan a él. Un enlace que nombra un servidor inexistente resuelve a
 `kind="none"`: inerte y visiblemente inerte, mejor que publicar en otro sitio sin avisar.
 
+### Comprobar acceso SSH: `ssh -T`, no un repo inventado
+
+La primera versión probaba un servidor pidiéndole un repositorio inexistente y trataba el 404
+como éxito. Funciona, pero el mensaje de error acababa mostrando la URL fabricada
+(`…:multi-claude/_probe.git`), que no es de nadie y confunde: un usuario razonablemente asumió
+que la herramienta estaba buscando el repo equivocado.
+
+`ssh -T` es lo que GitHub y GitLab esperan para esto: no necesita repositorio y ambos responden
+con el nombre de la cuenta, que es lo que uno quiere confirmar de verdad. Dos detalles:
+
+- **GitHub sale con código ≠ 0 al autenticar correctamente** («does not provide shell access»),
+  así que el código de salida no dice nada y solo sirve el saludo.
+- El error de clave rechazada **nombra la equivocación probable**: el usuario SSH es siempre
+  `git`, y confundirlo con la cuenta (`Zarritas@github.com`) es el fallo natural, porque en
+  `git@github.com:Zarritas/repo.git` la cuenta aparece en la parte del repositorio.
+
+Verificado contra github.com real: `git@github.com` responde
+`autenticado en github.com como Zarritas`, y `Zarritas@github.com` responde
+`github.com rechazó tu clave SSH — en github.com el usuario SSH es «git», no «Zarritas»`.
+
 ### Nada que toque la red corre en el hilo de la UI
 
 Invariante, y aprendida por las malas: la prueba de conexión del editor de servidor era

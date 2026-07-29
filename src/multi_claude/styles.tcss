@@ -73,3 +73,10 @@ ModalScreen > Vertical > Label.title {
 ModalScreen > Vertical > Horizontal {
     dock: bottom;
 }
+
+/* ServersModal has two button rows: list actions, then accept/dismiss. Only the closing row
+ * docks to the bottom, so the actions stay next to the list they act on.
+ */
+ServersModal > Vertical > #server-actions {
+    dock: none;
+}

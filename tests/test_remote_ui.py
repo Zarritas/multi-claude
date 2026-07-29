@@ -1022,3 +1022,66 @@ async def test_testing_a_server_does_not_freeze_the_ui(
             if "tardío" in str(modal.query_one("#server-status", Label).content):
                 break
         assert "tardío" in str(modal.query_one("#server-status", Label).content)
+
+
+async def test_a_server_can_be_edited_and_renamed(world: Path) -> None:
+    """Editing was only on a keybinding, and a rename added a second server instead."""
+    from textual.widgets import Button, Input, RadioButton
+
+    from multi_claude.modals import ServerEditModal, ServersModal
+    from multi_claude.project_remotes import RemoteServer
+    from multi_claude.remote import TokenStore
+
+    app = ClaudeBrowserApp()
+    async with app.run_test(size=(100, 34)) as pilot:
+        await pilot.pause()
+        TokenStore().set("glpat-viejo", "Antiguo")
+        servers = ServersModal([RemoteServer(name="Antiguo", host="https://git.viejo.com")])
+        app.push_screen(servers)
+        for _ in range(6):
+            await pilot.pause()
+
+        # There is a visible button, not just a keybinding.
+        servers.query_one("#server-0", RadioButton).value = True
+        await pilot.pause()
+        servers.query_one("#edit", Button).press()
+        for _ in range(8):
+            await pilot.pause()
+
+        editor = app.screen
+        assert isinstance(editor, ServerEditModal)
+        # It opened with the existing values, not empty.
+        assert editor.query_one("#server-name", Input).value == "Antiguo"
+        assert editor.query_one("#server-host", Input).value == "https://git.viejo.com"
+
+        editor.query_one("#server-name", Input).value = "Nuevo nombre"
+        await pilot.pause()
+        editor.query_one("#save", Button).press()
+        for _ in range(10):
+            await pilot.pause()
+
+        # Replaced, not duplicated.
+        assert [s.name for s in servers._servers] == ["Nuevo nombre"]
+        # And the token followed the rename, so existing links keep working.
+        assert TokenStore().get("Nuevo nombre") == "glpat-viejo"
+        assert TokenStore().get("Antiguo") is None
+
+
+async def test_editing_without_a_selection_says_so(world: Path) -> None:
+    from textual.widgets import Button
+
+    from multi_claude.modals import ServersModal
+
+    app = ClaudeBrowserApp()
+    async with app.run_test(size=(100, 34)) as pilot:
+        await pilot.pause()
+        servers = ServersModal([])
+        app.push_screen(servers)
+        for _ in range(6):
+            await pilot.pause()
+
+        servers.query_one("#edit", Button).press()
+        await pilot.pause()
+        # Nothing to edit and nothing crashed.
+        assert isinstance(app.screen, ServersModal)
+        assert servers._servers == []

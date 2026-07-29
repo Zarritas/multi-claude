@@ -71,7 +71,7 @@ CASES: dict[str, tuple[Callable[[], ModalScreen], list[str], list[str]]] = {
                 RemoteServer(name="GitHub", kind="github"),
             ]
         ),
-        ["Servidores de sesiones", "Añadir…", "Guardar", "Cancelar"],
+        ["Servidores de sesiones", "Añadir", "Editar", "Quitar", "Guardar", "Cancelar"],
         ["FactorLibre", "GitHub"],
     ),
     "repo-link": (

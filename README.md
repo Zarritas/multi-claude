@@ -206,6 +206,13 @@ los repositorios que apuntan a ese servidor.
 | **Token de acceso** | un token por servidor | Vía API REST. Un token por persona y por host |
 | **SSH** | nada nuevo | Usa las claves que ya tienes. Sin tokens que repartir, y **git resuelve las publicaciones simultáneas** en vez de que la última pise a la anterior |
 
+> **El usuario SSH es siempre `git`**, no tu usuario de GitHub/GitLab. En
+> `git@github.com:Zarritas/multi-claude.git`, `Zarritas` es parte del *repositorio*. Solo hay que
+> cambiarlo en instalaciones self-hosted que usen otro usuario.
+>
+> `Ctrl+T` sobre un servidor SSH ejecuta `ssh -T` y te dice como quién te autentica
+> (`autenticado en github.com como Zarritas`), sin necesitar ningún repositorio.
+
 | Destino | Qué necesita |
 |---------|--------------|
 | Carpeta compartida | una ruta (montaje de red, Syncthing…). Los permisos son los del sistema de ficheros |

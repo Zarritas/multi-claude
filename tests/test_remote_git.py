@@ -265,3 +265,109 @@ def test_probing_reports_a_readable_failure_for_an_unreachable_host() -> None:
     message, ok = _probe_server(server, None)
     assert not ok
     assert "no-existe.invalid" in message or "no se pudo resolver" in message
+
+
+# --- ssh -T, the canonical access check ----------------------------------------------
+
+
+def _fake_ssh(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    stdout: str = "",
+    stderr: str = "",
+    code: int = 0,
+) -> None:
+    """Stand in for the ssh binary with a canned answer."""
+    import subprocess as sp
+
+    class Result:
+        returncode = code
+
+        def __init__(self) -> None:
+            self.stdout = stdout
+            self.stderr = stderr
+
+    monkeypatch.setattr(sp, "run", lambda *a, **k: Result())
+
+
+def test_github_greeting_is_read_as_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    """GitHub exits non-zero on success, so only the greeting can be trusted."""
+    from multi_claude.remote_git import probe_ssh_access
+
+    _fake_ssh(
+        monkeypatch,
+        stderr="Hi Zarritas! You've successfully authenticated, but GitHub does not "
+        "provide shell access.",
+        code=1,
+    )
+    assert probe_ssh_access("github.com") == "autenticado en github.com como Zarritas"
+
+
+def test_gitlab_greeting_is_read_as_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    from multi_claude.remote_git import probe_ssh_access
+
+    _fake_ssh(monkeypatch, stderr="Welcome to GitLab, @jesus.lorenzo!", code=0)
+    assert probe_ssh_access("git.factorlibre.com") == (
+        "autenticado en git.factorlibre.com como jesus.lorenzo"
+    )
+
+
+def test_a_wrong_ssh_user_is_named_in_the_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The mistake to make here is using your account name instead of "git"."""
+    from multi_claude.remote import RemoteError
+    from multi_claude.remote_git import probe_ssh_access
+
+    _fake_ssh(monkeypatch, stderr="git@github.com: Permission denied (publickey).", code=255)
+    with pytest.raises(RemoteError) as excinfo:
+        probe_ssh_access("github.com", "Zarritas")
+
+    message = str(excinfo.value)
+    assert "rechazó tu clave" in message
+    assert "es «git»" in message and "«Zarritas»" in message
+
+
+def test_a_rejected_key_with_the_right_user_does_not_blame_the_user(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from multi_claude.remote import RemoteError
+    from multi_claude.remote_git import probe_ssh_access
+
+    _fake_ssh(monkeypatch, stderr="Permission denied (publickey).", code=255)
+    with pytest.raises(RemoteError) as excinfo:
+        probe_ssh_access("github.com", "git")
+    assert "es «git»" not in str(excinfo.value)
+
+
+def test_an_unresolvable_host_says_so(monkeypatch: pytest.MonkeyPatch) -> None:
+    from multi_claude.remote import RemoteError
+    from multi_claude.remote_git import probe_ssh_access
+
+    _fake_ssh(monkeypatch, stderr="ssh: Could not resolve hostname nope.invalid", code=255)
+    with pytest.raises(RemoteError, match="no se pudo resolver"):
+        probe_ssh_access("nope.invalid")
+
+
+def test_the_probe_needs_no_repository(monkeypatch: pytest.MonkeyPatch) -> None:
+    """It used to invent one, whose name then showed up confusingly in the error."""
+    import subprocess as sp
+
+    from multi_claude.remote_git import probe_ssh_access
+
+    seen: list[list[str]] = []
+
+    class Result:
+        returncode = 0
+        stdout = "Welcome to GitLab, @x!"
+        stderr = ""
+
+    def spy(argv: list[str], **kwargs: object) -> Result:
+        seen.append(argv)
+        return Result()
+
+    monkeypatch.setattr(sp, "run", spy)
+    probe_ssh_access("git.empresa.com")
+
+    (argv,) = seen
+    assert argv[:2] == ["ssh", "-T"]
+    assert argv[-1] == "git@git.empresa.com"
+    assert not any("_probe" in part for part in argv)
