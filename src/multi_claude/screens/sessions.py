@@ -645,7 +645,10 @@ class SessionsScreen(Screen[None]):
         else:
             glyph, style, note = "↑ ", "magenta", f"con cambios sin publicar en {where}"
         author = remote.published_by
-        if author and self._own_email and author != self._own_email:
+        # Sin identidad de git local no se puede afirmar que la sesión sea tuya,
+        # así que se atribuye igual: en una máquina sin `user.email` la columna
+        # se quedaba muda justo con lo que hace útil un repositorio de equipo.
+        if author and author != self._own_email:
             note = f"{note} · de {author.split('@')[0]}"
         return (glyph, style, note)
 

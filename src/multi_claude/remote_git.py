@@ -233,6 +233,30 @@ class GitSshRemote:
                 self._git("rm", "-r", "--quiet", "--", str(target), cwd=self.work)
         self._commit_and_push(session_id, message=_DELETE_MESSAGE)
 
+    def _identity(self) -> tuple[str, ...]:
+        """``-c user.…`` de respaldo, solo si git no tiene ninguna configurada.
+
+        Publicar no puede exigir que la máquina tenga identidad de git: en un
+        contenedor, un runner de CI o una instalación recién hecha no la hay, y
+        el commit falla con «Author identity unknown», que no dice nada sobre
+        sesiones ni sobre qué hacer. Quién publicó ya viaja en el manifest
+        (``published_by``); el autor del commit es solo contabilidad del
+        repositorio.
+
+        Si el usuario sí tiene identidad, se respeta la suya.
+        """
+        try:
+            if self._git("config", "user.email", cwd=self.work).strip():
+                return ()
+        except RemoteError:
+            pass  # `git config` sale con código 1 cuando la clave no existe
+        return (
+            "-c",
+            "user.name=multi-claude",
+            "-c",
+            "user.email=multi-claude@localhost",
+        )
+
     def _commit_and_push(self, session_id: str, *, message: str = _COMMIT_MESSAGE) -> None:
         """Commit the staged session and push, rebasing if someone else got there first.
 
@@ -245,7 +269,14 @@ class GitSshRemote:
         status = self._git("status", "--porcelain", cwd=self.work)
         if not status.strip():
             return  # already published, byte for byte
-        self._git("commit", "--quiet", "-m", f"{message} {session_id}", cwd=self.work)
+        self._git(
+            *self._identity(),
+            "commit",
+            "--quiet",
+            "-m",
+            f"{message} {session_id}",
+            cwd=self.work,
+        )
 
         last: RemoteError | None = None
         for attempt in range(_PUSH_ATTEMPTS):
