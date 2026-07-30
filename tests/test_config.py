@@ -221,3 +221,79 @@ def test_save_then_load_round_trip_with_claude_args(tmp_path: Path) -> None:
     cfg = Config(default_mode="tab", claude_args=["--dangerously-skip-permissions"])
     save_config(cfg, p)
     assert load_config(p) == cfg
+
+
+def test_remote_settings_round_trip(tmp_path: Path) -> None:
+    path = tmp_path / "config.json"
+    save_config(Config(remote_kind="directory", remote_path="/srv/sesiones"), path)
+    loaded = load_config(path)
+    assert loaded.remote_kind == "directory"
+    assert loaded.remote_path == "/srv/sesiones"
+
+
+def test_remote_sharing_is_off_by_default() -> None:
+    assert Config().remote_kind == "none"
+    assert Config().remote_path == ""
+
+
+@pytest.mark.parametrize("bad", ["bitbucket", "Directory", "", None, 3, {"a": 1}])
+def test_unknown_remote_kind_falls_back_to_off(tmp_path: Path, bad: object) -> None:
+    """An unrecognised backend must disable sharing, never guess one."""
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({"remote_kind": bad}), encoding="utf-8")
+    assert load_config(path).remote_kind == "none"
+
+
+@pytest.mark.parametrize("kind", ["directory", "gitlab", "github"])
+def test_every_supported_backend_survives_a_round_trip(tmp_path: Path, kind: str) -> None:
+    path = tmp_path / "config.json"
+    path.write_text(
+        json.dumps(
+            {
+                "remote_kind": kind,
+                "remote_host": "https://git.example.com",
+                "remote_repo": "grupo/sesiones",
+                "remote_branch": "trunk",
+            }
+        ),
+        encoding="utf-8",
+    )
+    loaded = load_config(path)
+    assert loaded.remote_kind == kind
+    assert loaded.remote_host == "https://git.example.com"
+    assert loaded.remote_repo == "grupo/sesiones"
+    assert loaded.remote_branch == "trunk"
+
+
+def test_branch_defaults_to_main_when_absent_or_blank(tmp_path: Path) -> None:
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({"remote_kind": "gitlab", "remote_branch": ""}), encoding="utf-8")
+    assert load_config(path).remote_branch == "main"
+
+
+@pytest.mark.parametrize(
+    ("kind", "host", "expected"),
+    [
+        ("gitlab", "", "https://gitlab.com"),
+        ("github", "", "https://api.github.com"),
+        ("gitlab", "https://git.empresa.com", "https://git.empresa.com"),
+        ("directory", "", ""),
+    ],
+)
+def test_api_host_falls_back_to_the_provider_default(kind: str, host: str, expected: str) -> None:
+    """So a user on gitlab.com or github.com never has to type a URL."""
+    assert Config(remote_kind=kind, remote_host=host).remote_api_host() == expected  # type: ignore[arg-type]
+
+
+def test_remote_summary_describes_each_backend() -> None:
+    assert Config().remote_summary() == "desactivado"
+    assert "carpeta" in Config(remote_kind="directory", remote_path="/srv/s").remote_summary()
+    summary = Config(remote_kind="gitlab", remote_repo="grupo/sesiones").remote_summary()
+    assert "gitlab" in summary and "gitlab.com/grupo/sesiones" in summary
+    assert "(sin repo)" in Config(remote_kind="github").remote_summary()
+
+
+def test_non_string_remote_path_is_ignored(tmp_path: Path) -> None:
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({"remote_kind": "directory", "remote_path": 42}), encoding="utf-8")
+    assert load_config(path).remote_path == ""

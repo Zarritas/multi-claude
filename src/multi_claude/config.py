@@ -7,6 +7,9 @@ Stored settings:
 - ``projects_sort`` / ``sessions_sort`` — column + direction for each screen.
 - ``preview_visible`` — whether the session preview panel is shown.
 - ``group_worktrees`` — whether to collapse multiple worktrees of the same repo.
+- ``remote_*`` — the **global** remote for shared sessions, used when a project has no link
+  of its own (see :mod:`multi_claude.project_remotes`). The auth token is deliberately not
+  here: see :class:`multi_claude.remote.TokenStore`.
 """
 
 from __future__ import annotations
@@ -15,11 +18,12 @@ import json
 import os
 import shlex
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Literal
 
 from multi_claude.colors import ColorRule
+from multi_claude.project_remotes import RemoteLink, RemoteServer
 
 # Where the session lands. ``split``/``tab`` reuse the current window, ``window``
 # opens a new one, ``suspend`` runs inline after suspending the TUI, ``auto``
@@ -44,6 +48,12 @@ RESERVED_CLAUDE_FLAGS: frozenset[str] = frozenset(
         "--from-pr",
     }
 )
+
+# Where shared sessions live. ``none`` disables the feature entirely; ``directory`` points at
+# a path (a shared mount, a synced folder); ``gitlab``/``github`` push to a repo over its REST
+# API. The auth token is deliberately *not* part of this config — see ``remote.TokenStore``.
+RemoteKind = Literal["none", "directory", "gitlab", "github"]
+VALID_REMOTE_KINDS: tuple[RemoteKind, ...] = ("none", "directory", "gitlab", "github")
 
 ProjectSortKey = Literal["name", "path", "session_count", "last_activity"]
 VALID_PROJECT_SORT: tuple[ProjectSortKey, ...] = (
@@ -85,6 +95,15 @@ class Config:
     preview_visible: bool = True
     group_worktrees: bool = True
     color_rules: list[ColorRule] = field(default_factory=list)
+    # Preconfigured hosts, so a repo only needs its own name and branch. Their tokens live
+    # in remote-tokens.json, never here.
+    remote_servers: list[RemoteServer] = field(default_factory=list)
+    remote_kind: RemoteKind = "none"
+    remote_path: str = ""
+    remote_host: str = ""
+    remote_repo: str = ""
+    remote_branch: str = "main"
+    remote_server: str = ""
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -95,7 +114,50 @@ class Config:
             "preview_visible": self.preview_visible,
             "group_worktrees": self.group_worktrees,
             "color_rules": [r.to_dict() for r in self.color_rules],
+            "remote_kind": self.remote_kind,
+            "remote_path": self.remote_path,
+            "remote_host": self.remote_host,
+            "remote_repo": self.remote_repo,
+            "remote_branch": self.remote_branch,
+            "remote_server": self.remote_server,
+            "remote_servers": [s.to_dict() for s in self.remote_servers],
         }
+
+    def remote_link(self) -> RemoteLink:
+        """The global remote as a :class:`RemoteLink`, resolved against the servers."""
+        return self._raw_remote_link().resolved(self.remote_servers)
+
+    def _raw_remote_link(self) -> RemoteLink:
+        """The stored global link, before a server fills in its kind and host."""
+        return RemoteLink(
+            kind=self.remote_kind,
+            path=self.remote_path,
+            host=self.remote_host,
+            repo=self.remote_repo,
+            branch=self.remote_branch,
+            server=self.remote_server,
+        )
+
+    def with_remote_link(self, link: RemoteLink) -> Config:
+        """This config with its ``remote_*`` fields taken from ``link``."""
+        clean = link.normalised()
+        return replace(
+            self,
+            remote_kind=_coerce_remote_kind(clean.kind),
+            remote_path=clean.path,
+            remote_host=clean.host,
+            remote_repo=clean.repo,
+            remote_branch=clean.branch,
+            remote_server=clean.server,
+        )
+
+    def remote_api_host(self) -> str:
+        """The API base URL to use: the configured one, or the provider's default."""
+        return self.remote_link().api_host
+
+    def remote_summary(self) -> str:
+        """One-line description of the configured remote, for the settings screen."""
+        return self.remote_link().summary()
 
 
 _OPPOSITE: dict[LaunchMode, LaunchMode] = {
@@ -150,6 +212,13 @@ def load_config(path: Path | None = None) -> Config:
         preview_visible=bool(raw.get("preview_visible", True)),
         group_worktrees=bool(raw.get("group_worktrees", True)),
         color_rules=_coerce_color_rules(raw.get("color_rules")),
+        remote_kind=_coerce_remote_kind(raw.get("remote_kind")),
+        remote_path=_coerce_str(raw.get("remote_path")),
+        remote_host=_coerce_str(raw.get("remote_host")),
+        remote_repo=_coerce_str(raw.get("remote_repo")),
+        remote_branch=_coerce_str(raw.get("remote_branch")) or "main",
+        remote_server=_coerce_str(raw.get("remote_server")),
+        remote_servers=_coerce_servers(raw.get("remote_servers")),
     )
 
 
@@ -199,6 +268,32 @@ def _coerce_claude_args(value: object) -> list[str]:
         return []
     args = [item for item in value if isinstance(item, str)]
     return [a for a in args if a.split("=", 1)[0] not in RESERVED_CLAUDE_FLAGS]
+
+
+def _coerce_remote_kind(value: object) -> RemoteKind:
+    for kind in VALID_REMOTE_KINDS:
+        if value == kind:
+            return kind
+    return "none"
+
+
+def _coerce_servers(value: object) -> list[RemoteServer]:
+    if not isinstance(value, list):
+        return []
+    servers = [RemoteServer.from_dict(item) for item in value]
+    # Names identify a server, so a duplicate would make links ambiguous: first one wins.
+    seen: set[str] = set()
+    unique: list[RemoteServer] = []
+    for server in servers:
+        if server is None or server.name in seen:
+            continue
+        seen.add(server.name)
+        unique.append(server)
+    return unique
+
+
+def _coerce_str(value: object) -> str:
+    return value if isinstance(value, str) else ""
 
 
 def _coerce_color_rules(value: object) -> list[ColorRule]:

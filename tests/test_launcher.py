@@ -627,11 +627,14 @@ def test_launch_claude_window_mode_uses_iterm(monkeypatch: pytest.MonkeyPatch) -
     assert popen_calls == [
         [
             "osascript",
-            "-e", 'tell application "iTerm"',
-            "-e", "  create window with default profile",
+            "-e",
+            'tell application "iTerm"',
+            "-e",
+            "  create window with default profile",
             "-e",
             f'  tell current session of current window to write text "{as_escaped}"',
-            "-e", "end tell",
+            "-e",
+            "end tell",
         ]
     ]
 
@@ -664,7 +667,7 @@ def test_iterm_applescript_escapes_embedded_quotes(monkeypatch: pytest.MonkeyPat
     write_text_line = next(line for line in argv if "write text" in line)
     # AppleScript-level escapes — backslash escaped as \\, double quote as \"
     assert '\\"hi\\"' in write_text_line
-    assert '\\\\n' in write_text_line
+    assert "\\\\n" in write_text_line
 
 
 # --------------------------------------------------------------------------- #
@@ -753,9 +756,7 @@ def test_tab_mode_uses_konsole_new_tab(monkeypatch: pytest.MonkeyPatch) -> None:
     ):
         launch_claude(Path("/work/k"), None, mode="tab")
 
-    assert popen_calls == [
-        ["konsole", "--new-tab", "--workdir", _p("/work/k"), "-e", "claude"]
-    ]
+    assert popen_calls == [["konsole", "--new-tab", "--workdir", _p("/work/k"), "-e", "claude"]]
 
 
 def test_tab_mode_kitty_without_remote_control_falls_back_to_window(

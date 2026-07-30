@@ -11,9 +11,12 @@ from typing import TYPE_CHECKING, Protocol
 if TYPE_CHECKING:
     from multi_claude.colors import SessionColorsStore
     from multi_claude.config import Config
+    from multi_claude.discovery import Project
     from multi_claude.names import NamesStore
     from multi_claude.project_folders import ProjectFoldersStore
     from multi_claude.project_names import ProjectNamesStore
+    from multi_claude.project_remotes import ProjectRemotesStore, RemoteLink
+    from multi_claude.remote import RemoteStore
     from multi_claude.tags import TagsStore
 
 
@@ -24,5 +27,10 @@ class AppProtocol(Protocol):
     session_colors: SessionColorsStore
     project_folders: ProjectFoldersStore
     tags: TagsStore
+    project_remotes: ProjectRemotesStore
 
     def update_prefs(self, prefs: Config) -> None: ...
+
+    def remote_links_for(self, project: Project) -> tuple[RemoteLink, ...]: ...
+
+    def store_for_link(self, link: RemoteLink) -> RemoteStore | None: ...

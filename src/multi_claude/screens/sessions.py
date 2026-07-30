@@ -12,7 +12,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal
 from textual.screen import Screen
-from textual.widgets import DataTable, Footer, Header, Input
+from textual.widgets import DataTable, Footer, Header, Input, Tab, Tabs
 
 from multi_claude.app_protocol import AppProtocol
 from multi_claude.clipboard import ClipboardError, copy_to_clipboard
@@ -25,7 +25,14 @@ from multi_claude.deletion import (
     list_active_sessions,
     move_session,
 )
-from multi_claude.discovery import Project, scan_projects
+from multi_claude.discovery import (
+    Project,
+    project_remote_key,
+    resolve_git_head,
+    resolve_git_remote,
+    resolve_git_user_email,
+    scan_projects,
+)
 from multi_claude.filtering import FilterQuery, matches_fuzzy, parse_query
 from multi_claude.focus import find_live_session, focus_terminal
 from multi_claude.formatting import format_relative_time, format_size
@@ -37,13 +44,39 @@ from multi_claude.modals import (
     ConfirmDeleteModal,
     FilePathModal,
     MoveSessionModal,
+    ProjectRemotesModal,
+    PublishModal,
     RenameModal,
     SettingsModal,
     TagEditorModal,
 )
+from multi_claude.project_remotes import RemoteLink
+from multi_claude.remote import (
+    RemoteError,
+    RemoteSession,
+    collect_session_files,
+    session_to_remote,
+)
 from multi_claude.session import Session, scan_sessions
 from multi_claude.transfer import export_sessions, safe_filename
 from multi_claude.widgets.preview import SessionPreview
+
+# How many file paths the publish confirmation lists before collapsing the rest into a
+# count. Enough to spot a stray tool-results dump, short enough to stay on screen.
+_PUBLISH_PREVIEW_LIMIT = 12
+
+# How a published session's row is marked, by how the local copy compares to it. The note is
+# spelled out because a glyph alone does not say which side is behind.
+_STATE_MARKS: dict[str, tuple[str, str, str]] = {
+    "absent": ("☁ ", "bold blue", ""),
+    "current": ("✓ ", "bold green", "(descargada)"),
+    "stale": ("↻ ", "bold yellow", "(descargada · hay versión más reciente)"),
+    "ahead": ("↑ ", "bold magenta", "(descargada · tienes cambios sin publicar)"),
+}
+
+# Tab ids. The local listing is always tab 0; each linked sessions repo follows in link order.
+_LOCAL_TAB_ID = "tab-local"
+_REMOTE_TAB_PREFIX = "tab-remote-"
 
 _SORT_KEYS_BY_COLUMN: tuple[str, ...] = (
     "prompt",
@@ -68,6 +101,8 @@ class SessionsScreen(Screen[None]):
         Binding("space", "toggle_mark", "Marcar"),
         Binding("m", "move", "Mover"),
         Binding("x", "export", "Exportar"),
+        Binding("u", "publish", "Publicar"),
+        Binding("L", "link_remotes", "Repos sesiones"),
         Binding("d", "delete", "Delete"),
         Binding("D", "cleanup", "Limpieza"),
         Binding("y", "yank_id", "Copiar id"),
@@ -91,9 +126,20 @@ class SessionsScreen(Screen[None]):
         super().__init__()
         self.project = project
         self._sessions: list[Session] = []
-        self._visible_indices: list[int] = []
+        # Which model each painted row came from: (is_remote, index into the matching
+        # list). Remote rows are only ever appended, so a local action can never land on
+        # one by accident — ``_selected_session`` returns None for them.
+        self._rows: list[tuple[bool, int]] = []
         self._active_session_ids: set[str] = set()
         self._marked: set[str] = set()
+        self._remote_sessions: list[RemoteSession] = []
+        self._remote_links: tuple[RemoteLink, ...] = ()
+        # session_id -> (manifest, etiqueta del remoto donde está). Poblado en segundo plano;
+        # es lo que permite marcar en la pestaña local qué sesiones están compartidas.
+        self._published: dict[str, tuple[RemoteSession, str]] = {}
+        self._own_email: str | None = None
+        # None while the local tab is selected; otherwise the index into ``_remote_links``.
+        self._active_remote: int | None = None
 
     @property
     def _claude_app(self) -> AppProtocol:
@@ -101,6 +147,17 @@ class SessionsScreen(Screen[None]):
 
     def compose(self) -> ComposeResult:
         yield Header()
+        # Built here rather than after mount: the tab bar is part of the initial layout, and
+        # populating it from a worker made the screen briefly incomplete.
+        self._remote_links = self._claude_app.remote_links_for(self.project)
+        yield Tabs(
+            Tab("Locales", id=_LOCAL_TAB_ID),
+            *(
+                Tab(f"☁ {link.tab_label()}", id=f"{_REMOTE_TAB_PREFIX}{index}")
+                for index, link in enumerate(self._remote_links)
+            ),
+            id="session-tabs",
+        )
         with Horizontal(id="sessions-body"):
             yield DataTable(id="sessions", cursor_type="row", zebra_stripes=True)
             yield SessionPreview(id="preview")
@@ -114,6 +171,7 @@ class SessionsScreen(Screen[None]):
         table = self.query_one("#sessions", DataTable)
         table.add_columns("Prompt", "Branch", "Tags", "Msgs", "Tamaño", "Última")
         self._apply_preview_visibility()
+        self.query_one("#session-tabs", Tabs).display = bool(self._remote_links)
         self._populate()
 
     def _apply_preview_visibility(self) -> None:
@@ -139,7 +197,11 @@ class SessionsScreen(Screen[None]):
         self._active_session_ids = list_active_sessions()
         self.sub_title = f"{self.project.name} — {self.project.path}"
         self._apply_sort()
+        # Remote rows survive a local rescan; what changes is their ✓/☁ mark, which
+        # ``_paint_remote_rows`` derives from disk on every repaint.
         self._repaint()
+        if self._remote_links:
+            self._load_published_index_worker()
 
     def _apply_sort(self) -> None:
         spec = self._claude_app.prefs.sessions_sort
@@ -148,11 +210,14 @@ class SessionsScreen(Screen[None]):
     def _repaint(self) -> None:
         from rich.text import Text
 
+        if self._active_remote is not None:
+            self._repaint_remote()
+            return
         table = self.query_one("#sessions", DataTable)
         table.clear()
         raw_query = self.query_one("#filter", Input).value
         query = parse_query(raw_query)
-        self._visible_indices = []
+        self._rows = []
         rules = self._claude_app.prefs.color_rules
         manual = self._claude_app.session_colors
         for idx, session in enumerate(self._sessions):
@@ -161,12 +226,18 @@ class SessionsScreen(Screen[None]):
             is_active = session.id in self._active_session_ids
             style = resolve_style(session, manual=manual, rules=rules, is_active=is_active)
             label = session.display_name or session.first_prompt
+            glyph, glyph_style, note = self._shared_mark(session)
             label_cell: Text | str
-            if session.id in self._marked:
-                marked_cell = Text()
-                marked_cell.append("✓ ", style="bold green")
-                marked_cell.append(label, style=style or "")
-                label_cell = marked_cell
+            if session.id in self._marked or glyph:
+                cell = Text()
+                if session.id in self._marked:
+                    cell.append("● ", style="bold green")
+                if glyph:
+                    cell.append(glyph, style=f"bold {glyph_style}")
+                cell.append(label, style=style or "")
+                if note:
+                    cell.append(f"  ({note})", style="dim")
+                label_cell = cell
             else:
                 label_cell = Text(label, style=style) if style else label
             tags_cell = self._format_tags_cell(session.tags)
@@ -179,10 +250,73 @@ class SessionsScreen(Screen[None]):
                 format_relative_time(session.last_activity),
             )
             table.add_row(*row, key=str(idx))
-            self._visible_indices.append(idx)
+            self._rows.append((False, idx))
         filter_input = self.query_one("#filter", Input)
-        if self._visible_indices and not filter_input.has_focus:
+        if self._rows and not filter_input.has_focus:
             table.focus()
+
+    async def _refresh_remote_tabs(self) -> None:
+        """Rebuild the tab bar after the user changes which repos are linked.
+
+        The initial bar is built in ``compose``; this is only for changes made from the link
+        modal. Hidden entirely when nothing is linked: a lone "Locales" tab would be chrome
+        that explains nothing. Selection returns to local, since the old tabs are gone.
+
+        Async because ``Tabs.clear`` and ``add_tab`` complete on later frames; adding before
+        the clear lands raises DuplicateIds.
+        """
+        self._remote_links = self._claude_app.remote_links_for(self.project)
+        self._active_remote = None
+        self._remote_sessions = []
+        tabs = self.query_one("#session-tabs", Tabs)
+        await tabs.clear()
+        await tabs.add_tab(Tab("Locales", id=_LOCAL_TAB_ID))
+        for index, link in enumerate(self._remote_links):
+            await tabs.add_tab(Tab(f"☁ {link.tab_label()}", id=f"{_REMOTE_TAB_PREFIX}{index}"))
+        tabs.display = bool(self._remote_links)
+
+    def _repaint_remote(self) -> None:
+        """Paint the selected remote's sessions in place of the local ones."""
+        table = self.query_one("#sessions", DataTable)
+        table.clear()
+        query = parse_query(self.query_one("#filter", Input).value)
+        self._rows = []
+        self._paint_remote_rows(table, query)
+        filter_input = self.query_one("#filter", Input)
+        if self._rows and not filter_input.has_focus:
+            table.focus()
+
+    def _paint_remote_rows(self, table: DataTable[Any], query: FilterQuery) -> None:
+        """Paint everything published to this remote, marking what is already here.
+
+        Sessions you already have are listed rather than hidden: the tab is a view of the
+        repo, and seeing your own session in it is how you confirm a publish worked. They are
+        marked ``✓`` instead of ``☁``, and Enter resumes them straight from disk.
+        """
+        from rich.text import Text
+
+        for idx, remote in enumerate(self._remote_sessions):
+            if not query.is_empty and not _remote_matches(remote, query):
+                continue
+            state = self._local_state(remote)
+            glyph, glyph_style, note = _STATE_MARKS[state]
+            label = Text()
+            label.append(glyph, style=glyph_style)
+            who = (remote.published_by or "?").split("@")[0]
+            label.append(f"{who} · ", style="dim")
+            label.append(remote.display_name or remote.first_prompt or remote.session_id)
+            if note:
+                label.append(f"  {note}", style="dim")
+            table.add_row(
+                label,
+                remote.branch or "—",
+                self._format_tags_cell(remote.tags),
+                str(remote.message_count),
+                format_size(remote.size_bytes),
+                _format_published(remote.published_at),
+                key=f"remote-{idx}",
+            )
+            self._rows.append((True, idx))
 
     @staticmethod
     def _matches(session: Session, query: FilterQuery) -> bool:
@@ -237,18 +371,35 @@ class SessionsScreen(Screen[None]):
         preview.show_session(session.path if session is not None else None)
 
     def action_launch_default(self) -> None:
+        remote = self._selected_remote()
+        if remote is not None:
+            self._hydrate_and_launch(remote, self._prefs().default_mode)
+            return
         session = self._selected_session()
         if session is None:
             return
         self._launch(session.id, session.display_name, self._prefs().default_mode)
 
-    def _selected_session(self) -> Session | None:
+    def _current_row(self) -> tuple[bool, int] | None:
         table = self.query_one("#sessions", DataTable)
-        if table.cursor_row is None or table.cursor_row < 0:
+        row = table.cursor_row
+        if row is None or row < 0 or row >= len(self._rows):
             return None
-        if table.cursor_row >= len(self._visible_indices):
+        return self._rows[row]
+
+    def _selected_session(self) -> Session | None:
+        """The local session under the cursor, or None (including on a remote row)."""
+        current = self._current_row()
+        if current is None or current[0]:
             return None
-        return self._sessions[self._visible_indices[table.cursor_row]]
+        return self._sessions[current[1]]
+
+    def _selected_remote(self) -> RemoteSession | None:
+        """The published session under the cursor, or None."""
+        current = self._current_row()
+        if current is None or not current[0]:
+            return None
+        return self._remote_sessions[current[1]]
 
     def action_new_session(self) -> None:
         self._launch(None, None, self._prefs().default_mode)
@@ -328,7 +479,7 @@ class SessionsScreen(Screen[None]):
         else:
             self._marked.add(session.id)
         self._repaint()
-        if row is not None and 0 <= row < len(self._visible_indices):
+        if row is not None and 0 <= row < len(self._rows):
             table.move_cursor(row=row)
 
     def _selected_sessions(self) -> list[Session]:
@@ -344,9 +495,7 @@ class SessionsScreen(Screen[None]):
             self.notify("Selecciona sesión(es) para mover", severity="warning")
             return
         if self.project.git_common_dir is None:
-            self.notify(
-                "Esta sesión no pertenece a un grupo de worktrees", severity="warning"
-            )
+            self.notify("Esta sesión no pertenece a un grupo de worktrees", severity="warning")
             return
         self._gather_move_destinations(targets)
 
@@ -447,6 +596,375 @@ class SessionsScreen(Screen[None]):
         self._repaint()
         self.notify(f"Exportadas {count} sesión(es) → {path}")
 
+    # --- shared sessions ------------------------------------------------------------
+
+    @work(thread=True, exclusive=True, group="published-index")
+    def _load_published_index_worker(self) -> None:
+        """Ask every linked remote what it has, so local rows can show if they are shared.
+
+        Runs in the background and repaints when done: the local listing must not wait on the
+        network to appear. Failures are silent — not knowing whether a session is published is
+        a missing mark, not an error worth interrupting the user for.
+        """
+        index: dict[str, tuple[RemoteSession, str]] = {}
+        for link in self._remote_links:
+            store = self._claude_app.store_for_link(link)
+            if store is None:
+                continue
+            try:
+                listed = store.list_sessions()
+            except (RemoteError, OSError):
+                continue
+            for remote in listed:
+                # First remote wins when a session is published to several: the mark says
+                # "shared", and naming one of them is enough for that.
+                index.setdefault(remote.session_id, (remote, link.tab_label()))
+        email = resolve_git_user_email(self.project.path)
+        self.app.call_from_thread(self._on_published_index, index, email)
+
+    def _on_published_index(
+        self, index: dict[str, tuple[RemoteSession, str]], email: str | None
+    ) -> None:
+        self._published = index
+        self._own_email = email
+        self._repaint()
+
+    def _shared_mark(self, session: Session) -> tuple[str, str, str]:
+        """Glyph, style and note for a local row, from what the remotes report.
+
+        Same vocabulary as the remote tabs, so ``↻`` means the same thing on both sides.
+        """
+        entry = self._published.get(session.id)
+        if entry is None:
+            return ("", "", "")
+        remote, where = entry
+        if not remote.size_bytes or session.size_bytes == remote.size_bytes:
+            glyph, style, note = "✓ ", "green", f"publicada en {where}"
+        elif remote.size_bytes > session.size_bytes:
+            glyph, style, note = "↻ ", "yellow", f"{where} tiene una versión más reciente"
+        else:
+            glyph, style, note = "↑ ", "magenta", f"con cambios sin publicar en {where}"
+        author = remote.published_by
+        # Sin identidad de git local no se puede afirmar que la sesión sea tuya,
+        # así que se atribuye igual: en una máquina sin `user.email` la columna
+        # se quedaba muda justo con lo que hace útil un repositorio de equipo.
+        if author and author != self._own_email:
+            note = f"{note} · de {author.split('@')[0]}"
+        return (glyph, style, note)
+
+    def _is_local(self, session_id: str) -> bool:
+        """Whether this session already exists in this project's dir on disk."""
+        return (self.project.encoded_path / f"{session_id}.jsonl").exists()
+
+    def _local_state(self, remote: RemoteSession) -> str:
+        """How the copy on disk compares to what is published: the row's indicator.
+
+        The jsonl only ever grows, so comparing its size against the ``size_bytes`` recorded
+        in the manifest is enough to tell the three cases apart — and all three matter:
+        a stale copy means someone continued the session after you fetched it, and an ahead
+        copy means you have work nobody else can see yet.
+
+        ``absent`` not downloaded · ``current`` same as published ·
+        ``stale`` published is longer · ``ahead`` local is longer
+        """
+        jsonl = self.project.encoded_path / f"{remote.session_id}.jsonl"
+        try:
+            local_size = jsonl.stat().st_size
+        except OSError:
+            return "absent"
+        if not remote.size_bytes or local_size == remote.size_bytes:
+            return "current"
+        return "stale" if remote.size_bytes > local_size else "ahead"
+
+    def _active_link(self) -> RemoteLink | None:
+        """The remote whose tab is selected, or None while the local tab is."""
+        if self._active_remote is None:
+            return None
+        if self._active_remote >= len(self._remote_links):
+            return None
+        return self._remote_links[self._active_remote]
+
+    def _default_destination(self) -> int:
+        """Which linked remote the publish dialogue starts on.
+
+        The active tab, when you are on one: publishing from a repo's tab almost always means
+        that repo. Otherwise the first, and the dialogue lets you change it.
+        """
+        return self._active_remote if self._active_remote is not None else 0
+
+    def _notify_error(self, message: str) -> None:
+        """Named so worker threads can post an error via ``call_from_thread``.
+
+        ``notify``'s severity is keyword-only, which ``call_from_thread`` cannot pass.
+        """
+        self.notify(message, severity="error")
+
+    def action_publish(self) -> None:
+        if not self._remote_links:
+            self.notify(
+                "Este proyecto no tiene repositorio de sesiones enlazado (pulsa L)",
+                severity="warning",
+            )
+            return
+        targets = self._selected_sessions()
+        if not targets:
+            self.notify("Selecciona sesión(es) para publicar", severity="warning")
+            return
+        files = [
+            path
+            for session in targets
+            for path in collect_session_files(self.project.encoded_path, session.id)
+        ]
+        if not files:
+            self.notify("Nada que publicar (ficheros no encontrados)", severity="warning")
+            return
+        # Show exactly what leaves the machine. tool-results hold raw command output, so
+        # a session that once printed a .env would publish it — the user has to be able
+        # to see that before confirming, not after.
+        listed = [
+            f"· {path.relative_to(self.project.encoded_path)}"
+            for path in files[:_PUBLISH_PREVIEW_LIMIT]
+        ]
+        if len(files) > _PUBLISH_PREVIEW_LIMIT:
+            listed.append(f"… y {len(files) - _PUBLISH_PREVIEW_LIMIT} más")
+        modal = PublishModal(
+            session_count=len(targets),
+            files=listed,
+            destinations=list(self._remote_links),
+            preselected=self._default_destination(),
+        )
+        self.app.push_screen(modal, lambda link: self._apply_publish(targets, link))
+
+    def _apply_publish(self, targets: list[Session], link: RemoteLink | None) -> None:
+        if link is None:
+            return  # cancelled
+        if self._claude_app.store_for_link(link) is None:
+            self.notify(f"«{link.tab_label()}» está mal configurado", severity="warning")
+            return
+        self.notify(f"Publicando {len(targets)} sesión(es) en «{link.tab_label()}»…")
+        self._publish_worker(targets, link)
+
+    @work(thread=True, exclusive=True, group="publish-sessions")
+    def _publish_worker(self, targets: list[Session], link: RemoteLink) -> None:
+        store = self._claude_app.store_for_link(link)
+        if store is None:
+            return
+        published_by = resolve_git_user_email(self.project.path)
+        git_remote = resolve_git_remote(self.project.path)
+        git_head = resolve_git_head(self.project.path)
+        done = 0
+        errors: list[str] = []
+        for session in targets:
+            meta = session_to_remote(
+                session,
+                published_by=published_by,
+                git_remote=git_remote,
+                git_head=git_head,
+            )
+            try:
+                store.publish(meta, self.project.encoded_path)
+                done += 1
+            except (RemoteError, OSError) as exc:
+                errors.append(f"{session.id[:8]}: {exc}")
+        self.app.call_from_thread(self._on_publish_complete, done, errors)
+
+    def _on_publish_complete(self, done: int, errors: list[str]) -> None:
+        self._marked.clear()
+        if errors:
+            self.notify(
+                f"Publicadas {done}; {len(errors)} con error — {errors[0]}",
+                severity="warning",
+            )
+        else:
+            self.notify(f"Publicadas {done} sesión(es)")
+        if self._active_remote is not None:
+            self._load_remote_worker(self._active_remote)
+        else:
+            self._repaint()
+        # What we just uploaded has to show as published on the local tab too.
+        self._load_published_index_worker()
+
+    @on(Tabs.TabActivated)
+    def _on_tab_activated(self, event: Tabs.TabActivated) -> None:
+        """Switch between the local listing and one remote's listing."""
+        tab_id = event.tab.id or ""
+        if tab_id == _LOCAL_TAB_ID:
+            self._active_remote = None
+            self._remote_sessions = []
+            self._repaint()
+            return
+        if not tab_id.startswith(_REMOTE_TAB_PREFIX):
+            return
+        index = int(tab_id[len(_REMOTE_TAB_PREFIX) :])
+        if index >= len(self._remote_links):
+            return
+        self._active_remote = index
+        self._remote_sessions = []
+        self._repaint()
+        self.notify(f"Cargando «{self._remote_links[index].tab_label()}»…")
+        self._load_remote_worker(index)
+
+    @work(thread=True, exclusive=True, group="load-remote")
+    def _load_remote_worker(self, index: int) -> None:
+        if index >= len(self._remote_links):
+            return
+        link = self._remote_links[index]
+        store = self._claude_app.store_for_link(link)
+        if store is None:
+            self.app.call_from_thread(
+                self._on_remote_failed, index, f"«{link.tab_label()}» está mal configurado"
+            )
+            return
+        try:
+            listed = store.list_sessions()
+        except (RemoteError, OSError) as exc:
+            self.app.call_from_thread(self._on_remote_failed, index, str(exc))
+            return
+        self.app.call_from_thread(self._on_remote_loaded, index, list(listed))
+
+    def _on_remote_loaded(self, index: int, listed: list[RemoteSession]) -> None:
+        # A late reply from a tab the user already left must not overwrite what is on screen.
+        if index != self._active_remote:
+            return
+        self._remote_sessions = listed
+        self._repaint()
+        states = [self._local_state(r) for r in listed]
+        parts = [f"{len(listed)} publicada(s)"]
+        downloaded = sum(1 for s in states if s != "absent")
+        if downloaded:
+            parts.append(f"{downloaded} descargada(s)")
+        stale = states.count("stale")
+        if stale:
+            parts.append(f"{stale} con versión más reciente")
+        self.notify(" · ".join(parts))
+
+    def _on_remote_failed(self, index: int, message: str) -> None:
+        if index != self._active_remote:
+            return
+        self._remote_sessions = []
+        self._repaint()
+        self.notify(f"No se pudo leer el remoto: {message}", severity="error")
+
+    def _hydrate_and_launch(self, remote: RemoteSession, mode: LaunchMode) -> None:
+        link = self._active_link()
+        if link is None:
+            return
+        state = self._local_state(remote)
+        if state != "absent":
+            # Already on disk (we published it, or fetched it earlier). Fetching would refuse
+            # to overwrite, so resume the local copy — which is the same session.
+            if state == "stale":
+                self.notify(
+                    "Tu copia es anterior a la publicada; se reanuda la local "
+                    "(traer los turnos nuevos aún no está implementado)",
+                    severity="warning",
+                )
+            self._launch(remote.session_id, remote.display_name, mode)
+            return
+        self.notify(f"Trayendo {remote.session_id[:8]}…")
+        self._hydrate_worker(remote, link, mode)
+
+    @work(thread=True, exclusive=True, group="hydrate-session")
+    def _hydrate_worker(self, remote: RemoteSession, link: RemoteLink, mode: LaunchMode) -> None:
+        store = self._claude_app.store_for_link(link)
+        if store is None:
+            return
+        try:
+            store.fetch(remote.session_id, self.project.encoded_path)
+        except (RemoteError, OSError) as exc:
+            self.app.call_from_thread(self._notify_error, f"No se pudo traer la sesión: {exc}")
+            return
+        local_head = resolve_git_head(self.project.path)
+        self.app.call_from_thread(self._on_hydrated, remote, mode, local_head)
+
+    def _on_hydrated(self, remote: RemoteSession, mode: LaunchMode, local_head: str | None) -> None:
+        # The transcript travels, the repository does not: warn when the conversation
+        # was recorded against different code, then launch anyway — it is the user's
+        # call whether that matters.
+        if remote.git_head and local_head and remote.git_head != local_head:
+            self.notify(
+                f"Grabada sobre {remote.git_head}, estás en {local_head} — "
+                "la conversación puede referirse a otro estado del código",
+                severity="warning",
+            )
+        self._launch(remote.session_id, remote.display_name, mode)
+        self._populate()
+
+    def _confirm_unpublish(self, remote: RemoteSession) -> None:
+        """Ask before removing a published session from its repo."""
+        link = self._active_link()
+        if link is None:
+            return
+        state = self._local_state(remote)
+        details = [
+            f"Repositorio: {link.tab_label()} — {link.summary()}",
+            f"Publicada por: {remote.published_by or '?'}",
+            f"Prompt: {(remote.display_name or remote.first_prompt or remote.session_id)[:70]}",
+        ]
+        if state != "absent":
+            # Worth stating plainly: people expect a delete to take the local copy with it.
+            details.append("")
+            details.append("Tu copia local NO se borra, solo deja de estar compartida.")
+        modal = ConfirmDeleteModal(
+            title=f"Despublicar {remote.session_id[:8]}… de «{link.tab_label()}»",
+            details=details,
+            warning="Los demás dejarán de verla. Si nadie la tiene en local, se pierde.",
+        )
+        self.app.push_screen(modal, lambda ok: self._apply_unpublish(remote, link, ok))
+
+    def _apply_unpublish(
+        self, remote: RemoteSession, link: RemoteLink, confirmed: bool | None
+    ) -> None:
+        if not confirmed:
+            return
+        self.notify(f"Despublicando {remote.session_id[:8]}…")
+        self._unpublish_worker(remote, link)
+
+    @work(thread=True, exclusive=True, group="unpublish-session")
+    def _unpublish_worker(self, remote: RemoteSession, link: RemoteLink) -> None:
+        store = self._claude_app.store_for_link(link)
+        if store is None:
+            return
+        try:
+            store.unpublish(remote.session_id)
+        except (RemoteError, OSError) as exc:
+            self.app.call_from_thread(self._notify_error, f"No se pudo despublicar: {exc}")
+            return
+        self.app.call_from_thread(self._on_unpublished, remote.session_id)
+
+    def _on_unpublished(self, session_id: str) -> None:
+        self.notify(f"{session_id[:8]}… ya no está publicada")
+        if self._active_remote is not None:
+            self._load_remote_worker(self._active_remote)
+        # The local tab's marks came from the published index, which just changed.
+        self._load_published_index_worker()
+
+    def action_link_remotes(self) -> None:
+        """Manage which sessions repos this project publishes to."""
+        self.app.push_screen(
+            ProjectRemotesModal(
+                project_name=self.project.name,
+                links=list(self._remote_links),
+                inherited=not self._claude_app.project_remotes.get(self._remote_key()),
+                servers=list(self._claude_app.prefs.remote_servers),
+            ),
+            self._apply_links,
+        )
+
+    def _remote_key(self) -> str:
+        return project_remote_key(self.project.path)
+
+    def _apply_links(self, links: list[RemoteLink] | None) -> None:
+        if links is None:
+            return  # cancelled
+        self._claude_app.project_remotes.set_all(self._remote_key(), links)
+        self.run_worker(self._refresh_remote_tabs(), exclusive=False)
+        self.notify(
+            f"{len(links)} repositorio(s) de sesiones enlazado(s)"
+            if links
+            else "Enlaces borrados (se usa el remoto global)"
+        )
+
     def action_edit_tags(self) -> None:
         session = self._selected_session()
         if session is None:
@@ -498,6 +1016,10 @@ class SessionsScreen(Screen[None]):
         self._populate()
 
     def action_delete(self) -> None:
+        remote = self._selected_remote()
+        if remote is not None:
+            self._confirm_unpublish(remote)
+            return
         session = self._selected_session()
         if session is None:
             return
@@ -664,16 +1186,23 @@ class SessionsScreen(Screen[None]):
         """Hide row-dependent bindings when no row is selected; hide cleanup if empty."""
         row_dependent = {
             "rename",
-            "delete",
             "launch_alternate",
             "yank_id",
             "set_color",
             "edit_tags",
             "toggle_mark",
         }
+        # A remote row has no local jsonl yet, so every local action is hidden on it —
+        # ``_selected_session`` already returns None there, which handles the set above.
         if action in row_dependent and self._selected_session() is None:
             return False
-        if action in ("move", "export") and not self._selected_sessions():
+        # ``delete`` works on both kinds of row: locally it deletes, on a published row it
+        # unpublishes. Hidden only when there is no row at all.
+        if action == "delete" and self._current_row() is None:
+            return False
+        if action in ("move", "export", "publish") and not self._selected_sessions():
+            return False
+        if action == "publish" and not self._remote_links:
             return False
         return not (action == "cleanup" and not self._sessions)
 
@@ -694,6 +1223,49 @@ class SessionsScreen(Screen[None]):
     def action_toggle_sort_direction(self) -> None:
         spec = self._claude_app.prefs.sessions_sort
         self.action_sort_column(spec.key)
+
+
+def _remote_matches(remote: RemoteSession, query: FilterQuery) -> bool:
+    """Same filter semantics as local rows, over the fields a manifest carries.
+
+    ``id:`` matters most here: it is how you land on a session a colleague pasted into
+    a chat, since you have its uuid but nothing else.
+    """
+    for key, value in query.constraints.items():
+        if key == "branch" and value not in (remote.branch or "").lower():
+            return False
+        if key == "path" and value not in (remote.cwd or "").lower():
+            return False
+        if key == "id" and value not in remote.session_id.lower():
+            return False
+        if key == "tag":
+            needed = [t for t in (s.strip() for s in value.split(",")) if t]
+            tags_lower = [t.lower() for t in remote.tags]
+            if not all(any(n in t for t in tags_lower) for n in needed):
+                return False
+    haystack = " ".join(
+        filter(
+            None,
+            [
+                remote.display_name or "",
+                remote.first_prompt or "",
+                remote.branch or "",
+                remote.published_by or "",
+                " ".join(remote.tags),
+            ],
+        )
+    )
+    return matches_fuzzy(haystack, query.free_text)
+
+
+def _format_published(published_at: str) -> str:
+    """Render a manifest's ISO timestamp like the local rows' relative times."""
+    from datetime import datetime
+
+    try:
+        return format_relative_time(datetime.fromisoformat(published_at).timestamp())
+    except (TypeError, ValueError):
+        return "—"
 
 
 def _session_sort_value(key: str) -> Callable[[Session], Any]:

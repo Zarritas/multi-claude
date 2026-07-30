@@ -157,9 +157,7 @@ def read_manifest(zip_path: Path) -> tuple[ManifestSession, ...]:
             continue
         raw_tags = entry.get("tags")
         tags = (
-            tuple(t for t in raw_tags if isinstance(t, str))
-            if isinstance(raw_tags, list)
-            else ()
+            tuple(t for t in raw_tags if isinstance(t, str)) if isinstance(raw_tags, list) else ()
         )
         sessions.append(
             ManifestSession(
@@ -241,9 +239,7 @@ def import_archive(
     )
 
 
-def _extract_member(
-    zf: zipfile.ZipFile, member: str, dest_dir: Path, dest_root: Path
-) -> None:
+def _extract_member(zf: zipfile.ZipFile, member: str, dest_dir: Path, dest_root: Path) -> None:
     """Extract ``member`` (a ``sessions/...`` arcname) into ``dest_dir`` safely.
 
     Strips the ``sessions/`` prefix and guards against path traversal: a crafted

@@ -11,7 +11,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
-from textual import on
+from textual import on, work
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
@@ -29,6 +29,7 @@ from multi_claude.config import (
 )
 from multi_claude.discovery import Project
 from multi_claude.launcher import PLACEMENT_LABELS, preview_dispatch
+from multi_claude.project_remotes import RemoteLink, RemoteServer
 from multi_claude.tags import parse_tag_list
 
 
@@ -797,6 +798,13 @@ class SettingsModal(ModalScreen[Config | None]):
         width: 80;
         height: auto;
     }
+    SettingsModal TabbedContent {
+        height: auto;
+    }
+    SettingsModal TabPane {
+        height: auto;
+        padding: 0 1;
+    }
     SettingsModal Label.title {
         text-style: bold;
     }
@@ -838,52 +846,86 @@ class SettingsModal(ModalScreen[Config | None]):
 
     def compose(self) -> ComposeResult:
         from textual.containers import Horizontal
-        from textual.widgets import Checkbox
+        from textual.widgets import Checkbox, TabbedContent, TabPane
 
         with Vertical():
-            yield Label("Ajustes — lanzamiento de sesiones", classes="title")
+            yield Label("Ajustes", classes="title")
+            with TabbedContent(id="settings-tabs"):
+                with TabPane("Lanzamiento", id="tab-launch"):
+                    yield Label("Enter (predeterminado)", classes="section")
+                    with RadioSet(id="default-mode"):
+                        for mode in VALID_MODES:
+                            yield RadioButton(
+                                _MODE_LABELS[mode],
+                                value=(mode == self._initial.default_mode),
+                                id=f"default-{mode}",
+                            )
 
-            yield Label("Enter (predeterminado)", classes="section")
-            with RadioSet(id="default-mode"):
-                for mode in VALID_MODES:
-                    yield RadioButton(
-                        _MODE_LABELS[mode],
-                        value=(mode == self._initial.default_mode),
-                        id=f"default-{mode}",
+                    yield Static(
+                        _MODE_SKETCHES[self._initial.default_mode],
+                        id="mode-sketch",
+                        classes="sketch",
+                        markup=False,
+                    )
+                    yield Label(
+                        _dispatch_hint(self._initial.default_mode),
+                        id="dispatch-hint",
+                        classes="hint",
+                    )
+                    yield Label(
+                        self._alt_preview_text(self._initial.default_mode),
+                        id="alt-preview",
+                        classes="alt-preview",
                     )
 
-            yield Static(
-                _MODE_SKETCHES[self._initial.default_mode],
-                id="mode-sketch",
-                classes="sketch",
-                markup=False,
-            )
-            yield Label(
-                _dispatch_hint(self._initial.default_mode),
-                id="dispatch-hint",
-                classes="hint",
-            )
-            yield Label(
-                self._alt_preview_text(self._initial.default_mode),
-                id="alt-preview",
-                classes="alt-preview",
-            )
+                    yield Label("Argumentos para `claude`", classes="section")
+                    yield Checkbox(
+                        f"Saltar permisos ({_SKIP_PERMISSIONS_FLAG})",
+                        value=self._skip_initial,
+                        id="skip-permissions",
+                    )
+                    yield Input(
+                        value=" ".join(self._extra_initial),
+                        placeholder="--model opus --effort high --add-dir ../shared",
+                        id="claude-args",
+                    )
+                    yield Label("Se anteponen a --resume/-n en cada lanzamiento", classes="hint")
+                    yield Label("", id="args-error", classes="error")
 
-            yield Label("Argumentos para `claude`", classes="section")
-            yield Checkbox(
-                f"Saltar permisos ({_SKIP_PERMISSIONS_FLAG})",
-                value=self._skip_initial,
-                id="skip-permissions",
-            )
-            yield Input(
-                value=" ".join(self._extra_initial),
-                placeholder="--model opus --effort high --add-dir ../shared",
-                id="claude-args",
-            )
-            yield Label(
-                "Se anteponen a --resume/-n en cada lanzamiento", classes="hint"
-            )
-            yield Label("", id="args-error", classes="error")
+                with TabPane("Sesiones compartidas", id="tab-remote"):
+                    yield Label("Servidores", classes="section")
+                    yield Label(
+                        _servers_summary(self._initial.remote_servers),
+                        id="servers-summary",
+                        classes="hint",
+                    )
+                    yield Label(
+                        "Se configuran una vez y se eligen por nombre al enlazar un "
+                        "repositorio a un proyecto (L).",
+                        classes="hint",
+                    )
+                    yield Button("Servidores…", id="configure-servers", variant="default")
+
+                    yield Label("Remoto global", classes="section")
+                    yield Label(self._initial.remote_summary(), id="remote-summary", classes="hint")
+                    yield Label(
+                        "Solo para proyectos sin repos propios. Para enlazar uno: L.",
+                        classes="hint",
+                    )
+                    yield Button("Configurar remoto…", id="configure-remote", variant="default")
+
+                with TabPane("Colores", id="tab-colors"):
+                    yield Label("Reglas automáticas", classes="section")
+                    yield Label(
+                        f"{len(self._initial.color_rules)} regla(s) definida(s)",
+                        id="rules-summary",
+                        classes="hint",
+                    )
+                    yield Label(
+                        "En orden; gana la primera que casa. El color manual (c) manda.",
+                        classes="hint",
+                    )
+                    yield Button("Editar reglas…", id="edit-rules", variant="default")
 
             yield Label("Enter guarda · Esc cancela", classes="hint")
             with Horizontal():
@@ -907,6 +949,53 @@ class SettingsModal(ModalScreen[Config | None]):
     @on(Button.Pressed, "#save")
     def _save(self) -> None:
         self._try_dismiss()
+
+    @on(Button.Pressed, "#configure-servers")
+    def _configure_servers(self) -> None:
+        """Manage the configured servers, nested on top of these settings."""
+        self.app.push_screen(ServersModal(list(self._initial.remote_servers)), self._on_servers)
+
+    def _on_servers(self, servers: list[RemoteServer] | None) -> None:
+        if servers is None:
+            return  # cancelled
+        self._initial = replace(self._initial, remote_servers=servers)
+        self.query_one("#servers-summary", Label).update(_servers_summary(servers))
+
+    @on(Button.Pressed, "#configure-remote")
+    def _configure_remote(self) -> None:
+        """Open the remote settings on top, and fold its result into our own.
+
+        Nested rather than inlined: the remote needs five fields plus a connection test,
+        which would bury the launch settings this modal exists for.
+        """
+        modal = RepoLinkModal(
+            self._initial.remote_link(),
+            servers=list(self._initial.remote_servers),
+            title="Remoto global (para proyectos sin enlaces propios)",
+            allow_none=True,
+        )
+        self.app.push_screen(modal, self._on_remote_configured)
+
+    def _on_remote_configured(self, result: RemoteLink | None) -> None:
+        if result is None:
+            return  # cancelled: leave the remote settings untouched
+        # ``_collect`` builds on ``_initial``, so updating it is what carries the remote
+        # fields into the config this modal eventually returns.
+        self._initial = self._initial.with_remote_link(result)
+        self.query_one("#remote-summary", Label).update(result.summary())
+
+    @on(Button.Pressed, "#edit-rules")
+    def _edit_rules(self) -> None:
+        """Edit the colour rules without leaving settings, and fold the result back in."""
+        self.app.push_screen(
+            ColorRulesEditorModal(list(self._initial.color_rules)), self._on_rules_edited
+        )
+
+    def _on_rules_edited(self, result: list[ColorRule] | None) -> None:
+        if result is None:
+            return
+        self._initial = replace(self._initial, color_rules=result)
+        self.query_one("#rules-summary", Label).update(f"{len(result)} regla(s) definida(s)")
 
     @on(Input.Submitted, "#claude-args")
     def _submit_args(self) -> None:
@@ -953,6 +1042,1010 @@ class SettingsModal(ModalScreen[Config | None]):
     @staticmethod
     def _alt_preview_text(default: LaunchMode) -> str:
         return f"Shift+Enter → {_MODE_LABELS[alternate_for(default)]}"
+
+
+def _coerce_port(value: str) -> int:
+    """Read a typed SSH port, falling back to 22 rather than refusing to save."""
+    text = value.strip()
+    if text.isdigit() and 1 <= int(text) <= 65535:
+        return int(text)
+    return 22
+
+
+def _probe_server(server: RemoteServer, token: str | None) -> tuple[str, bool]:
+    """Check a server and return one line plus whether it is good news.
+
+    Pure enough to test without a TUI, and free of Textual so it can run in a worker thread.
+
+    Both providers are probed with an invented repo, because a server on its own has nothing to
+    talk to. A 404 (or "no such repo" over SSH) is therefore *success*: the host answered and
+    the credential was accepted, which is exactly what is being verified.
+    """
+    from multi_claude.remote import RemoteError, store_from_link
+    from multi_claude.remote_git import probe_ssh_access
+
+    if server.uses_ssh:
+        # ``ssh -T`` instead of a made-up repo: it needs no repository and both providers
+        # answer with the account name, which is what the user actually wants confirmed.
+        try:
+            return (
+                f"OK · {probe_ssh_access(server.ssh_host, server.ssh_user, server.ssh_port)}",
+                True,
+            )
+        except RemoteError as exc:
+            return (str(exc), False)
+
+    probe = RemoteLink(
+        kind=server.kind,
+        host=server.api_host,
+        repo="multi-claude/_probe",
+        branch="main",
+    )
+    store = store_from_link(probe, token=token)
+    check = getattr(store, "check_connection", None)
+    if not callable(check):
+        return ("Configuración incompleta", False)
+    try:
+        check()
+    except RemoteError as exc:
+        message = str(exc)
+        if message.startswith("404") or "no existe o no es un repositorio" in message:
+            return (f"OK · {server.summary()} responde y acepta la credencial", True)
+        return (message, False)
+    return (f"OK · {server.summary()} responde", True)
+
+
+def _servers_summary(servers: list[RemoteServer]) -> str:
+    """One line naming the configured servers, for the settings tab."""
+    if not servers:
+        return "ninguno configurado"
+    return f"{len(servers)}: " + ", ".join(s.name for s in servers)
+
+
+_REMOTE_KIND_LABELS: dict[str, str] = {
+    "none": "Desactivado",
+    "directory": "Carpeta compartida (montaje, Syncthing…)",
+    "gitlab": "GitLab (repo privado)",
+    "github": "GitHub (repo privado)",
+}
+
+
+class ServerEditModal(ModalScreen["RemoteServer | None"]):
+    """Define a server you can publish to: name, provider, host and token.
+
+    Servers are configured once in Ajustes and then picked by name when linking a repo, so a
+    host and a token get typed once instead of once per repository.
+
+    The token never enters the returned value, because servers are stored in ``config.json``.
+    It goes straight to :class:`~multi_claude.remote.TokenStore` keyed by server name, and the
+    field shows whether one exists without ever rendering it.
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+        Binding("ctrl+t", "test", "Probar"),
+    ]
+
+    DEFAULT_CSS = """
+    ServerEditModal {
+        align: center middle;
+    }
+    ServerEditModal > Vertical {
+        background: $surface;
+        border: thick $primary;
+        padding: 1 2;
+        width: 80;
+        height: auto;
+    }
+    ServerEditModal Label.title { text-style: bold; }
+    ServerEditModal Label.section { text-style: bold; color: $accent; }
+    ServerEditModal Label.hint { color: $text-muted; }
+    ServerEditModal Label.error { color: $error; }
+    ServerEditModal Label.ok { color: $success; }
+    ServerEditModal #server-ssh-fields, ServerEditModal #server-token-fields { height: auto; }
+    ServerEditModal Horizontal { align: center middle; height: auto; margin-top: 1; }
+    ServerEditModal Button { margin: 0 1; }
+    """
+
+    def __init__(self, server: RemoteServer, *, has_token: bool = False) -> None:
+        super().__init__()
+        self._initial = server
+        self._has_token = has_token
+
+    def compose(self) -> ComposeResult:
+        from textual.containers import Horizontal, VerticalScroll
+
+        with Vertical():
+            yield Label("Servidor de sesiones", classes="title")
+            yield Label("Ctrl+T prueba la conexión · Enter guarda · Esc cancela", classes="hint")
+
+            # Fields in a scrollable body so the title, the keys and the buttons stay put on a
+            # short terminal — the same shape the other long forms use.
+            with VerticalScroll(id="server-body"):
+                yield Label("Nombre", classes="section")
+                yield Input(
+                    value=self._initial.name, placeholder="FactorLibre GitLab", id="server-name"
+                )
+
+                yield Label("Proveedor", classes="section")
+                with RadioSet(id="server-kind"):
+                    yield RadioButton(
+                        "GitLab", value=self._initial.kind != "github", id="server-kind-gitlab"
+                    )
+                    yield RadioButton(
+                        "GitHub", value=self._initial.kind == "github", id="server-kind-github"
+                    )
+
+                yield Label("Autenticación", classes="section")
+                with RadioSet(id="server-auth"):
+                    yield RadioButton(
+                        "Token de acceso (API)",
+                        value=not self._initial.uses_ssh,
+                        id="server-auth-token",
+                    )
+                    yield RadioButton(
+                        "SSH (usa tus claves)",
+                        value=self._initial.uses_ssh,
+                        id="server-auth-ssh",
+                    )
+
+                yield Label("Servidor (vacío = gitlab.com / github.com)", classes="section")
+                yield Input(
+                    value=self._initial.host,
+                    placeholder="https://git.tuempresa.com",
+                    id="server-host",
+                )
+
+                with Vertical(id="server-ssh-fields"):
+                    yield Label(
+                        "No hace falta token: se usan las claves SSH que ya tengas.",
+                        classes="hint",
+                    )
+                    yield Label("Usuario SSH — déjalo en «git»", classes="section")
+                    yield Input(
+                        value=self._initial.ssh_user, placeholder="git", id="server-ssh-user"
+                    )
+                    yield Label(
+                        "En GitHub y GitLab siempre es «git», no tu usuario: en "
+                        "git@github.com:Zarritas/repo.git, «Zarritas» es parte del "
+                        "repositorio. Cámbialo solo en instalaciones que usen otro.",
+                        classes="hint",
+                    )
+                    yield Label("Puerto SSH", classes="section")
+                    yield Input(
+                        value=str(self._initial.ssh_port), placeholder="22", id="server-ssh-port"
+                    )
+                    yield Label(
+                        "22 salvo que tu servidor use otro. Míralo en la URL SSH del repo: en "
+                        "ssh://git@git.tuempresa.com:2211/grupo/repo.git el puerto es 2211.",
+                        classes="hint",
+                    )
+
+                with Vertical(id="server-token-fields"):
+                    yield Label("Token (lectura y escritura sobre los repos)", classes="section")
+                    yield Input(
+                        placeholder=(
+                            "•••• guardado (escribe para reemplazarlo)"
+                            if self._has_token
+                            else "glpat-… / github_pat_…"
+                        ),
+                        password=True,
+                        id="server-token",
+                    )
+                    yield Label(
+                        "Se guarda aparte con permisos 0600, nunca en config.json",
+                        classes="hint",
+                    )
+
+            yield Label("", id="server-status", classes="hint")
+            with Horizontal():
+                yield Button("Cancelar", id="cancel", variant="default")
+                yield Button("Probar", id="test", variant="default")
+                yield Button("Guardar", id="save", variant="primary")
+
+    def on_mount(self) -> None:
+        self._sync_auth_fields()
+        self.query_one("#server-name", Input).focus()
+
+    @on(RadioSet.Changed, "#server-auth")
+    def _on_auth_changed(self, event: RadioSet.Changed) -> None:
+        self._sync_auth_fields()
+
+    def _sync_auth_fields(self) -> None:
+        """Show only what the chosen authentication needs."""
+        ssh = self._auth_from_radio() == "ssh"
+        self.query_one("#server-ssh-fields").display = ssh
+        self.query_one("#server-token-fields").display = not ssh
+
+    def _auth_from_radio(self) -> str:
+        pressed = self.query_one("#server-auth", RadioSet).pressed_button
+        radio_id = pressed.id if pressed is not None else None
+        return "ssh" if radio_id == "server-auth-ssh" else "token"
+
+    @on(Button.Pressed, "#cancel")
+    def _cancel(self) -> None:
+        self.dismiss(None)
+
+    @on(Button.Pressed, "#save")
+    def _save(self) -> None:
+        self._try_save()
+
+    @on(Button.Pressed, "#test")
+    def _test(self) -> None:
+        self.action_test()
+
+    @on(Input.Submitted)
+    def _submitted(self) -> None:
+        self._try_save()
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def _try_save(self) -> None:
+        server = self.collect()
+        status = self.query_one("#server-status", Label)
+        if not server.name:
+            self._set_status(status, "Ponle un nombre al servidor", ok=False)
+            self.query_one("#server-name", Input).focus()
+            return
+        token = self.typed_token()
+        if token:
+            from multi_claude.remote import TokenStore
+
+            TokenStore().set(token, server.name)
+        self.dismiss(server)
+
+    def action_test(self) -> None:
+        """Check the server as typed, before saving it.
+
+        Runs in a worker: both paths reach the network, and doing that on the UI thread froze
+        the whole app until the timeout — 15s over HTTP, and up to two minutes over SSH.
+        """
+        from multi_claude.remote import TokenStore
+
+        status = self.query_one("#server-status", Label)
+        server = self.collect()
+        if not server.is_configured:
+            self._set_status(status, "Falta el nombre o la URL", ok=False)
+            return
+        token = self.typed_token() or TokenStore().get(server.name)
+        if not server.uses_ssh and not token:
+            self._set_status(status, "Falta el token", ok=False)
+            return
+        self._set_status(status, f"Probando {server.summary()}…", ok=True)
+        self._probe_worker(server, token)
+
+    @work(thread=True, exclusive=True, group="server-probe")
+    def _probe_worker(self, server: RemoteServer, token: str | None) -> None:
+        """Do the network call off the UI thread and report back one line."""
+        message, ok = _probe_server(server, token)
+        self.app.call_from_thread(self._on_probe_done, message, ok)
+
+    def _on_probe_done(self, message: str, ok: bool) -> None:
+        # The modal may have been dismissed while the probe was in flight.
+        if not self.is_mounted:
+            return
+        self._set_status(self.query_one("#server-status", Label), message, ok=ok)
+
+    @staticmethod
+    def _set_status(label: Label, message: str, *, ok: bool) -> None:
+        label.remove_class("error", "ok")
+        label.add_class("ok" if ok else "error")
+        label.update(message)
+
+    def typed_token(self) -> str | None:
+        """The token as typed, or None meaning "keep whatever is already stored"."""
+        return self.query_one("#server-token", Input).value.strip() or None
+
+    def collect(self) -> RemoteServer:
+        pressed = self.query_one("#server-kind", RadioSet).pressed_button
+        kind = (
+            "github" if (pressed is not None and pressed.id == "server-kind-github") else "gitlab"
+        )
+        return RemoteServer(
+            name=self.query_one("#server-name", Input).value.strip(),
+            kind=kind,
+            host=self.query_one("#server-host", Input).value.strip().rstrip("/"),
+            auth=self._auth_from_radio(),
+            ssh_user=self.query_one("#server-ssh-user", Input).value.strip() or "git",
+            ssh_port=_coerce_port(self.query_one("#server-ssh-port", Input).value),
+        )
+
+
+class ServersModal(ModalScreen["list[RemoteServer] | None"]):
+    """Manage the configured servers. Returns the final list, or None on cancel."""
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+        Binding("a", "add", "Añadir"),
+        Binding("e", "edit", "Editar"),
+        Binding("delete", "remove", "Quitar"),
+    ]
+
+    DEFAULT_CSS = """
+    ServersModal { align: center middle; }
+    ServersModal > Vertical {
+        background: $surface;
+        border: thick $primary;
+        padding: 1 2;
+        width: 80;
+        height: auto;
+    }
+    ServersModal Label.title { text-style: bold; }
+    ServersModal Label.hint { color: $text-muted; }
+    ServersModal Horizontal { align: center middle; height: auto; margin-top: 1; }
+    ServersModal Button { margin: 0 1; }
+    """
+
+    def __init__(self, servers: list[RemoteServer]) -> None:
+        super().__init__()
+        self._servers = list(servers)
+        # Index being edited, so saving replaces it even if the name changed.
+        self._editing: int | None = None
+
+    def compose(self) -> ComposeResult:
+        from textual.containers import Horizontal
+
+        with Vertical():
+            yield Label("Servidores de sesiones", classes="title")
+            yield Label(
+                "Configúralos aquí una vez y elígelos por nombre al enlazar un repositorio "
+                "a un proyecto.",
+                classes="hint",
+            )
+            yield Label(
+                "a añade · e edita · Supr quita · Enter guarda · Esc cancela", classes="hint"
+            )
+            yield Label("", id="servers-empty", classes="hint")
+            with RadioSet(id="servers"):
+                yield from self._buttons()
+            # Two rows: five buttons on one line overflow 80 columns and the last one — Guardar,
+            # of all things — was the one that fell off.
+            with Horizontal(id="server-actions"):
+                yield Button("Añadir", id="add", variant="default")
+                yield Button("Editar", id="edit", variant="default")
+                yield Button("Quitar", id="remove", variant="default")
+            with Horizontal(id="server-close"):
+                yield Button("Cancelar", id="cancel", variant="default")
+                yield Button("Guardar", id="save", variant="primary")
+
+    def _buttons(self) -> ComposeResult:
+        for index, server in enumerate(self._servers):
+            yield RadioButton(
+                f"{server.name} — {server.summary()}", value=(index == 0), id=f"server-{index}"
+            )
+
+    def on_mount(self) -> None:
+        self._sync_empty()
+
+    def _sync_empty(self) -> None:
+        self.query_one("#servers-empty", Label).update(
+            "(ninguno configurado)" if not self._servers else ""
+        )
+
+    async def _rebuild(self) -> None:
+        radio_set = self.query_one("#servers", RadioSet)
+        await radio_set.remove_children()
+        for index, server in enumerate(self._servers):
+            await radio_set.mount(
+                RadioButton(
+                    f"{server.name} — {server.summary()}",
+                    value=(index == 0),
+                    id=f"server-{index}",
+                )
+            )
+        self._sync_empty()
+
+    @on(Button.Pressed, "#cancel")
+    def _cancel(self) -> None:
+        self.dismiss(None)
+
+    @on(Button.Pressed, "#save")
+    def _save(self) -> None:
+        self.dismiss(list(self._servers))
+
+    @on(Button.Pressed, "#add")
+    def _add_pressed(self) -> None:
+        self.action_add()
+
+    @on(Button.Pressed, "#edit")
+    def _edit_pressed(self) -> None:
+        self.action_edit()
+
+    @on(Button.Pressed, "#remove")
+    def _remove_pressed(self) -> None:
+        self.action_remove()
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def action_add(self) -> None:
+        self._editing = None
+        self.app.push_screen(ServerEditModal(RemoteServer(name="")), self._on_saved)
+
+    def action_edit(self) -> None:
+        index = self._selected_index()
+        if index is None:
+            self.notify("Selecciona un servidor para editarlo", severity="warning")
+            return
+        from multi_claude.remote import TokenStore
+
+        current = self._servers[index]
+        # Remembered so a rename replaces this entry instead of adding a second one.
+        self._editing = index
+        self.app.push_screen(
+            ServerEditModal(current, has_token=TokenStore().has_token(current.name)),
+            self._on_saved,
+        )
+
+    def action_remove(self) -> None:
+        index = self._selected_index()
+        if index is None:
+            self.notify("Selecciona un servidor para quitarlo", severity="warning")
+            return
+        del self._servers[index]
+        self.run_worker(self._rebuild(), exclusive=False)
+
+    def _on_saved(self, server: RemoteServer | None) -> None:
+        if server is None or not server.name:
+            return
+        editing, self._editing = self._editing, None
+        if editing is not None and 0 <= editing < len(self._servers):
+            previous = self._servers[editing]
+            self._servers[editing] = server
+            if previous.name != server.name:
+                self._carry_token(previous.name, server.name)
+        else:
+            for index, current in enumerate(self._servers):
+                if current.name == server.name:
+                    self._servers[index] = server
+                    break
+            else:
+                self._servers.append(server)
+        self.run_worker(self._rebuild(), exclusive=False)
+
+    @staticmethod
+    def _carry_token(old_name: str, new_name: str) -> None:
+        """Move a stored token when a server is renamed, so links keep authenticating."""
+        from multi_claude.remote import TokenStore
+
+        store = TokenStore()
+        token = store.get(old_name)
+        if token:
+            store.set(token, new_name)
+            store.delete(old_name)
+
+    def _selected_index(self) -> int | None:
+        pressed = self.query_one("#servers", RadioSet).pressed_button
+        radio_id = pressed.id if pressed is not None else None
+        if not radio_id or not radio_id.startswith("server-"):
+            return None
+        index = int(radio_id.split("-", 1)[1])
+        return index if 0 <= index < len(self._servers) else None
+
+
+class RepoLinkModal(ModalScreen["RemoteLink | None"]):
+    """Point a project at one sessions repo, on a configured server or a shared folder.
+
+    The server list comes from Ajustes, so linking a repo asks only what is specific to it:
+    which server, which repo, which branch, and what to call its tab.
+    """
+
+    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+
+    DEFAULT_CSS = """
+    RepoLinkModal { align: center middle; }
+    RepoLinkModal > Vertical {
+        background: $surface;
+        border: thick $primary;
+        padding: 1 2;
+        width: 84;
+        height: auto;
+    }
+    RepoLinkModal Label.title { text-style: bold; }
+    RepoLinkModal Label.section { text-style: bold; color: $accent; }
+    RepoLinkModal Label.hint { color: $text-muted; }
+    RepoLinkModal Label.error { color: $error; }
+    RepoLinkModal Horizontal { align: center middle; height: auto; margin-top: 1; }
+    RepoLinkModal Button { margin: 0 1; }
+    RepoLinkModal #fields-folder,
+    RepoLinkModal #fields-repo,
+    RepoLinkModal #fields-common { height: auto; }
+    """
+
+    # Radio ids that are not a server: a folder needs a path instead of a repo, and "none"
+    # is how a configured remote gets switched off — without it there was no way back.
+    FOLDER = "target-folder"
+    NONE = "target-none"
+
+    def __init__(
+        self,
+        link: RemoteLink,
+        *,
+        servers: list[RemoteServer],
+        title: str | None = None,
+        allow_none: bool = False,
+    ) -> None:
+        super().__init__()
+        self._initial = link
+        self._servers = servers
+        self._title_text = title or "Repositorio de sesiones"
+        # Only the global remote can be switched off; a project link is removed from its list
+        # instead, where "Quitar" already says exactly that.
+        self._allow_none = allow_none
+
+    def compose(self) -> ComposeResult:
+        from textual.containers import Horizontal, VerticalScroll
+
+        with Vertical():
+            yield Label(self._title_text, classes="title")
+            yield Label("Enter guarda · Esc cancela", classes="hint")
+            if not self._servers:
+                yield Label(
+                    "No hay servidores configurados: añádelos en Ajustes para poder elegir "
+                    "GitLab o GitHub.",
+                    classes="hint",
+                )
+
+            with VerticalScroll(id="link-body"):
+                yield Label("Dónde", classes="section")
+                with RadioSet(id="link-target"):
+                    for index, server in enumerate(self._servers):
+                        yield RadioButton(
+                            f"{server.name} — {server.summary()}",
+                            value=(server.name == self._initial.server),
+                            id=f"target-{index}",
+                        )
+                    yield RadioButton(
+                        "Carpeta compartida",
+                        value=(self._initial.kind == "directory"),
+                        id=self.FOLDER,
+                    )
+                    if self._allow_none:
+                        yield RadioButton(
+                            "Desactivado",
+                            value=not self._initial.is_configured,
+                            id=self.NONE,
+                        )
+
+                with Vertical(id="fields-folder"):
+                    yield Label("Ruta de la carpeta", classes="section")
+                    yield Input(
+                        value=self._initial.path,
+                        placeholder="/mnt/equipo/sesiones-claude",
+                        id="link-path",
+                    )
+
+                with Vertical(id="fields-repo"):
+                    yield Label("Repositorio", classes="section")
+                    yield Input(
+                        value=self._initial.repo,
+                        placeholder="grupo/sesiones-cliente-x",
+                        id="link-repo",
+                    )
+                    yield Label("Rama", classes="section")
+                    yield Input(value=self._initial.branch, placeholder="main", id="link-branch")
+
+                with Vertical(id="fields-common"):
+                    yield Label("Nombre de la pestaña (opcional)", classes="section")
+                    yield Input(
+                        value=self._initial.label,
+                        placeholder=self._initial.tab_label(),
+                        id="link-label",
+                    )
+
+            yield Label("", id="link-error", classes="error")
+            with Horizontal():
+                yield Button("Cancelar", id="cancel", variant="default")
+                yield Button("Guardar", id="save", variant="primary")
+
+    def on_mount(self) -> None:
+        self._sync_visible_fields()
+        self.query_one("#link-target", RadioSet).focus()
+        self.call_after_refresh(self._scroll_to_top)
+
+    def _scroll_to_top(self) -> None:
+        self.query_one("#link-body").scroll_home(animate=False)
+
+    @on(RadioSet.Changed, "#link-target")
+    def _on_target_changed(self, event: RadioSet.Changed) -> None:
+        self._sync_visible_fields()
+
+    def _sync_visible_fields(self) -> None:
+        disabled = self._is_none_selected()
+        folder = not disabled and self._chosen_server() is None
+        self.query_one("#fields-folder").display = folder
+        self.query_one("#fields-repo").display = not folder and not disabled
+        self.query_one("#fields-common").display = not disabled
+
+    @on(Button.Pressed, "#cancel")
+    def _cancel(self) -> None:
+        self.dismiss(None)
+
+    @on(Button.Pressed, "#save")
+    def _save(self) -> None:
+        self._try_save()
+
+    @on(Input.Submitted)
+    def _submitted(self) -> None:
+        self._try_save()
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def _is_none_selected(self) -> bool:
+        pressed = self.query_one("#link-target", RadioSet).pressed_button
+        return pressed is not None and pressed.id == self.NONE
+
+    def _try_save(self) -> None:
+        if self._is_none_selected():
+            self.dismiss(RemoteLink())  # kind="none": sharing off
+            return
+        link = self.collect()
+        server = self._chosen_server()
+        missing = (
+            "Falta la ruta de la carpeta"
+            if server is None and not link.path
+            else "Falta el repositorio"
+            if server is not None and not link.repo
+            else ""
+        )
+        if missing:
+            self.query_one("#link-error", Label).update(missing)
+            return
+        self.dismiss(link)
+
+    def _chosen_server(self) -> RemoteServer | None:
+        """The selected server, or None when the folder option is chosen."""
+        pressed = self.query_one("#link-target", RadioSet).pressed_button
+        radio_id = pressed.id if pressed is not None else None
+        if not radio_id or radio_id == self.FOLDER or not radio_id.startswith("target-"):
+            return None
+        index = int(radio_id.split("-", 1)[1])
+        return self._servers[index] if 0 <= index < len(self._servers) else None
+
+    def collect(self) -> RemoteLink:
+        server = self._chosen_server()
+        if server is None:
+            return RemoteLink(
+                kind="directory",
+                path=self.query_one("#link-path", Input).value,
+                label=self.query_one("#link-label", Input).value,
+            ).normalised()
+        return RemoteLink(
+            kind=server.kind,
+            host=server.api_host,
+            server=server.name,
+            repo=self.query_one("#link-repo", Input).value,
+            branch=self.query_one("#link-branch", Input).value,
+            label=self.query_one("#link-label", Input).value,
+        ).normalised()
+
+
+class ProjectRemotesModal(ModalScreen["list[RemoteLink] | None"]):
+    """Manage which sessions repos a project publishes to.
+
+    A project can be linked to several — one per client, one for product work — and each one
+    becomes a tab in the sessions listing. Returns the final list, or None if cancelled.
+
+    Links are stored against the project's git ``origin``, so linking one worktree links every
+    worktree of that repo. The modal says so, because otherwise the shared effect looks like a
+    bug the first time it happens.
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+        Binding("a", "add", "Añadir"),
+        Binding("delete", "remove", "Quitar"),
+    ]
+
+    DEFAULT_CSS = """
+    ProjectRemotesModal {
+        align: center middle;
+    }
+    ProjectRemotesModal > Vertical {
+        background: $surface;
+        border: thick $primary;
+        padding: 1 2;
+        width: 86;
+        height: auto;
+    }
+    ProjectRemotesModal Label.title {
+        text-style: bold;
+    }
+    ProjectRemotesModal Label.hint {
+        color: $text-muted;
+    }
+    ProjectRemotesModal Label.section {
+        margin-top: 1;
+        text-style: bold;
+        color: $accent;
+    }
+    ProjectRemotesModal Horizontal {
+        align: center middle;
+        height: auto;
+        margin-top: 1;
+    }
+    ProjectRemotesModal Button {
+        margin: 0 1;
+    }
+    """
+
+    def __init__(
+        self,
+        *,
+        project_name: str,
+        links: list[RemoteLink],
+        inherited: bool = False,
+        servers: list[RemoteServer] | None = None,
+    ) -> None:
+        super().__init__()
+        self.project_name = project_name
+        self._links = list(links)
+        self.servers = list(servers or [])
+        # ``inherited`` means what is listed came from the global setting, not from a link of
+        # this project's own. Saving turns it into an explicit link, which is worth saying.
+        self._inherited = inherited
+
+    def compose(self) -> ComposeResult:
+        from textual.containers import Horizontal
+
+        with Vertical():
+            yield Label(f"Repositorios de sesiones — {self.project_name}", classes="title")
+            yield Label(
+                "Cada repositorio es una pestaña. El enlace se guarda contra el origin "
+                "del repo, así que vale para todos sus worktrees.",
+                classes="hint",
+            )
+            if self._inherited:
+                yield Label(
+                    "Ahora usa el remoto global; al guardar tendrá enlaces propios.",
+                    classes="hint",
+                )
+
+            yield Label("Enlazados", classes="section")
+            yield Label("", id="links-empty", classes="hint")
+            with RadioSet(id="links"):
+                yield from self._link_buttons()
+
+            yield Label("a añade · Supr quita el seleccionado · Enter guarda", classes="hint")
+            with Horizontal():
+                yield Button("Cancelar", id="cancel", variant="default")
+                yield Button("Añadir…", id="add", variant="default")
+                yield Button("Quitar", id="remove", variant="default")
+                yield Button("Guardar", id="save", variant="primary")
+
+    def _link_buttons(self) -> ComposeResult:
+        for index, link in enumerate(self._links):
+            yield RadioButton(
+                f"{link.tab_label()} — {link.summary()}",
+                value=(index == 0),
+                id=f"link-{index}",
+            )
+
+    def on_mount(self) -> None:
+        self._sync_empty_label()
+
+    def _sync_empty_label(self) -> None:
+        label = self.query_one("#links-empty", Label)
+        label.update("(ninguno)" if not self._links else "")
+
+    async def _rebuild(self) -> None:
+        radio_set = self.query_one("#links", RadioSet)
+        await radio_set.remove_children()
+        for index, link in enumerate(self._links):
+            await radio_set.mount(
+                RadioButton(
+                    f"{link.tab_label()} — {link.summary()}",
+                    value=(index == 0),
+                    id=f"link-{index}",
+                )
+            )
+        self._sync_empty_label()
+
+    @on(Button.Pressed, "#cancel")
+    def _cancel(self) -> None:
+        self.dismiss(None)
+
+    @on(Button.Pressed, "#save")
+    def _save(self) -> None:
+        self.dismiss(list(self._links))
+
+    @on(Button.Pressed, "#add")
+    def _add_pressed(self) -> None:
+        self.action_add()
+
+    @on(Button.Pressed, "#remove")
+    def _remove_pressed(self) -> None:
+        self.action_remove()
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def action_add(self) -> None:
+        self.app.push_screen(
+            RepoLinkModal(
+                RemoteLink(),
+                servers=self.servers,
+                title=f"Añadir repositorio — {self.project_name}",
+            ),
+            self._on_added,
+        )
+
+    def _on_added(self, result: RemoteLink | None) -> None:
+        if result is None or not result.is_configured:
+            return
+        # Re-adding the same target replaces it, so one repo can never own two tabs.
+        for index, current in enumerate(self._links):
+            if current.same_target(result):
+                self._links[index] = result
+                break
+        else:
+            self._links.append(result)
+        self.run_worker(self._rebuild(), exclusive=False)
+
+    def action_remove(self) -> None:
+        index = self._selected_index()
+        if index is None:
+            return
+        del self._links[index]
+        self.run_worker(self._rebuild(), exclusive=False)
+
+    def _selected_index(self) -> int | None:
+        pressed = self.query_one("#links", RadioSet).pressed_button
+        radio_id = pressed.id if pressed is not None else None
+        if not radio_id or not radio_id.startswith("link-"):
+            return None
+        index = int(radio_id.split("-", 1)[1])
+        return index if 0 <= index < len(self._links) else None
+
+
+class PublishModal(ModalScreen["RemoteLink | None"]):
+    """Confirm publishing sessions, and choose which repo they go to.
+
+    Was originally the delete-confirmation modal reused, which meant the accept button said
+    "Borrar" in red — wrong verb, wrong colour, and alarming for an upload.
+
+    Picking the destination here rather than beforehand means one dialogue answers both
+    questions at once, and the file list stays visible while you choose. That list is the
+    point: the transcript drags ``tool-results/`` along, so a session that once printed a
+    ``.env`` would publish it.
+
+    Dismisses with the chosen :class:`RemoteLink`, or None on cancel.
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+    ]
+
+    DEFAULT_CSS = """
+    PublishModal {
+        align: center middle;
+    }
+    PublishModal > Vertical {
+        background: $surface;
+        border: thick $primary;
+        padding: 1 2;
+        width: 84;
+        height: auto;
+    }
+    PublishModal Label.title {
+        text-style: bold;
+    }
+    PublishModal Label.warning {
+        color: $warning;
+        text-style: bold;
+    }
+    PublishModal Label.keys {
+        color: $text-muted;
+    }
+    PublishModal Label.hint {
+        color: $text-muted;
+    }
+    PublishModal Label.section {
+        text-style: bold;
+        color: $accent;
+    }
+    PublishModal Horizontal {
+        align: center middle;
+        height: auto;
+        margin-top: 1;
+    }
+    PublishModal Button {
+        margin: 0 1;
+    }
+    """
+
+    def __init__(
+        self,
+        *,
+        session_count: int,
+        files: list[str],
+        destinations: list[RemoteLink],
+        preselected: int = 0,
+    ) -> None:
+        super().__init__()
+        self.session_count = session_count
+        self.files = files
+        self.destinations = destinations
+        self.preselected = preselected if 0 <= preselected < len(destinations) else 0
+
+    def compose(self) -> ComposeResult:
+        from textual.containers import Horizontal, VerticalScroll
+
+        with Vertical():
+            yield Label(
+                f"Publicar {self.session_count} sesión(es) · {len(self.files)} ficheros",
+                classes="title",
+            )
+            yield Label(
+                "⚠️  Se sube el transcript completo, incluidos los tool-results. "
+                "Revisa que no haya secretos.",
+                classes="warning",
+            )
+            yield Label("Enter publica · Esc cancela", classes="keys")
+
+            # Everything that can grow lives in one scrollable body, so the title, the
+            # warning and the buttons stay put however many repos or files there are.
+            with VerticalScroll(id="publish-body"):
+                if len(self.destinations) > 1:
+                    yield Label("Repositorio de destino", classes="section")
+                    with RadioSet(id="publish-destination"):
+                        for index, link in enumerate(self.destinations):
+                            yield RadioButton(
+                                f"{link.tab_label()} — {link.summary()}",
+                                value=(index == self.preselected),
+                                id=f"dest-{index}",
+                            )
+                else:
+                    target = self.destinations[0]
+                    yield Label(
+                        f"Destino: {target.tab_label()} — {target.summary()}", classes="hint"
+                    )
+
+                yield Label("Se suben estos ficheros", classes="section")
+                for line in self.files:
+                    yield Static(line)
+
+            with Horizontal():
+                yield Button("Cancelar", id="cancel", variant="default")
+                yield Button("Publicar", id="publish", variant="primary")
+
+    def on_mount(self) -> None:
+        if len(self.destinations) > 1:
+            self.query_one("#publish-destination", RadioSet).focus()
+        else:
+            self.query_one("#publish", Button).focus()
+
+    @on(Button.Pressed, "#cancel")
+    def _cancel(self) -> None:
+        self.dismiss(None)
+
+    @on(Button.Pressed, "#publish")
+    def _publish(self) -> None:
+        self.dismiss(self.chosen())
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def on_key(self, event: object) -> None:
+        """Enter accepts from anywhere, including with the radio focused."""
+        key = getattr(event, "key", None)
+        if key == "enter":
+            _stop_event(event)
+            self.dismiss(self.chosen())
+
+    def chosen(self) -> RemoteLink:
+        """The destination the user selected, or the only one there is."""
+        if len(self.destinations) == 1:
+            return self.destinations[0]
+        pressed = self.query_one("#publish-destination", RadioSet).pressed_button
+        radio_id = pressed.id if pressed is not None else None
+        if radio_id and radio_id.startswith("dest-"):
+            index = int(radio_id.split("-", 1)[1])
+            if 0 <= index < len(self.destinations):
+                return self.destinations[index]
+        return self.destinations[self.preselected]
 
 
 class ConfirmDeleteModal(ModalScreen[bool]):
@@ -1018,11 +2111,13 @@ class ConfirmDeleteModal(ModalScreen[bool]):
 
         with Vertical():
             yield Label(self.title_text, classes="title")
-            for line in self.details:
-                yield Static(line)
+            # Warning before the details, not after: the details can be a long file list, and
+            # the one line that must not be missed is the reason to think twice.
             if self.warning:
                 yield Label(f"⚠️  {self.warning}", classes="warning")
             yield Label("`y` confirma · Enter/Esc cancela", classes="hint")
+            for line in self.details:
+                yield Static(line)
             with Horizontal():
                 yield Button("Cancelar", id="cancel", variant="default")
                 yield Button("Borrar", id="confirm", variant="error")

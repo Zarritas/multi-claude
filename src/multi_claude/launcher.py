@@ -211,7 +211,7 @@ def _argv_apple_terminal(cwd: str, argv: list[str]) -> list[str]:
     return [
         "osascript",
         "-e",
-        f"tell application \"Terminal\" to do script {as_literal}",
+        f'tell application "Terminal" to do script {as_literal}',
         "-e",
         'tell application "Terminal" to activate',
     ]
@@ -224,10 +224,14 @@ def _argv_iterm(cwd: str, argv: list[str]) -> list[str]:
     as_literal = _applescript_quote(shell_cmd)
     return [
         "osascript",
-        "-e", 'tell application "iTerm"',
-        "-e", "  create window with default profile",
-        "-e", f"  tell current session of current window to write text {as_literal}",
-        "-e", "end tell",
+        "-e",
+        'tell application "iTerm"',
+        "-e",
+        "  create window with default profile",
+        "-e",
+        f"  tell current session of current window to write text {as_literal}",
+        "-e",
+        "end tell",
     ]
 
 
@@ -238,10 +242,14 @@ def _tab_iterm(cwd: str, argv: list[str]) -> list[str]:
     as_literal = _applescript_quote(shell_cmd)
     return [
         "osascript",
-        "-e", 'tell application "iTerm"',
-        "-e", "  tell current window to create tab with default profile",
-        "-e", f"  tell current session of current window to write text {as_literal}",
-        "-e", "end tell",
+        "-e",
+        'tell application "iTerm"',
+        "-e",
+        "  tell current window to create tab with default profile",
+        "-e",
+        f"  tell current session of current window to write text {as_literal}",
+        "-e",
+        "end tell",
     ]
 
 

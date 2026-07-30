@@ -209,9 +209,7 @@ def move_session(
     idx = index if index is not None else default_index()
     indexed = idx.get(session_id)
     if indexed is not None:
-        idx.upsert_session(
-            replace(indexed, project_dir=str(dest_dir), jsonl_path=str(dest_jsonl))
-        )
+        idx.upsert_session(replace(indexed, project_dir=str(dest_dir), jsonl_path=str(dest_jsonl)))
 
 
 def list_active_sessions(

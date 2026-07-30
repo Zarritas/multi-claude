@@ -205,8 +205,10 @@ async def test_filter_in_sessions_screen(synthetic_world: Path) -> None:
         filter_input.value = "another"
         await pilot.pause()
         # Only ses-beta-2 has "another" in its prompt
-        assert len(app.screen._visible_indices) == 1
-        assert app.screen._sessions[app.screen._visible_indices[0]].id == "ses-beta-2"
+        assert len(app.screen._rows) == 1
+        is_remote, index = app.screen._rows[0]
+        assert not is_remote
+        assert app.screen._sessions[index].id == "ses-beta-2"
 
 
 async def test_rename_session_via_modal(synthetic_world: Path, tmp_path: Path) -> None:
@@ -356,9 +358,7 @@ async def test_add_project_invokes_launcher(synthetic_world: Path, tmp_path: Pat
 
     captured: dict = {}
 
-    def fake_launch(
-        cwd, session_id, *, display_name=None, app=None, mode="auto", claude_args=None
-    ):
+    def fake_launch(cwd, session_id, *, display_name=None, app=None, mode="auto", claude_args=None):
         captured["cwd"] = cwd
         captured["session_id"] = session_id
         captured["mode"] = mode
@@ -426,9 +426,7 @@ async def test_enter_uses_default_mode_and_shift_enter_uses_opposite(
     """Enter → prefs.default_mode; Shift+Enter → alternate_for(default)."""
     captured: list[dict] = []
 
-    def fake_launch(
-        cwd, session_id, *, display_name=None, app=None, mode="auto", claude_args=None
-    ):
+    def fake_launch(cwd, session_id, *, display_name=None, app=None, mode="auto", claude_args=None):
         captured.append({"session_id": session_id, "mode": mode})
         return LaunchOutcome("window", "fake-emulator")
 
@@ -617,9 +615,7 @@ async def test_launch_passes_claude_args(synthetic_world: Path) -> None:
 
     captured: list[dict] = []
 
-    def fake_launch(
-        cwd, session_id, *, display_name=None, app=None, mode="auto", claude_args=None
-    ):
+    def fake_launch(cwd, session_id, *, display_name=None, app=None, mode="auto", claude_args=None):
         captured.append({"claude_args": claude_args})
         return LaunchOutcome("tab", "fake-emulator")
 

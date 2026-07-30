@@ -2,6 +2,9 @@
 
 Este documento extiende el README con detalles que no caben en una visión general.
 
+Las sesiones compartidas entre máquinas y compañeros tienen su propio plan en
+[REMOTE-SESSIONS.md](REMOTE-SESSIONS.md).
+
 ## Decisiones cerradas
 
 | Tema                          | Decisión                                                                 |
@@ -196,6 +199,8 @@ ClaudeBrowserApp
 
 - Fork de sesión (`claude --resume <id> --fork-session`) como acción propia — de momento se puede
   conseguir metiendo `--fork-session` en `claude_args`, pero afectaría a todos los lanzamientos.
+  El plan de [sesiones compartidas](REMOTE-SESSIONS.md) lo necesita para bifurcar una sesión
+  publicada por otra persona, así que es ahí donde acabará convirtiéndose en acción propia.
 - Reconciliación automática de proyectos movidos vía remote URL del `.git` (hoy: merge manual con `m`).
 - `claude_args` por proyecto: la configuración es global, no por proyecto ni por sesión.
 - Pestañas en Ghostty, Alacritty, foot y Terminal.app: sus CLIs no lo permiten (ver la matriz de

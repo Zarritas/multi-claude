@@ -83,12 +83,17 @@ def encode_cwd(cwd: str) -> str:
 def resolve_real_cwd(project_dir: Path) -> Path | None:
     """Resolve the project's real cwd by reading the `cwd` field of its sessions.
 
-    Iterates files newest first. A session that was *moved/resumed across cwds*
-    (its first event records an old cwd, e.g. the repo root, while it now lives in a
-    subdir's dir) would otherwise flip the whole project's identity, because the
-    naive "newest file's first cwd" is stale. To stay robust we prefer the candidate
-    cwd whose encoding matches ``project_dir.name`` (the dir Claude named after that
-    very cwd); only if none matches do we fall back to the newest file's first cwd.
+    Candidates are read newest first, and picked in this order:
+
+    1. One whose encoding matches ``project_dir.name`` — the dir Claude named after that very
+       cwd. A session *moved or resumed across cwds* records an older cwd in its first event,
+       and would otherwise flip the whole project's identity.
+    2. One that **exists on disk**. A session published by a colleague carries their ``$HOME``,
+       which exists on their machine and not here; hydrating it into your project would
+       otherwise make the newest file's foreign cwd win and mark the project orphaned —
+       unopenable, for a session you just asked for.
+    3. The newest file's cwd, as a last resort.
+
     Returns None if no jsonl yields a cwd.
     """
     jsonl_files = sorted(
@@ -96,16 +101,20 @@ def resolve_real_cwd(project_dir: Path) -> Path | None:
         key=lambda p: p.stat().st_mtime,
         reverse=True,
     )
-    fallback: str | None = None
+    newest: str | None = None
+    existing: str | None = None
     for jsonl in jsonl_files:
         cwd = _first_cwd(jsonl)
         if cwd is None:
             continue
-        if fallback is None:
-            fallback = cwd
+        if newest is None:
+            newest = cwd
         if encode_cwd(cwd) == project_dir.name:
             return Path(cwd)
-    return Path(fallback) if fallback is not None else None
+        if existing is None and Path(cwd).is_dir():
+            existing = cwd
+    chosen = existing or newest
+    return Path(chosen) if chosen is not None else None
 
 
 def _first_cwd(jsonl: Path) -> str | None:
@@ -330,3 +339,66 @@ def group_into_folders(
 
     out.sort(key=lambda pair: pair[0])
     return [row for _, row in out]
+
+
+def resolve_git_remote(path: Path) -> str | None:
+    """Return the URL of ``origin`` for the repo at ``path``, or None.
+
+    Published sessions record this so a colleague can tell whether the conversation
+    was recorded against the same repository they have checked out. The path itself
+    is useless for that: it differs on every machine.
+    """
+    return _git_line(path, ["remote", "get-url", "origin"])
+
+
+def resolve_git_head(path: Path) -> str | None:
+    """Return the short HEAD sha for the repo at ``path``, or None.
+
+    The transcript travels but the code does not, so this is what lets hydration warn
+    that the local checkout has moved on since the session was recorded.
+    """
+    return _git_line(path, ["rev-parse", "--short", "HEAD"])
+
+
+def resolve_git_user_email(path: Path) -> str | None:
+    """Return the git ``user.email`` in effect at ``path``, or None.
+
+    Used to stamp who published a session. git config is the closest thing to an
+    identity multi-claude already has access to, and it is the same name the audit
+    trail of the backing repo would show anyway.
+    """
+    return _git_line(path, ["config", "user.email"])
+
+
+def _git_line(path: Path, args: list[str]) -> str | None:
+    """Run a git command in ``path`` and return its single line of stdout, or None.
+
+    Missing git, a timeout, a non-zero exit or empty output all collapse to None: this
+    is metadata for a warning, never something worth failing a publish over.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(path), *args],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=2,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
+def project_remote_key(path: Path) -> str:
+    """Stable key under which a project's sessions-repo links are stored.
+
+    The repo's ``origin`` when there is one, normalised so ssh and https forms agree and so
+    every worktree of the repo resolves to the same key. Otherwise the absolute path, which
+    still works on one machine but does not carry between checkouts.
+    """
+    from multi_claude.project_remotes import normalize_git_remote
+
+    normalised = normalize_git_remote(resolve_git_remote(path))
+    return normalised or str(path)
