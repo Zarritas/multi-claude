@@ -41,9 +41,7 @@ def _remote(bare: Path, tmp_path: Path, *, name: str = "work") -> GitSshRemote:
 
 
 def _meta(session_id: str, **kwargs: object) -> RemoteSession:
-    return RemoteSession(
-        session_id=session_id, published_at="2026-07-28T10:00:00+00:00", **kwargs
-    )  # type: ignore[arg-type]
+    return RemoteSession(session_id=session_id, published_at="2026-07-28T10:00:00+00:00", **kwargs)  # type: ignore[arg-type]
 
 
 # --- URL construction ---------------------------------------------------------------
@@ -392,9 +390,7 @@ def test_port_22_keeps_the_familiar_form() -> None:
 
 
 def test_the_port_travels_from_the_server_to_the_link() -> None:
-    server = RemoteServer(
-        name="FL", host="https://git.empresa.com", auth="ssh", ssh_port=2211
-    )
+    server = RemoteServer(name="FL", host="https://git.empresa.com", auth="ssh", ssh_port=2211)
     link = RemoteLink(server="FL", repo="grupo/sesiones").resolved([server])
 
     assert link.ssh_port == 2211

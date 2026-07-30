@@ -271,9 +271,7 @@ class GitLabRemote(HttpRepoRemote):
         return self._request(f"{self._file_url(file_path)}/raw?ref={self.branch}")
 
     def _delete_file(self, file_path: str) -> None:
-        query = urllib.parse.urlencode(
-            {"branch": self.branch, "commit_message": _DELETE_MESSAGE}
-        )
+        query = urllib.parse.urlencode({"branch": self.branch, "commit_message": _DELETE_MESSAGE})
         self._request(f"{self._file_url(file_path)}?{query}", method="DELETE")
 
     def _write_file(self, file_path: str, payload: bytes) -> None:

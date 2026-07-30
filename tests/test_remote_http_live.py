@@ -92,8 +92,7 @@ def _make_handler(forge: _Forge) -> type[BaseHTTPRequestHandler]:
                     entries = [
                         {"type": "blob", "path": p}
                         for p in sorted(forge.files)
-                        if p.startswith(f"{base}/")
-                        and (recursive or "/" not in p[len(base) + 1 :])
+                        if p.startswith(f"{base}/") and (recursive or "/" not in p[len(base) + 1 :])
                     ]
                     self._json(200, entries if page == 1 else [])
                     return
@@ -140,9 +139,7 @@ def _make_handler(forge: _Forge) -> type[BaseHTTPRequestHandler]:
                 self._json(401, {"message": "401 Unauthorized"})
                 return
             body = self._read_body()
-            path = urllib.parse.unquote(
-                self.path.split("/repository/files/", 1)[1].split("?")[0]
-            )
+            path = urllib.parse.unquote(self.path.split("/repository/files/", 1)[1].split("?")[0])
             if path in forge.files:
                 self._json(400, {"message": "A file with this name already exists"})
                 return

@@ -272,9 +272,7 @@ class SessionsScreen(Screen[None]):
         await tabs.clear()
         await tabs.add_tab(Tab("Locales", id=_LOCAL_TAB_ID))
         for index, link in enumerate(self._remote_links):
-            await tabs.add_tab(
-                Tab(f"☁ {link.tab_label()}", id=f"{_REMOTE_TAB_PREFIX}{index}")
-            )
+            await tabs.add_tab(Tab(f"☁ {link.tab_label()}", id=f"{_REMOTE_TAB_PREFIX}{index}"))
         tabs.display = bool(self._remote_links)
 
     def _repaint_remote(self) -> None:
@@ -497,9 +495,7 @@ class SessionsScreen(Screen[None]):
             self.notify("Selecciona sesión(es) para mover", severity="warning")
             return
         if self.project.git_common_dir is None:
-            self.notify(
-                "Esta sesión no pertenece a un grupo de worktrees", severity="warning"
-            )
+            self.notify("Esta sesión no pertenece a un grupo de worktrees", severity="warning")
             return
         self._gather_move_destinations(targets)
 
@@ -866,9 +862,7 @@ class SessionsScreen(Screen[None]):
         self._hydrate_worker(remote, link, mode)
 
     @work(thread=True, exclusive=True, group="hydrate-session")
-    def _hydrate_worker(
-        self, remote: RemoteSession, link: RemoteLink, mode: LaunchMode
-    ) -> None:
+    def _hydrate_worker(self, remote: RemoteSession, link: RemoteLink, mode: LaunchMode) -> None:
         store = self._claude_app.store_for_link(link)
         if store is None:
             return
@@ -880,9 +874,7 @@ class SessionsScreen(Screen[None]):
         local_head = resolve_git_head(self.project.path)
         self.app.call_from_thread(self._on_hydrated, remote, mode, local_head)
 
-    def _on_hydrated(
-        self, remote: RemoteSession, mode: LaunchMode, local_head: str | None
-    ) -> None:
+    def _on_hydrated(self, remote: RemoteSession, mode: LaunchMode, local_head: str | None) -> None:
         # The transcript travels, the repository does not: warn when the conversation
         # was recorded against different code, then launch anyway — it is the user's
         # call whether that matters.
@@ -969,7 +961,6 @@ class SessionsScreen(Screen[None]):
             if links
             else "Enlaces borrados (se usa el remoto global)"
         )
-
 
     def action_edit_tags(self) -> None:
         session = self._selected_session()

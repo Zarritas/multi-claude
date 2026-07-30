@@ -257,9 +257,7 @@ class GitSshRemote:
                 if attempt == _PUSH_ATTEMPTS - 1:
                     break
                 try:
-                    self._git(
-                        "pull", "--rebase", "--quiet", "origin", self.branch, cwd=self.work
-                    )
+                    self._git("pull", "--rebase", "--quiet", "origin", self.branch, cwd=self.work)
                 except RemoteError:
                     break  # not a race: a real failure, report the push error
         detail = f": {last}" if last else ""
@@ -287,6 +285,7 @@ def _git_message(stderr: str, url: str) -> str:
     ):
         return f"{url} no existe o no es un repositorio"
     return text or f"git falló contra {url}"
+
 
 def probe_ssh_access(
     host: str, user: str = "git", port: int = 22, *, timeout: int = PROBE_TIMEOUT
@@ -330,11 +329,7 @@ def probe_ssh_access(
     except subprocess.TimeoutExpired as exc:
         raise RemoteError(
             f"{host}:{port} no respondió en {timeout}s"
-            + (
-                " — ¿el puerto SSH es otro? (mira la URL ssh:// del repo)"
-                if port == 22
-                else ""
-            )
+            + (" — ¿el puerto SSH es otro? (mira la URL ssh:// del repo)" if port == 22 else "")
         ) from exc
 
     output = " ".join(f"{result.stdout} {result.stderr}".split())

@@ -148,9 +148,7 @@ def test_scan_sessions_store_name_overrides_embedded(tmp_path: Path) -> None:
     store = NamesStore(tmp_path / "names.json")
     store.set("sid-both", "from-multi-claude")
     index = SessionIndex(tmp_path / "index.sqlite3")
-    sessions = {
-        s.id: s for s in scan_sessions(tmp_path, names_store=store, index=index)
-    }
+    sessions = {s.id: s for s in scan_sessions(tmp_path, names_store=store, index=index)}
     assert sessions["sid-both"].display_name == "from-multi-claude"
 
 

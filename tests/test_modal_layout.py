@@ -203,9 +203,7 @@ async def test_a_long_help_line_wraps_instead_of_being_cut() -> None:
     app = ClaudeBrowserApp()
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()
-        app.push_screen(
-            M.ProjectRemotesModal(project_name="p", links=[], inherited=False)
-        )
+        app.push_screen(M.ProjectRemotesModal(project_name="p", links=[], inherited=False))
         for _ in range(8):
             await pilot.pause()
         # The full sentence is only readable if it wrapped; clipped, the tail is gone.

@@ -358,9 +358,7 @@ async def test_add_project_invokes_launcher(synthetic_world: Path, tmp_path: Pat
 
     captured: dict = {}
 
-    def fake_launch(
-        cwd, session_id, *, display_name=None, app=None, mode="auto", claude_args=None
-    ):
+    def fake_launch(cwd, session_id, *, display_name=None, app=None, mode="auto", claude_args=None):
         captured["cwd"] = cwd
         captured["session_id"] = session_id
         captured["mode"] = mode
@@ -428,9 +426,7 @@ async def test_enter_uses_default_mode_and_shift_enter_uses_opposite(
     """Enter → prefs.default_mode; Shift+Enter → alternate_for(default)."""
     captured: list[dict] = []
 
-    def fake_launch(
-        cwd, session_id, *, display_name=None, app=None, mode="auto", claude_args=None
-    ):
+    def fake_launch(cwd, session_id, *, display_name=None, app=None, mode="auto", claude_args=None):
         captured.append({"session_id": session_id, "mode": mode})
         return LaunchOutcome("window", "fake-emulator")
 
@@ -619,9 +615,7 @@ async def test_launch_passes_claude_args(synthetic_world: Path) -> None:
 
     captured: list[dict] = []
 
-    def fake_launch(
-        cwd, session_id, *, display_name=None, app=None, mode="auto", claude_args=None
-    ):
+    def fake_launch(cwd, session_id, *, display_name=None, app=None, mode="auto", claude_args=None):
         captured.append({"claude_args": claude_args})
         return LaunchOutcome("tab", "fake-emulator")
 

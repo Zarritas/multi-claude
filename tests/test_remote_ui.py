@@ -454,9 +454,7 @@ async def test_a_configured_server_appears_when_linking_a_repo(world: Path) -> N
 
         link_modal = app.screen
         assert isinstance(link_modal, RepoLinkModal)
-        offered = [
-            str(button.label) for button in link_modal.query(RadioButton)
-        ]
+        offered = [str(button.label) for button in link_modal.query(RadioButton)]
         assert any("FactorLibre" in text for text in offered)
         assert any("GitHub propio" in text for text in offered)
         assert any("Carpeta compartida" in text for text in offered)
@@ -901,8 +899,7 @@ async def test_the_publish_dialogue_lists_the_files_and_the_warning(world: Path)
         for _ in range(10):
             await pilot.pause()
         rendered = "\n".join(
-            "".join(s.text for s in strip)
-            for strip in app.screen._compositor.render_strips()
+            "".join(s.text for s in strip) for strip in app.screen._compositor.render_strips()
         )
         flat = re.sub(r"[█▀▄▔▁▊▎▆▃]", " ", rendered)
         flat = re.sub(r"\s+", " ", flat)
@@ -1164,8 +1161,7 @@ async def test_the_unpublish_dialogue_says_the_local_copy_survives(world: Path) 
             await pilot.pause()
 
         painted = "\n".join(
-            "".join(s.text for s in strip)
-            for strip in app.screen._compositor.render_strips()
+            "".join(s.text for s in strip) for strip in app.screen._compositor.render_strips()
         )
         flat = _re.sub(r"\s+", " ", _re.sub(r"[█▀▄▔▁▊▎▆▃]", " ", painted))
         assert "Despublicar" in flat
@@ -1183,9 +1179,7 @@ async def test_the_global_remote_can_be_switched_off(world: Path) -> None:
     app = ClaudeBrowserApp()
     async with app.run_test(size=(100, 34)) as pilot:
         await pilot.pause()
-        configured = replace(
-            app.prefs, remote_kind="directory", remote_path=str(world / "global")
-        )
+        configured = replace(app.prefs, remote_kind="directory", remote_path=str(world / "global"))
         modal = RepoLinkModal(configured.remote_link(), servers=[], allow_none=True)
         app.push_screen(modal)
         for _ in range(8):
