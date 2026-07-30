@@ -57,11 +57,14 @@ def list_suggestions(
         for entry in base.iterdir():
             if not entry.name.lower().startswith(name_filter):
                 continue
-            if entry.is_dir():
+            # Directorios siempre; ficheros solo si se piden y su extensión encaja.
+            wanted = entry.is_dir() or (
+                include_files
+                and entry.is_file()
+                and (norm_suffixes is None or entry.suffix.lower() in norm_suffixes)
+            )
+            if wanted:
                 candidates.append(entry)
-            elif include_files and entry.is_file():
-                if norm_suffixes is None or entry.suffix.lower() in norm_suffixes:
-                    candidates.append(entry)
     except (PermissionError, OSError):
         return []
 
@@ -83,9 +86,7 @@ def common_prefix_completion(
     the way to it — appending ``/`` only when that match is a directory, so the
     next Tab descends into it (a file is already the final value).
     """
-    candidates = list_suggestions(
-        prefix, limit=200, include_files=include_files, suffixes=suffixes
-    )
+    candidates = list_suggestions(prefix, limit=200, include_files=include_files, suffixes=suffixes)
     if not candidates:
         return None
     if len(candidates) == 1:
