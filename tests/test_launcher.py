@@ -11,6 +11,7 @@ import pytest
 from multi_claude.launcher import (
     LauncherError,
     LaunchOutcome,
+    _argv_ghostty,
     _build_claude_argv,
     detect_multiplexer,
     detect_terminal_emulator,
@@ -59,6 +60,7 @@ class _MuxRun:
 
         class _Result:
             returncode = 0
+            stdout = ""
             stderr = ""
 
         return _Result()
@@ -190,7 +192,10 @@ def test_launch_claude_uses_zellij(monkeypatch: pytest.MonkeyPatch) -> None:
     ]
 
 
-def test_launch_claude_uses_terminator(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_launch_claude_terminator_splits_with_remotinator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`auto`/`split` inside Terminator opens a real pane over DBus, not a tab."""
     monkeypatch.delenv("TMUX", raising=False)
     monkeypatch.delenv("ZELLIJ", raising=False)
     monkeypatch.setenv("TERMINATOR_UUID", "term://x")
@@ -204,7 +209,35 @@ def test_launch_claude_uses_terminator(monkeypatch: pytest.MonkeyPatch) -> None:
         patch("multi_claude.launcher.shutil.which", side_effect=fake_which),
         patch("multi_claude.launcher.subprocess.run", side_effect=runner),
     ):
-        launch_claude(Path("/work/t"), "sid-3", display_name="Mi feature")
+        outcome = launch_claude(Path("/work/t"), "sid-3", display_name="Mi feature")
+
+    assert runner.calls == [
+        [
+            "remotinator",
+            "vsplit",
+            "-x",
+            f"cd '{_p('/work/t')}' && exec 'claude' '--resume' 'sid-3' '-n' 'Mi feature'",
+        ]
+    ]
+    assert outcome == LaunchOutcome("split", "terminator")
+
+
+def test_launch_claude_uses_terminator_tab(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`tab` mode still goes through the CLI, which reuses the window over DBus."""
+    monkeypatch.delenv("TMUX", raising=False)
+    monkeypatch.delenv("ZELLIJ", raising=False)
+    monkeypatch.setenv("TERMINATOR_UUID", "term://x")
+
+    def fake_which(cmd: str) -> str | None:
+        return f"/usr/bin/{cmd}"
+
+    runner = _MuxRun()
+
+    with (
+        patch("multi_claude.launcher.shutil.which", side_effect=fake_which),
+        patch("multi_claude.launcher.subprocess.run", side_effect=runner),
+    ):
+        outcome = launch_claude(Path("/work/t"), "sid-3", display_name="Mi feature", mode="tab")
 
     assert runner.calls == [
         [
@@ -219,6 +252,76 @@ def test_launch_claude_uses_terminator(monkeypatch: pytest.MonkeyPatch) -> None:
             "Mi feature",
         ]
     ]
+    assert outcome == LaunchOutcome("tab", "terminator")
+
+
+def test_launch_claude_terminator_without_remotinator_falls_back_to_tab(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No `remotinator` in PATH → the pane degrades to a tab and says so."""
+    monkeypatch.delenv("TMUX", raising=False)
+    monkeypatch.delenv("ZELLIJ", raising=False)
+    monkeypatch.setenv("TERMINATOR_UUID", "term://x")
+
+    def fake_which(cmd: str) -> str | None:
+        return None if cmd == "remotinator" else f"/usr/bin/{cmd}"
+
+    runner = _MuxRun()
+
+    with (
+        patch("multi_claude.launcher.shutil.which", side_effect=fake_which),
+        patch("multi_claude.launcher.subprocess.run", side_effect=runner),
+    ):
+        outcome = launch_claude(Path("/work/t"), "sid-3", mode="split")
+
+    assert runner.calls == [
+        [
+            "terminator",
+            "--new-tab",
+            f"--working-directory={_p('/work/t')}",
+            "-x",
+            "claude",
+            "--resume",
+            "sid-3",
+        ]
+    ]
+    assert outcome.placement == "tab"
+    assert outcome.fallback_reason is not None and "remotinator" in outcome.fallback_reason
+
+
+def test_launch_claude_terminator_pane_error_on_stdout_falls_back_to_tab(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """remotinator reports some failures as `ERROR: ...` on stdout with exit 0."""
+    monkeypatch.delenv("TMUX", raising=False)
+    monkeypatch.delenv("ZELLIJ", raising=False)
+    monkeypatch.setenv("TERMINATOR_UUID", "term://x")
+
+    calls: list[list[str]] = []
+
+    def fake_run(argv, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append(argv)
+        rejected = argv[0] == "remotinator"
+
+        class _Result:
+            returncode = 0
+            stdout = "ERROR: Terminal with supplied UUID not found\n" if rejected else ""
+            stderr = ""
+
+        return _Result()
+
+    with (
+        patch(
+            "multi_claude.launcher.shutil.which",
+            side_effect=lambda cmd: f"/usr/bin/{cmd}",
+        ),
+        patch("multi_claude.launcher.subprocess.run", side_effect=fake_run),
+    ):
+        outcome = launch_claude(Path("/work/t"), "sid-3", mode="split")
+
+    assert [c[0] for c in calls] == ["remotinator", "terminator"]
+    assert outcome.placement == "tab"
+    assert outcome.fallback_reason is not None and "UUID" in outcome.fallback_reason
 
 
 def test_launch_claude_tmux_failure_raises(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -422,13 +525,66 @@ def test_detect_emulator_vscode_degrades_to_inline(
     assert outcome.fallback_reason is not None and "vscode" in outcome.fallback_reason
 
 
-def test_launch_claude_window_mode_uses_ghostty(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_launch_claude_window_mode_uses_ghostty_ipc(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`ghostty +new-window` asks the running instance instead of spawning a second one."""
     _clear_mux_envs(monkeypatch)
     _clear_emulator_envs(monkeypatch)
     monkeypatch.setenv("TERM_PROGRAM", "ghostty")
+    monkeypatch.setattr("multi_claude.launcher._IS_MACOS", False)
 
     def fake_which(cmd: str) -> str | None:
         return f"/usr/bin/{cmd}" if cmd in ("claude", "ghostty") else None
+
+    popen_calls: list[list[str]] = []
+    runner = _MuxRun()
+
+    class FakePopen:
+        def __init__(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+            popen_calls.append(argv)
+
+    with (
+        patch("multi_claude.launcher.shutil.which", side_effect=fake_which),
+        patch("multi_claude.launcher.subprocess.run", side_effect=runner),
+        patch("multi_claude.launcher.subprocess.Popen", FakePopen),
+    ):
+        outcome = launch_claude(Path("/work/g"), "sid-g", mode="window")
+
+    assert runner.calls == [
+        [
+            "ghostty",
+            "+new-window",
+            f"--working-directory={_p('/work/g')}",
+            "-e",
+            "claude",
+            "--resume",
+            "sid-g",
+        ]
+    ]
+    assert popen_calls == []
+    assert outcome == LaunchOutcome("window", "ghostty")
+
+
+def test_launch_claude_ghostty_ipc_failure_spawns_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No reachable instance (or a Ghostty without the action) → plain `ghostty`."""
+    _clear_mux_envs(monkeypatch)
+    _clear_emulator_envs(monkeypatch)
+    monkeypatch.setenv("TERM_PROGRAM", "ghostty")
+    monkeypatch.setattr("multi_claude.launcher._IS_MACOS", False)
+
+    def fake_which(cmd: str) -> str | None:
+        return f"/usr/bin/{cmd}" if cmd in ("claude", "ghostty") else None
+
+    def fake_run(argv, **kwargs):  # type: ignore[no-untyped-def]
+        class _Result:
+            returncode = 1
+            stdout = ""
+            stderr = "D-Bus method call returned an error\n"
+
+        return _Result()
 
     popen_calls: list[list[str]] = []
 
@@ -438,9 +594,10 @@ def test_launch_claude_window_mode_uses_ghostty(monkeypatch: pytest.MonkeyPatch)
 
     with (
         patch("multi_claude.launcher.shutil.which", side_effect=fake_which),
+        patch("multi_claude.launcher.subprocess.run", side_effect=fake_run),
         patch("multi_claude.launcher.subprocess.Popen", FakePopen),
     ):
-        launch_claude(Path("/work/g"), "sid-g", mode="window")
+        outcome = launch_claude(Path("/work/g"), "sid-g", mode="window")
 
     assert popen_calls == [
         [
@@ -451,6 +608,25 @@ def test_launch_claude_window_mode_uses_ghostty(monkeypatch: pytest.MonkeyPatch)
             "--resume",
             "sid-g",
         ]
+    ]
+    # Same placement either way, so the user isn't told about the internal fallback.
+    assert outcome == LaunchOutcome("window", "ghostty")
+
+
+def test_argv_ghostty_on_macos_goes_through_open(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ghostty's CLI refuses to launch the emulator on macOS; `open -na` is the way in."""
+    monkeypatch.setattr("multi_claude.launcher._IS_MACOS", True)
+
+    assert _argv_ghostty("/work/g", ["claude", "--resume", "sid-g"]) == [
+        "open",
+        "-na",
+        "Ghostty.app",
+        "--args",
+        "--working-directory=/work/g",
+        "-e",
+        "claude",
+        "--resume",
+        "sid-g",
     ]
 
 
@@ -944,6 +1120,38 @@ def test_preview_dispatch_reports_missing_tab_support(monkeypatch: pytest.Monkey
 
     assert outcome.placement == "window"
     assert outcome.fallback_reason is not None and "ghostty" in outcome.fallback_reason
+
+
+def test_preview_dispatch_terminator_pane(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With remotinator around, `split`/`auto` in Terminator previews as a pane."""
+    _clear_mux_envs(monkeypatch)
+    _clear_emulator_envs(monkeypatch)
+    monkeypatch.setenv("TERMINATOR_UUID", "term://x")
+
+    with patch(
+        "multi_claude.launcher.shutil.which",
+        side_effect=lambda c: f"/usr/bin/{c}" if c in ("terminator", "remotinator") else None,
+    ):
+        assert preview_dispatch("split") == LaunchOutcome("split", "terminator")
+        assert preview_dispatch("auto") == LaunchOutcome("split", "terminator")
+        assert preview_dispatch("tab") == LaunchOutcome("tab", "terminator")
+
+
+def test_preview_dispatch_terminator_without_remotinator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_mux_envs(monkeypatch)
+    _clear_emulator_envs(monkeypatch)
+    monkeypatch.setenv("TERMINATOR_UUID", "term://x")
+
+    with patch(
+        "multi_claude.launcher.shutil.which",
+        side_effect=lambda c: f"/usr/bin/{c}" if c == "terminator" else None,
+    ):
+        outcome = preview_dispatch("split")
+
+    assert outcome.placement == "tab"
+    assert outcome.fallback_reason is not None and "remotinator" in outcome.fallback_reason
 
 
 def test_preview_dispatch_suspends_without_anything(monkeypatch: pytest.MonkeyPatch) -> None:

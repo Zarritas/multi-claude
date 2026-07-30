@@ -85,10 +85,17 @@ cadena **sin lanzar nada**, y es lo que alimenta la línea "Aquí y ahora" del m
 |-------------------------|--------------------------------------------------------|-------------------------------------------|
 | `$TMUX` set             | `tmux split-window -h -c <cwd> claude [...]`           | `tmux new-window -c <cwd> claude [...]`   |
 | `$ZELLIJ` set           | `zellij action new-pane --cwd <cwd> -- claude [...]`   | igual que `split`, con motivo declarado ¹ |
-| `$TERMINATOR_UUID` set  | `terminator --new-tab --working-directory=<cwd> -x`    | idéntico (Terminator solo hace pestañas)  |
+| `$TERMINATOR_UUID` set  | `remotinator vsplit -x "cd <cwd> && exec claude [...]"` ² | `terminator --new-tab --working-directory=<cwd> -x` |
 
 ¹ `zellij action new-tab` solo acepta layout, no un comando, así que una petición de pestaña
 aterriza en un panel y `fallback_reason` lo explica.
+
+² `remotinator` (incluido en Terminator) habla con su API DBus. `vsplit` → `split_axis(vertical=False)`
+→ `HPaned`, es decir dos columnas, el equivalente a `tmux split-window -h`. La API solo hereda el cwd
+del terminal que parte (`terminal.get_cwd()`), de ahí el `cd` dentro del comando; el objetivo sale de
+`$TERMINATOR_UUID`, la misma señal que usa `detect_multiplexer()`. Los fallos llegan por dos vías:
+código ≠ 0 si el bus no responde, y `ERROR: ...` por stdout **con** código 0 si responde y rechaza la
+petición — `_try_terminator_pane` comprueba las dos y degrada a pestaña con motivo.
 
 **Despacho de pestaña** (`Emulator.tab_argv`). `Emulator.tab_rpc` marca los clientes de control
 remoto (`kitty @`, `wezterm cli`): salen inmediatamente y devuelven código ≠ 0 cuando la función
@@ -118,13 +125,23 @@ Detección en este orden:
 |-------------------|-----------------------------------------------------|----------------------------------------------------------|
 | kitty             | `$KITTY_PID`                                        | `kitty --directory <cwd> claude ...`                     |
 | WezTerm           | `$TERM_PROGRAM=WezTerm` o `$WEZTERM_EXECUTABLE`     | `wezterm start --cwd <cwd> -- claude ...`                |
-| Ghostty           | `$TERM_PROGRAM=ghostty` o `$GHOSTTY_RESOURCES_DIR`  | `ghostty --working-directory=<cwd> -e claude ...`        |
+| Ghostty           | `$TERM_PROGRAM=ghostty` o `$GHOSTTY_RESOURCES_DIR`  | `ghostty +new-window --working-directory=<cwd> -e claude ...` ³ |
 | Alacritty         | `$ALACRITTY_WINDOW_ID` / `$ALACRITTY_LOG`           | `alacritty --working-directory <cwd> -e claude ...`      |
 | Konsole           | `$KONSOLE_VERSION`                                  | `konsole --workdir <cwd> -e claude ...`                  |
 | GNOME Terminal    | `$GNOME_TERMINAL_SCREEN`                            | `gnome-terminal --window --working-directory=<cwd> -- claude ...` |
 | foot              | `$FOOT_VERSION`                                     | `foot --working-directory=<cwd> claude ...`              |
 | Terminator        | `$TERMINATOR_UUID`                                  | `terminator --working-directory=<cwd> -x claude ...`     |
 | x-terminal-emulator / xterm | (fallback genérico)                       | `<term> -e sh -c "cd <cwd> && exec claude ..."`          |
+
+³ `Emulator.window_rpc_argv` es la vía "pídele la ventana a la instancia que ya corre", que se
+intenta **antes** de `argv` y se comprueba por código de salida igual que `tab_rpc`. En Ghostty es
+`+new-window`, que va por D-Bus y solo existe en el apprt GTK (el de macOS devuelve `false` para
+todas las acciones IPC). Si no alcanza la instancia —bus caído, o un Ghostty anterior a la acción—
+se cae a `argv`, que arranca un proceso nuevo; el placement es el mismo, así que ese fallback
+interno no genera `fallback_reason`. En macOS `argv` es
+`open -na Ghostty.app --args --working-directory=<cwd> -e claude ...`, porque la CLI de Ghostty se
+niega a lanzar el emulador ahí ("only actions are supported"); por lo mismo el `binary` a buscar en
+PATH pasa a ser `open`, y una instalación solo-`.app` sigue detectándose.
 
 La ventana se lanza con `subprocess.Popen(..., start_new_session=True, stdin/out/err=DEVNULL)` para desligarla de la TUI: el proceso hijo sobrevive si la TUI cae y no compite por el TTY.
 
@@ -204,4 +221,11 @@ ClaudeBrowserApp
 - Reconciliación automática de proyectos movidos vía remote URL del `.git` (hoy: merge manual con `m`).
 - `claude_args` por proyecto: la configuración es global, no por proyecto ni por sesión.
 - Pestañas en Ghostty, Alacritty, foot y Terminal.app: sus CLIs no lo permiten (ver la matriz de
-  despacho más arriba). Si Ghostty acaba exponiendo `+new-tab`, es una entrada más en `EMULATORS`.
+  despacho más arriba). En Ghostty no es cuestión de tiempo: sus únicas acciones IPC son
+  `new_window` y `toggle_quick_terminal`, sus acciones D-Bus por ventana (`win.new-tab`,
+  `win.split-right`) no aceptan cwd ni comando —así que no pueden llevar un `claude --resume`— y
+  upstream cerró la petición de pestañas por CLI como *not planned*
+  ([#12136](https://github.com/ghostty-org/ghostty/issues/12136)). Sintetizar `ctrl+shift+t` con
+  `ydotool`/`osascript` y teclear el comando queda descartado por frágil. Si algún día aparece una
+  acción IPC de pestaña o split, es un `tab_argv` más en `EMULATORS`. Mientras tanto, paneles dentro
+  de Ghostty = tmux/zellij.

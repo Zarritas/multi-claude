@@ -11,8 +11,9 @@ Launch modes, all of them degrading down the same chain rather than failing:
 Emulators are described declaratively in :data:`EMULATORS`. Adding a new one means
 appending an :class:`Emulator` entry: detection via env vars and/or ``TERM_PROGRAM``,
 plus an ``argv`` callable for a new window and (when the emulator can do it from the
-CLI) a ``tab_argv`` one. Multiplexers are kept separate because their dispatch
-(pane vs tab) doesn't fit the same shape.
+CLI) a ``tab_argv`` one — and optionally a ``window_rpc_argv`` for emulators that can
+be asked for a window over IPC (``ghostty +new-window``). Multiplexers are kept
+separate because their dispatch (pane vs tab) doesn't fit the same shape.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -71,8 +73,9 @@ PLACEMENT_LABELS: dict[str, str] = {
 def detect_multiplexer() -> str | None:
     """Return 'tmux', 'zellij', 'terminator', or None.
 
-    Terminator is included here because ``--new-tab`` reuses the existing window via
-    DBus, so it behaves like a multiplexer split from the user's perspective.
+    Terminator is included here because it reuses the existing window via DBus:
+    ``--new-tab`` for a tab and ``remotinator vsplit`` for a real pane, so it
+    behaves like a multiplexer from the user's perspective.
     """
     if os.environ.get("TMUX") and shutil.which("tmux"):
         return "tmux"
@@ -87,6 +90,9 @@ def detect_multiplexer() -> str | None:
 # Emulator table                                                               #
 # --------------------------------------------------------------------------- #
 
+
+#: ``sys.platform`` is checked once so the emulator table can be built at import time.
+_IS_MACOS = sys.platform == "darwin"
 
 ArgvBuilder = Callable[[str, list[str]], list[str]]
 
@@ -104,6 +110,11 @@ class Emulator:
     degrade to a new window. ``tab_rpc`` marks tab commands that are remote-control
     clients (``kitty @``, ``wezterm cli``): they exit immediately and fail loudly
     when the feature is disabled, so we can check their exit code and fall back.
+
+    ``window_rpc_argv`` is a way of asking the *running* instance for a window
+    instead of starting a second process (``ghostty +new-window``). It's tried
+    before ``argv`` and checked by exit code like ``tab_rpc``; when it fails we
+    spawn ``argv`` normally, so the user still gets a window either way.
     """
 
     id: str
@@ -112,6 +123,7 @@ class Emulator:
     argv: ArgvBuilder | None = None
     tab_argv: ArgvBuilder | None = None
     tab_rpc: bool = False
+    window_rpc_argv: ArgvBuilder | None = None
     binary: str = field(default="")
 
     def resolve_binary(self) -> str:
@@ -177,7 +189,28 @@ def _tab_terminator(cwd: str, argv: list[str]) -> list[str]:
 
 
 def _argv_ghostty(cwd: str, argv: list[str]) -> list[str]:
+    if _IS_MACOS:
+        # Ghostty refuses to launch the emulator from its own CLI on macOS ("launching
+        # the terminal emulator from the CLI is not supported ... use `open -na
+        # Ghostty.app` instead"), so on Darwin we go through the app bundle.
+        return [
+            "open",
+            "-na",
+            "Ghostty.app",
+            "--args",
+            f"--working-directory={cwd}",
+            "-e",
+            *argv,
+        ]
     return ["ghostty", f"--working-directory={cwd}", "-e", *argv]
+
+
+def _window_rpc_ghostty(cwd: str, argv: list[str]) -> list[str]:
+    # Asks the *running* instance for the window over D-Bus instead of starting a
+    # second Ghostty. GTK-only (the macOS apprt implements no IPC action) and exits
+    # non-zero when it can't reach the instance — including on older Ghostty, where
+    # the action doesn't exist — hence the exit-code check and the fallback to `argv`.
+    return ["ghostty", "+new-window", f"--working-directory={cwd}", "-e", *argv]
 
 
 def _argv_wt(cwd: str, argv: list[str]) -> list[str]:
@@ -309,12 +342,19 @@ EMULATORS: tuple[Emulator, ...] = (
         argv=_argv_terminator,
         tab_argv=_tab_terminator,
     ),
-    # Ghostty's CLI exposes `+new-window` but no `+new-tab` action yet.
+    # Ghostty's only IPC actions are `new_window` and `toggle_quick_terminal`: there is
+    # no `+new-tab` / `+new-split`, and upstream closed the request for them as not
+    # planned. Its per-window D-Bus actions (`win.new-tab`, `win.split-right`) take no
+    # cwd nor command, so they can't carry a `claude --resume`: tabs degrade to windows.
     Emulator(
         id="ghostty",
         env_vars=("GHOSTTY_RESOURCES_DIR", "GHOSTTY_BIN_DIR"),
         term_programs=("ghostty", "Ghostty"),
         argv=_argv_ghostty,
+        window_rpc_argv=None if _IS_MACOS else _window_rpc_ghostty,
+        # On macOS the launch goes through `open`, which is always there; the `ghostty`
+        # CLI symlink is optional and would make detection fail for an app-only install.
+        binary="open" if _IS_MACOS else "",
     ),
     Emulator(
         id="windows-terminal",
@@ -475,7 +515,9 @@ def preview_dispatch(mode: LaunchMode) -> LaunchOutcome:
 
     if mode in ("auto", "split"):
         if mux == "terminator":
-            return LaunchOutcome("tab", mux)
+            if shutil.which("remotinator"):
+                return LaunchOutcome("split", mux)
+            return LaunchOutcome("tab", mux, "`remotinator` no está en el PATH")
         if mux is not None:
             return LaunchOutcome("split", mux)
         if mode == "split":
@@ -530,7 +572,11 @@ def _try_multiplexer(argv: list[str], cwd_str: str, *, want_tab: bool) -> Launch
         if want_tab:
             placement = "split"
             reason = "zellij no puede abrir pestañas con un comando; se usó un panel"
-    else:  # terminator — only does tabs, never panes, from the CLI
+    else:  # terminator — panes over DBus (remotinator), tabs over the CLI
+        if not want_tab:
+            outcome, reason = _try_terminator_pane(argv, cwd_str)
+            if outcome is not None:
+                return outcome
         spawn = ["terminator", "--new-tab", f"--working-directory={cwd_str}", "-x", *argv]
         placement = "tab"
 
@@ -544,6 +590,37 @@ def _try_multiplexer(argv: list[str], cwd_str: str, *, want_tab: bool) -> Launch
         tail = stderr[-1] if stderr else f"exit {result.returncode}"
         raise LauncherError(f"{mux} falló: {tail}")
     return LaunchOutcome(placement=placement, target=mux, fallback_reason=reason)
+
+
+def _try_terminator_pane(argv: list[str], cwd_str: str) -> tuple[LaunchOutcome | None, str | None]:
+    """Split the current Terminator terminal with ``remotinator vsplit``.
+
+    ``remotinator`` ships with Terminator and drives its DBus API; ``vsplit`` puts the
+    new terminal side by side, like ``tmux split-window -h``. It targets the terminal in
+    ``$TERMINATOR_UUID`` (the same signal :func:`detect_multiplexer` keys off) and can
+    only inherit *its* working directory, so the command carries its own ``cd``.
+
+    Same ``(outcome, reason)`` shape as :func:`_try_tab`: on failure the caller degrades
+    to a tab. Failures are reported two ways — a non-zero exit when the DBus service
+    isn't reachable, and an ``ERROR: ...`` line on stdout with exit 0 when it is but the
+    request was rejected — so both are checked.
+    """
+    if not shutil.which("remotinator"):
+        return None, "`remotinator` no está en el PATH; se usó una pestaña"
+
+    joined = " ".join(_shell_quote(a) for a in argv)
+    spawn = ["remotinator", "vsplit", "-x", f"cd {_shell_quote(cwd_str)} && exec {joined}"]
+    try:
+        result = subprocess.run(spawn, capture_output=True, text=True, check=False)
+    except FileNotFoundError as exc:
+        raise LauncherError(f"remotinator no encontrado al ejecutar: {exc}") from exc
+
+    stdout = (result.stdout or "").strip()
+    if result.returncode != 0 or stdout.startswith("ERROR"):
+        lines = (stdout or (result.stderr or "").strip()).splitlines()
+        tail = lines[0] if lines else f"exit {result.returncode}"
+        return None, f"`remotinator vsplit` falló: {tail}; se usó una pestaña"
+    return LaunchOutcome(placement="split", target="terminator"), None
 
 
 def _try_tab(argv: list[str], cwd_str: str) -> tuple[LaunchOutcome | None, str | None]:
@@ -560,20 +637,30 @@ def _try_tab(argv: list[str], cwd_str: str) -> tuple[LaunchOutcome | None, str |
 
     spawn = emu.tab_argv(cwd_str, argv)
     if emu.tab_rpc:
-        # Remote-control clients exit right away; a non-zero code means the feature
-        # is off (e.g. kitty without allow_remote_control), so fall through.
-        try:
-            result = subprocess.run(spawn, capture_output=True, text=True, check=False)
-        except FileNotFoundError as exc:
-            raise LauncherError(f"{emu.id} no encontrado al ejecutar: {exc}") from exc
-        if result.returncode != 0:
-            stderr = (result.stderr or "").strip().splitlines()
-            tail = stderr[-1] if stderr else f"exit {result.returncode}"
-            return None, f"el control remoto de `{emu.id}` falló: {tail}"
+        failure = _run_rpc(spawn, emu.id)
+        if failure is not None:
+            return None, f"el control remoto de `{emu.id}` falló: {failure}"
         return LaunchOutcome(placement="tab", target=emu.id), None
 
     _spawn_detached(spawn, emu.id)
     return LaunchOutcome(placement="tab", target=emu.id), None
+
+
+def _run_rpc(spawn: list[str], emu_id: str) -> str | None:
+    """Run a remote-control command, returning ``None`` on success or an error tail.
+
+    These clients exit right away instead of holding the terminal, so a non-zero code
+    means the feature is off (kitty without ``allow_remote_control``) or the instance
+    isn't reachable — either way the caller degrades instead of failing.
+    """
+    try:
+        result = subprocess.run(spawn, capture_output=True, text=True, check=False)
+    except FileNotFoundError as exc:
+        raise LauncherError(f"{emu_id} no encontrado al ejecutar: {exc}") from exc
+    if result.returncode == 0:
+        return None
+    stderr = (result.stderr or "").strip().splitlines()
+    return stderr[-1] if stderr else f"exit {result.returncode}"
 
 
 def _try_window(argv: list[str], cwd_str: str) -> tuple[LaunchOutcome | None, str | None]:
@@ -582,10 +669,17 @@ def _try_window(argv: list[str], cwd_str: str) -> tuple[LaunchOutcome | None, st
     Same ``(outcome, reason)`` shape as :func:`_try_tab`. Emulators we can detect
     but not drive (VS Code's integrated terminal, Warp, ...) report a reason and
     let the caller fall through to an inline run.
+
+    When the emulator can ask its running instance for the window
+    (``window_rpc_argv``) that's tried first; if it can't be reached we just spawn a
+    new process, which lands in the same placement, so no reason is reported.
     """
     emu = detect_terminal_emulator()
     if emu is None:
         return None, None
+    rpc_argv = emu.window_rpc_argv
+    if rpc_argv is not None and _run_rpc(rpc_argv(cwd_str, argv), emu.id) is None:
+        return LaunchOutcome(placement="window", target=emu.id), None
     if emu.argv is None:
         return None, f"`{emu.id}` no puede abrir ventanas desde la CLI"
     _spawn_detached(emu.argv(cwd_str, argv), emu.id)
