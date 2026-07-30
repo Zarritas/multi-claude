@@ -340,7 +340,12 @@ pestañas por CLI, etc.) en vez de hacerlo en silencio.
 |------------------------|-----------------------------------------------|-------------------------------------|
 | `$TMUX`                | `tmux split-window -h -c <cwd> claude ...`    | `tmux new-window -c <cwd> claude ...` |
 | `$ZELLIJ`              | `zellij action new-pane --cwd <cwd> -- ...`   | panel (zellij no admite comando en pestaña) |
-| `$TERMINATOR_UUID`     | `terminator --new-tab ...`                    | `terminator --new-tab ...`          |
+| `$TERMINATOR_UUID`     | `remotinator vsplit -x "cd <cwd> && exec claude ..."` ⁴ | `terminator --new-tab ...` |
+
+⁴ `remotinator` viene con Terminator y habla con su API DBus: `vsplit` parte el terminal de
+`$TERMINATOR_UUID` en dos columnas, como `tmux split-window -h`. Solo puede heredar el directorio
+del terminal que parte, así que el comando lleva su propio `cd`. Si `remotinator` no está en el PATH
+o el DBus de Terminator está apagado (`terminator -u`), la sesión cae a pestaña y la TUI lo avisa.
 
 **Emuladores** (detectados vía `$TERM_PROGRAM`, env vars y binario en PATH):
 
@@ -353,13 +358,25 @@ pestañas por CLI, etc.) en vez de hacerlo en silencio.
 | Terminator        | `terminator --working-directory=<cwd> -x claude ...`        | `terminator --new-tab ...`                             |
 | Windows Terminal  | `wt.exe -w -1 new-tab -d <cwd> -- claude ...`               | `wt.exe -w 0 new-tab -d <cwd> -- claude ...`           |
 | iTerm2 (macOS)    | `osascript` → `create window with default profile`          | `osascript` → `create tab with default profile`        |
-| Ghostty           | `ghostty --working-directory=<cwd> -e claude ...`           | — (su CLI no expone `+new-tab`)                        |
+| Ghostty           | `ghostty +new-window --working-directory=<cwd> -e claude ...` ² | — (no tiene IPC de pestañas; ver ³)                |
 | Alacritty         | `alacritty --working-directory <cwd> -e claude ...`         | — (no tiene pestañas)                                  |
 | foot              | `foot --working-directory=<cwd> claude ...`                 | — (no tiene pestañas)                                  |
 | Apple Terminal    | `osascript` → `do script "cd <cwd> && exec claude ..."`     | — (requeriría sintetizar ⌘T con System Events)         |
 | x-terminal-emulator / xterm | `<term> -e sh -c "cd <cwd> && exec claude ..."`   | —                                                      |
 
 ¹ Requiere `allow_remote_control` en `kitty.conf`. Si falla, se abre ventana nueva y se avisa.
+
+² `+new-window` le pide la ventana a la instancia que ya está corriendo (D-Bus, solo GTK/Linux) en
+vez de arrancar un segundo proceso. Sale con código ≠ 0 si no la alcanza —o si tu Ghostty es
+anterior a la acción—, y entonces se cae a `ghostty --working-directory=<cwd> -e claude ...`. En
+macOS Ghostty no acepta lanzar el emulador desde su propia CLI ni implementa IPC, así que ahí se usa
+`open -na Ghostty.app --args --working-directory=<cwd> -e claude ...`.
+
+³ Ghostty solo expone dos acciones IPC, `new_window` y `toggle_quick_terminal`; no hay `+new-tab` ni
+`+new-split` y upstream cerró la petición como *not planned*
+([#12136](https://github.com/ghostty-org/ghostty/issues/12136)). Sus acciones D-Bus por ventana
+(`win.new-tab`, `win.split-right`) no aceptan directorio ni comando, así que no pueden llevar un
+`claude --resume`. Para paneles y pestañas dentro de Ghostty, usa tmux o zellij.
 
 Detección del emulador (en orden):
 
@@ -477,7 +494,7 @@ El nombre de la carpeta `~/.claude/projects/<encoded>/` es la ruta original con 
 - **La búsqueda global solo ve lo indexado**: el índice FTS se puebla en `scan_sessions`, es decir al **entrar** a la pantalla de sesiones de un proyecto. Un proyecto que nunca has abierto en la TUI no aparece en los resultados de `?`. Si `?` te devuelve menos de lo esperado, entra una vez en los proyectos que te falten.
 - **Payload FTS acotado por sesión**: se indexan como máximo las primeras 2.000 líneas del jsonl y 64 KB de texto (`FTS_REINDEX_SCAN_LINES` / `FTS_CONTENT_MAX_CHARS` en `session.py`). En sesiones muy largas, el final de la conversación no es buscable.
 - **Proyecto movido de path**: si renombras la carpeta de un proyecto, las sesiones viejas y nuevas siguen siendo dos entradas distintas en `~/.claude/projects/`. No se reconcilian solas — la vieja queda como huérfana y la unes a mano con `m` (merge).
-- **No todos los emuladores saben abrir pestañas desde la CLI**: Ghostty (su CLI no expone `+new-tab`), Alacritty, foot y Terminal.app solo pueden abrir ventanas, así que en modo `tab` la sesión acaba en una ventana nueva y la TUI te lo dice. En kitty y WezTerm la pestaña exige tener el control remoto activado (`allow_remote_control` en `kitty.conf`); si está apagado, mismo fallback.
+- **No todos los emuladores saben abrir pestañas desde la CLI**: Ghostty (sus únicas acciones IPC son `new_window` y `toggle_quick_terminal`; upstream cerró la petición de pestañas por CLI como *not planned*), Alacritty, foot y Terminal.app solo pueden abrir ventanas, así que en modo `tab` la sesión acaba en una ventana nueva y la TUI te lo dice. Si quieres paneles o pestañas dentro de Ghostty, mete tmux o zellij por debajo. En kitty y WezTerm la pestaña exige tener el control remoto activado (`allow_remote_control` en `kitty.conf`); si está apagado, mismo fallback.
 - **zellij no puede lanzar un comando en una pestaña nueva**: `zellij action new-tab` solo acepta un layout, no un comando, así que el modo `tab` dentro de zellij abre un panel.
 - **Ordenar por tags no se persiste**: `3` ordena la tabla de sesiones por etiquetas en la sesión actual de la TUI, pero `tags` no está en `VALID_SESSION_SORT` (`config.py`), así que al reabrir vuelve al orden por última actividad.
 - **Con token, republicar una sesión compartida sobrescribe la versión del remoto**: si dos personas continúan la misma sesión y ambas publican vía API, la segunda pisa a la primera en el remoto (cada una conserva la suya en local). **Con autenticación SSH no ocurre**: git rechaza el segundo push y se reintenta encima, así que ambas sobreviven. El fork explícito que lo resolvería también en API está planificado, no implementado — ver [docs/REMOTE-SESSIONS.md](docs/REMOTE-SESSIONS.md).
@@ -493,7 +510,7 @@ El nombre de la carpeta `~/.claude/projects/<encoded>/` es la ruta original con 
 - **Linux** (Ubuntu/Debian/Fedora/Arch testados), **macOS** o **Windows 10/11**.
 - **Python 3.10+** (la mayoría de distros modernas lo traen; en macOS `brew install python@3.13`; en Windows usa el instalador oficial o `winget install Python.Python.3.13`).
 - **`claude`** (Claude Code CLI) en `PATH`. Sin él, `multi-claude` arranca pero no podrá reanudar sesiones — la propia TUI te lo dirá.
-- *(Opcional, Linux/macOS)* **`tmux`** o **`zellij`** (o **`terminator`** sólo en Linux) para que Claude se abra en un panel sin perder la TUI. Sin multiplexer, la mayoría de emuladores abren pestaña en la misma ventana (ver [Cómo se lanza Claude](#cómo-se-lanza-claude)).
+- *(Opcional, Linux/macOS)* **`tmux`** o **`zellij`** (o **`terminator`** con su `remotinator`, sólo en Linux) para que Claude se abra en un panel sin perder la TUI. Sin multiplexer, la mayoría de emuladores abren pestaña en la misma ventana (ver [Cómo se lanza Claude](#cómo-se-lanza-claude)).
 - *(Opcional)* Un emulador soportado:
   - **Linux**: kitty, WezTerm, Ghostty, Alacritty, Konsole, GNOME Terminal, foot, Terminator, xterm.
   - **macOS**: **iTerm2** (pestañas y ventanas) o **Terminal.app** (solo ventanas); ambos vía AppleScript con `osascript`, que viene de serie en macOS. kitty, WezTerm, Ghostty y Alacritty también funcionan si los usas.
