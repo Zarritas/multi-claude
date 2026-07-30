@@ -340,9 +340,9 @@ pestañas por CLI, etc.) en vez de hacerlo en silencio.
 |------------------------|-----------------------------------------------|-------------------------------------|
 | `$TMUX`                | `tmux split-window -h -c <cwd> claude ...`    | `tmux new-window -c <cwd> claude ...` |
 | `$ZELLIJ`              | `zellij action new-pane --cwd <cwd> -- ...`   | panel (zellij no admite comando en pestaña) |
-| `$TERMINATOR_UUID`     | `remotinator vsplit -x "cd <cwd> && exec claude ..."` ⁴ | `terminator --new-tab ...` |
+| `$TERMINATOR_UUID`     | `remotinator vsplit -x "cd <cwd> && exec claude ..."` ¹ | `terminator --new-tab ...` |
 
-⁴ `remotinator` viene con Terminator y habla con su API DBus: `vsplit` parte el terminal de
+¹ `remotinator` viene con Terminator y habla con su API DBus: `vsplit` parte el terminal de
 `$TERMINATOR_UUID` en dos columnas, como `tmux split-window -h`. Solo puede heredar el directorio
 del terminal que parte, así que el comando lleva su propio `cd`. Si `remotinator` no está en el PATH
 o el DBus de Terminator está apagado (`terminator -u`), la sesión cae a pestaña y la TUI lo avisa.
@@ -351,28 +351,28 @@ o el DBus de Terminator está apagado (`terminator -u`), la sesión cae a pesta�
 
 | Emulador          | Ventana nueva                                              | Pestaña en la ventana actual                          |
 |-------------------|-------------------------------------------------------------|--------------------------------------------------------|
-| kitty             | `kitty --directory <cwd> claude ...`                        | `kitty @ launch --type=tab --cwd <cwd> -- claude ...` ¹ |
+| kitty             | `kitty --directory <cwd> claude ...`                        | `kitty @ launch --type=tab --cwd <cwd> -- claude ...` ² |
 | WezTerm           | `wezterm start --cwd <cwd> -- claude ...`                   | `wezterm cli spawn --cwd <cwd> -- claude ...`          |
 | GNOME Terminal    | `gnome-terminal --window --working-directory=<cwd> -- ...`  | `gnome-terminal --tab --working-directory=<cwd> -- ...` |
 | Konsole           | `konsole --workdir <cwd> -e claude ...`                     | `konsole --new-tab --workdir <cwd> -e claude ...`      |
 | Terminator        | `terminator --working-directory=<cwd> -x claude ...`        | `terminator --new-tab ...`                             |
 | Windows Terminal  | `wt.exe -w -1 new-tab -d <cwd> -- claude ...`               | `wt.exe -w 0 new-tab -d <cwd> -- claude ...`           |
 | iTerm2 (macOS)    | `osascript` → `create window with default profile`          | `osascript` → `create tab with default profile`        |
-| Ghostty           | `ghostty +new-window --working-directory=<cwd> -e claude ...` ² | — (no tiene IPC de pestañas; ver ³)                |
+| Ghostty           | `ghostty +new-window --working-directory=<cwd> -e claude ...` ³ | — (no tiene IPC de pestañas; ver ⁴)                |
 | Alacritty         | `alacritty --working-directory <cwd> -e claude ...`         | — (no tiene pestañas)                                  |
 | foot              | `foot --working-directory=<cwd> claude ...`                 | — (no tiene pestañas)                                  |
 | Apple Terminal    | `osascript` → `do script "cd <cwd> && exec claude ..."`     | — (requeriría sintetizar ⌘T con System Events)         |
 | x-terminal-emulator / xterm | `<term> -e sh -c "cd <cwd> && exec claude ..."`   | —                                                      |
 
-¹ Requiere `allow_remote_control` en `kitty.conf`. Si falla, se abre ventana nueva y se avisa.
+² Requiere `allow_remote_control` en `kitty.conf`. Si falla, se abre ventana nueva y se avisa.
 
-² `+new-window` le pide la ventana a la instancia que ya está corriendo (D-Bus, solo GTK/Linux) en
+³ `+new-window` le pide la ventana a la instancia que ya está corriendo (D-Bus, solo GTK/Linux) en
 vez de arrancar un segundo proceso. Sale con código ≠ 0 si no la alcanza —o si tu Ghostty es
 anterior a la acción—, y entonces se cae a `ghostty --working-directory=<cwd> -e claude ...`. En
 macOS Ghostty no acepta lanzar el emulador desde su propia CLI ni implementa IPC, así que ahí se usa
 `open -na Ghostty.app --args --working-directory=<cwd> -e claude ...`.
 
-³ Ghostty solo expone dos acciones IPC, `new_window` y `toggle_quick_terminal`; no hay `+new-tab` ni
+⁴ Ghostty solo expone dos acciones IPC, `new_window` y `toggle_quick_terminal`; no hay `+new-tab` ni
 `+new-split` y upstream cerró la petición como *not planned*
 ([#12136](https://github.com/ghostty-org/ghostty/issues/12136)). Sus acciones D-Bus por ventana
 (`win.new-tab`, `win.split-right`) no aceptan directorio ni comando, así que no pueden llevar un

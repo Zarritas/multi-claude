@@ -237,9 +237,7 @@ def test_launch_claude_uses_terminator_tab(monkeypatch: pytest.MonkeyPatch) -> N
         patch("multi_claude.launcher.shutil.which", side_effect=fake_which),
         patch("multi_claude.launcher.subprocess.run", side_effect=runner),
     ):
-        outcome = launch_claude(
-            Path("/work/t"), "sid-3", display_name="Mi feature", mode="tab"
-        )
+        outcome = launch_claude(Path("/work/t"), "sid-3", display_name="Mi feature", mode="tab")
 
     assert runner.calls == [
         [

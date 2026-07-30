@@ -194,8 +194,13 @@ def _argv_ghostty(cwd: str, argv: list[str]) -> list[str]:
         # the terminal emulator from the CLI is not supported ... use `open -na
         # Ghostty.app` instead"), so on Darwin we go through the app bundle.
         return [
-            "open", "-na", "Ghostty.app", "--args",
-            f"--working-directory={cwd}", "-e", *argv,
+            "open",
+            "-na",
+            "Ghostty.app",
+            "--args",
+            f"--working-directory={cwd}",
+            "-e",
+            *argv,
         ]
     return ["ghostty", f"--working-directory={cwd}", "-e", *argv]
 
@@ -587,9 +592,7 @@ def _try_multiplexer(argv: list[str], cwd_str: str, *, want_tab: bool) -> Launch
     return LaunchOutcome(placement=placement, target=mux, fallback_reason=reason)
 
 
-def _try_terminator_pane(
-    argv: list[str], cwd_str: str
-) -> tuple[LaunchOutcome | None, str | None]:
+def _try_terminator_pane(argv: list[str], cwd_str: str) -> tuple[LaunchOutcome | None, str | None]:
     """Split the current Terminator terminal with ``remotinator vsplit``.
 
     ``remotinator`` ships with Terminator and drives its DBus API; ``vsplit`` puts the
