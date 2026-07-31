@@ -15,6 +15,7 @@ from multi_claude.focus import (
     _focus_x11,
     find_live_session,
     focus_terminal,
+    live_sessions,
 )
 
 
@@ -104,6 +105,83 @@ def test_find_live_session_ignores_corrupt_json(tmp_path: Path) -> None:
     ):
         live = find_live_session("sid-live", sessions_dir=tmp_path)
     assert live is not None and live.pid == 4242
+
+
+# --------------------------------------------------------------------------- #
+# live_sessions                                                                #
+# --------------------------------------------------------------------------- #
+
+
+def test_live_sessions_carries_status_and_timestamp(tmp_path: Path) -> None:
+    _write_registry_entry(tmp_path, status="busy", statusUpdatedAt=1785478309605)
+    with (
+        patch("multi_claude.focus._pid_alive", return_value=True),
+        patch("multi_claude.focus._proc_start_matches", return_value=True),
+    ):
+        live = live_sessions(sessions_dir=tmp_path)
+    assert set(live) == {"sid-live"}
+    entry = live["sid-live"]
+    assert entry.status == "busy"
+    assert entry.status_updated_at == pytest.approx(1785478309.605)
+
+
+def test_live_sessions_status_none_when_registry_omits_it(tmp_path: Path) -> None:
+    """Older Claude builds wrote no status; the session is still live."""
+    _write_registry_entry(tmp_path)
+    with (
+        patch("multi_claude.focus._pid_alive", return_value=True),
+        patch("multi_claude.focus._proc_start_matches", return_value=True),
+    ):
+        live = live_sessions(sessions_dir=tmp_path)
+    assert live["sid-live"].status is None
+    assert live["sid-live"].status_updated_at is None
+
+
+def test_live_sessions_falls_back_to_updated_at(tmp_path: Path) -> None:
+    _write_registry_entry(tmp_path, status="idle", updatedAt=1785477878784)
+    with (
+        patch("multi_claude.focus._pid_alive", return_value=True),
+        patch("multi_claude.focus._proc_start_matches", return_value=True),
+    ):
+        live = live_sessions(sessions_dir=tmp_path)
+    assert live["sid-live"].status_updated_at == pytest.approx(1785477878.784)
+
+
+def test_live_sessions_applies_staleness_guards(tmp_path: Path) -> None:
+    """The same guards as find_live_session: a dead PID is simply not there."""
+    _write_registry_entry(tmp_path, status="busy")
+    with patch("multi_claude.focus._pid_alive", return_value=False):
+        assert live_sessions(sessions_dir=tmp_path) == {}
+
+
+def test_live_sessions_returns_every_live_entry(tmp_path: Path) -> None:
+    _write_registry_entry(tmp_path, pid=1, sessionId="sid-a", status="busy")
+    _write_registry_entry(tmp_path, pid=2, sessionId="sid-b", status="idle")
+    with (
+        patch("multi_claude.focus._pid_alive", return_value=True),
+        patch("multi_claude.focus._proc_start_matches", return_value=True),
+    ):
+        live = live_sessions(sessions_dir=tmp_path)
+    assert {sid: e.status for sid, e in live.items()} == {"sid-a": "busy", "sid-b": "idle"}
+
+
+def test_live_sessions_empty_when_dir_missing(tmp_path: Path) -> None:
+    assert live_sessions(sessions_dir=tmp_path / "nope") == {}
+
+
+def test_find_live_session_prefers_a_live_duplicate_over_a_stale_one(tmp_path: Path) -> None:
+    """Two entries for one session (a crash left one behind): the live one wins."""
+    _write_registry_entry(tmp_path, pid=100, procStart="dead")
+    _write_registry_entry(tmp_path, pid=200, procStart="alive")
+    with (
+        patch("multi_claude.focus._pid_alive", return_value=True),
+        patch(
+            "multi_claude.focus._proc_start_matches",
+            side_effect=lambda pid, proc_start: proc_start == "alive",
+        ),
+    ):
+        live = find_live_session("sid-live", sessions_dir=tmp_path)
+    assert live is not None and live.pid == 200
 
 
 # --------------------------------------------------------------------------- #

@@ -63,10 +63,12 @@ VALID_PROJECT_SORT: tuple[ProjectSortKey, ...] = (
     "last_activity",
 )
 
-SessionSortKey = Literal["prompt", "branch", "messages", "size", "last_activity"]
+SessionSortKey = Literal["prompt", "status", "branch", "tags", "messages", "size", "last_activity"]
 VALID_SESSION_SORT: tuple[SessionSortKey, ...] = (
     "prompt",
+    "status",
     "branch",
+    "tags",
     "messages",
     "size",
     "last_activity",

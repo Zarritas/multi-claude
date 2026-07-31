@@ -15,8 +15,10 @@ success wins:
 - **Windows**: not supported yet (callers fall back to a notice).
 
 Callers use :func:`find_live_session` to decide whether a session is already open
-(with stale-registry guards: dead PID, or PID reuse detected via ``procStart``)
-and :func:`focus_terminal` to attempt the foreground switch.
+(with stale-registry guards: dead PID, or PID reuse detected via ``procStart``),
+:func:`live_sessions` to read the whole registry in one pass (for a listing that
+shows what each session is doing right now), and :func:`focus_terminal` to
+attempt the foreground switch.
 """
 
 from __future__ import annotations
@@ -36,10 +38,18 @@ _SUBPROCESS_TIMEOUT = 3.0  # all helpers are quick local IPC; never hang the UI
 
 @dataclass(frozen=True)
 class LiveSession:
-    """A session registered as live in ``~/.claude/sessions/`` with a verified PID."""
+    """A session registered as live in ``~/.claude/sessions/`` with a verified PID.
+
+    ``status`` is whatever Claude Code last wrote to the registry (``"busy"`` while
+    it works, and the entry is rewritten as the session changes state). The
+    vocabulary is not a documented contract, so it is carried through as the raw
+    string and callers render unknown values generically rather than guessing.
+    """
 
     session_id: str
     pid: int
+    status: str | None = None
+    status_updated_at: float | None = None  # epoch seconds, from the registry's millis
 
 
 def find_live_session(
@@ -53,24 +63,53 @@ def find_live_session(
     time recorded as ``procStart`` still matches ``/proc/<pid>/stat`` (guards
     against PID reuse after a reboot or long uptime).
     """
+    return live_sessions(sessions_dir).get(session_id)
+
+
+def live_sessions(
+    sessions_dir: Path = ACTIVE_SESSIONS_DIR,
+) -> dict[str, LiveSession]:
+    """Return every verified-live registry entry, keyed by session id.
+
+    One pass over the directory, so a listing can label all its rows without
+    re-globbing per session. Entries that fail the staleness guards of
+    :func:`find_live_session` are left out, exactly as if they weren't there.
+    """
+    result: dict[str, LiveSession] = {}
     if not sessions_dir.is_dir():
-        return None
+        return result
     for entry in sessions_dir.glob("*.json"):
         try:
             with entry.open("r", encoding="utf-8") as f:
                 data = json.load(f)
         except (OSError, json.JSONDecodeError):
             continue
-        if not isinstance(data, dict) or data.get("sessionId") != session_id:
+        if not isinstance(data, dict):
+            continue
+        session_id = data.get("sessionId")
+        if not isinstance(session_id, str) or not session_id:
             continue
         pid = data.get("pid")
         if not isinstance(pid, int) or not _pid_alive(pid):
-            return None
+            continue
         proc_start = data.get("procStart")
         if isinstance(proc_start, str) and not _proc_start_matches(pid, proc_start):
-            return None
-        return LiveSession(session_id=session_id, pid=pid)
-    return None
+            continue
+        status = data.get("status")
+        result[session_id] = LiveSession(
+            session_id=session_id,
+            pid=pid,
+            status=status if isinstance(status, str) and status else None,
+            status_updated_at=_epoch_seconds(data.get("statusUpdatedAt") or data.get("updatedAt")),
+        )
+    return result
+
+
+def _epoch_seconds(raw: object) -> float | None:
+    """Convert the registry's millisecond timestamps to epoch seconds."""
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return None
+    return raw / 1000.0
 
 
 def _pid_alive(pid: int) -> bool:

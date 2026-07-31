@@ -10,13 +10,14 @@ Claude Code guarda cada sesión como un `.jsonl` bajo `~/.claude/projects/<encod
 
 ## Qué trae
 
+- **Estado en vivo** de cada sesión: con varias corriendo a la vez, ves cuál trabaja y cuál te está esperando sin tabular entre terminales (ver [Estado en vivo](#estado-en-vivo)).
 - **Búsqueda full-text** (`?`) sobre el contenido de todas las sesiones, con índice FTS5 de SQLite — encuentra "aquella conversación sobre el refactor X" por lo que se dijo dentro.
 - **Preview** (`p`) de los últimos turnos de una sesión sin reanudarla.
 - **Worktrees agrupados** por defecto: los worktrees de un mismo repo colapsan en una fila, con pantalla propia para entrar a cada uno.
 - **Carpetas de usuario** (`f`) para organizar proyectos en un árbol propio.
 - **Filtro incremental** (`/`) con `branch:`, `path:`, `id:`, `tag:` y texto libre fuzzy.
 - **Etiquetas** (`t`) y **colores** por sesión (`c`), con reglas automáticas por branch, antigüedad o actividad (`C`).
-- **Nombres persistentes** (`e`) para sesiones y proyectos, incluido el `/rename` de Claude como fallback.
+- **Nombres persistentes** (`e`) para sesiones y proyectos, con el `/rename` de Claude y el título que Claude genera solo como fallbacks (ver [Nombres](#nombres-e)).
 - **Mover, exportar e importar** sesiones entre worktrees o hacia un `.zip` compartible (`m`, `x`, `i`).
 - **Sesiones compartidas** (`L`, `u`): enlaza cada proyecto a uno o varios repositorios de sesiones (GitLab, GitHub o una carpeta), que aparecen como pestañas; publica con `u` y reanuda la sesión de un compañero con `Enter`, sin exportar ni importar nada.
 - **Sin duplicados**: si una sesión ya está abierta en otra terminal, la trae al frente en vez de abrir una segunda.
@@ -74,7 +75,8 @@ Atajos:
 
 | Columna           | Origen                                                                                |
 |-------------------|---------------------------------------------------------------------------------------|
-| Prompt            | primer `type=user` con `role=user`, limpiando wrappers `<command-message>` / args      |
+| Prompt            | nombre de la sesión si tiene, y si no el primer `type=user` con `role=user`, limpiando wrappers `<command-message>` / args |
+| Estado            | qué está haciendo ahora mismo, según `~/.claude/sessions/` (ver [Estado en vivo](#estado-en-vivo)) |
 | Branch            | `gitBranch` del primer evento con cwd                                                 |
 | Tags              | etiquetas asignadas a mano (ver [Etiquetas](#etiquetas-t))                             |
 | Msgs              | nº de líneas del jsonl                                                                |
@@ -82,7 +84,7 @@ Atajos:
 | Última            | mtime del jsonl                                                                       |
 
 - Orden por defecto: última actividad descendente.
-- Si la sesión tiene un nombre puesto con `e` (o con el `/rename` de Claude), ese nombre sustituye al primer prompt en la columna **Prompt**.
+- El **nombre** que sustituye al primer prompt en la columna **Prompt** sale del primero que haya de estos tres, por orden: el que pusiste con `e`, el `/rename` de Claude, o el título que Claude genera por su cuenta (ver [Nombres](#nombres-e)).
 
 Atajos:
 - `Enter` — reanudar esta sesión con el **modo de lanzamiento predeterminado** (por defecto `auto`: panel del multiplexer, o pestaña de la ventana actual si no hay).
@@ -103,12 +105,42 @@ Atajos:
 - `d` — borrar la(s) sesión(es) seleccionada(s) y todos sus artefactos en disco. Sobre una fila **compartida** no borra nada tuyo: la **despublica** del repositorio.
 - `D` — **limpieza** por antigüedad: eliges un umbral y borra de golpe las sesiones más viejas (las sesiones vivas quedan protegidas).
 - `/` — filtrar la lista (ver [Filtro](#filtro-)).
-- `1`…`6` — ordenar por prompt / branch / tags / msgs / tamaño / última actividad.
+- `1`…`7` — ordenar por prompt / estado / branch / tags / msgs / tamaño / última actividad.
 - `Shift+S` — invertir la dirección del orden.
 - `s` — abrir el modal de **Ajustes**: modo de lanzamiento (con vista previa) y flags extra para `claude`.
 - `Esc` / `←` — limpiar el filtro, o volver a la pantalla de proyectos.
 - `r` — re-escanear las sesiones del proyecto.
 - `Ctrl+Q` — salir.
+
+### Estado en vivo
+
+Claude Code registra cada sesión que está corriendo en `~/.claude/sessions/<pid>.json`, y en ese fichero anota **qué está haciendo**. La columna **Estado** lo muestra, refrescada cada dos segundos desde un worker (nunca desde el hilo de la UI):
+
+| Celda          | Significado                                                              |
+|----------------|--------------------------------------------------------------------------|
+| `○ te espera`  | la sesión está viva y parada esperando que le contestes (`waiting`)      |
+| `● trabajando` | la sesión está ocupada (`busy`)                                          |
+| `● abierta`    | está viva, pero con un estado que multi-claude no sabe interpretar        |
+| `—`            | no está corriendo                                                        |
+
+Con esto la pantalla deja de ser solo un histórico: con varias sesiones en marcha a la vez, ves de un golpe cuál te está esperando sin ir tabulando entre terminales. `2` ordena por estado y pone arriba justamente eso.
+
+Dos cosas que conviene saber:
+
+- **El vocabulario de estados es de Claude Code y no está documentado.** `busy` y `waiting` son los observados en la 2.1; cualquier otro valor se muestra como `● abierta` en lugar de inventarle un significado.
+- **Solo ve sesiones de esta máquina**: el registro es local, así que las filas de las pestañas de [sesiones compartidas](#sesiones-compartidas-l-y-u) siempre muestran `—`.
+
+Un registro que sobrevive a su proceso (una terminal que murió mal) no cuenta como vivo: la entrada solo vale si su PID sigue existiendo y —en Linux— si el `procStart` anotado coincide con `/proc/<pid>/stat`, para que un PID reutilizado no se haga pasar por la sesión.
+
+### Nombres (`e`)
+
+En la columna **Prompt**, el primer prompt es el último recurso. Si la sesión tiene nombre, se muestra el nombre, y hay tres fuentes con esta precedencia:
+
+1. **El tuyo** (`e`), guardado en `names.json`. Lo que eliges a mano manda siempre.
+2. **El `/rename` de Claude**, que queda escrito dentro del jsonl. Si hay varios, gana el último.
+3. **El título que Claude genera solo** (eventos `ai-title` del jsonl), que se actualiza a medida que avanza la conversación. Gana el último.
+
+Es decir, que la mayoría de sesiones llegan con un título legible sin que hagas nada; `e` solo hace falta cuando no te gusta el que hay.
 
 ### Worktrees (`g`)
 
@@ -496,7 +528,7 @@ El nombre de la carpeta `~/.claude/projects/<encoded>/` es la ruta original con 
 - **Proyecto movido de path**: si renombras la carpeta de un proyecto, las sesiones viejas y nuevas siguen siendo dos entradas distintas en `~/.claude/projects/`. No se reconcilian solas — la vieja queda como huérfana y la unes a mano con `m` (merge).
 - **No todos los emuladores saben abrir pestañas desde la CLI**: Ghostty (sus únicas acciones IPC son `new_window` y `toggle_quick_terminal`; upstream cerró la petición de pestañas por CLI como *not planned*), Alacritty, foot y Terminal.app solo pueden abrir ventanas, así que en modo `tab` la sesión acaba en una ventana nueva y la TUI te lo dice. Si quieres paneles o pestañas dentro de Ghostty, mete tmux o zellij por debajo. En kitty y WezTerm la pestaña exige tener el control remoto activado (`allow_remote_control` en `kitty.conf`); si está apagado, mismo fallback.
 - **zellij no puede lanzar un comando en una pestaña nueva**: `zellij action new-tab` solo acepta un layout, no un comando, así que el modo `tab` dentro de zellij abre un panel.
-- **Ordenar por tags no se persiste**: `3` ordena la tabla de sesiones por etiquetas en la sesión actual de la TUI, pero `tags` no está en `VALID_SESSION_SORT` (`config.py`), así que al reabrir vuelve al orden por última actividad.
+- **El estado en vivo es de esta máquina y su vocabulario no es un contrato**: ver [Estado en vivo](#estado-en-vivo). Un `status` nuevo en una versión futura de Claude Code se mostrará como `● abierta` hasta que se añada a `_STATUS_CELLS` (`screens/sessions.py`).
 - **Con token, republicar una sesión compartida sobrescribe la versión del remoto**: si dos personas continúan la misma sesión y ambas publican vía API, la segunda pisa a la primera en el remoto (cada una conserva la suya en local). **Con autenticación SSH no ocurre**: git rechaza el segundo push y se reintenta encima, así que ambas sobreviven. El fork explícito que lo resolvería también en API está planificado, no implementado — ver [docs/REMOTE-SESSIONS.md](docs/REMOTE-SESSIONS.md).
 - **Una sesión ya descargada no se puede actualizar**: si un compañero la continúa después de que la traigas, la fila lo indica con `↻` pero no hay forma de incorporar esos turnos. Requiere el merge por `uuid` que sigue pendiente.
 - **No hay escáner de secretos al publicar**: el diálogo muestra la lista exacta de ficheros que suben, y revisarla es manual. Una sesión que imprimió un `.env` lo publicaría.

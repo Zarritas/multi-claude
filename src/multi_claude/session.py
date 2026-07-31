@@ -77,8 +77,7 @@ def _build_session(
     stat = jsonl_path.stat()
     sid = jsonl_path.stem
 
-    cached_mtime = index.get_mtime(sid)
-    if cached_mtime is not None and cached_mtime == stat.st_mtime:
+    if index.is_fresh(sid, stat.st_mtime):
         indexed = index.get(sid)
         if indexed is not None:
             return Session(
@@ -165,15 +164,25 @@ def parse_session_header(
 
 
 def extract_embedded_name(jsonl_path: Path) -> str | None:
-    """Return the latest name set inside ``jsonl_path`` via Claude's ``/rename``.
+    """Return the name embedded in ``jsonl_path`` itself, or ``None``.
 
-    Looks at every ``system/local_command`` event whose ``content`` matches
-    ``<local-command-stdout>Session renamed to: X</local-command-stdout>`` and
-    returns the X of the last occurrence (so subsequent renames win). Falls
-    back to a top-level ``name`` string if some Claude build wrote one inline.
-    ``None`` if nothing relevant is found.
+    Two sources, in precedence order:
+
+    1. **Claude's ``/rename``** — every ``system/local_command`` event whose
+       ``content`` matches ``<local-command-stdout>Session renamed to:
+       X</local-command-stdout>``; the last occurrence wins (later renames beat
+       earlier ones). A top-level ``name`` string counts here too, for whichever
+       Claude build wrote one inline.
+    2. **Claude's own generated title** — ``{"type": "ai-title", "aiTitle": X}``
+       events, again last-one-wins. Claude Code titles sessions as they go, which
+       reads far better in the listing than a truncated first prompt.
+
+    A name the user chose deliberately outranks a generated one regardless of
+    which came last in the file, so the two are tracked separately rather than
+    into a single "latest".
     """
-    latest: str | None = None
+    renamed: str | None = None
+    ai_title: str | None = None
     try:
         with jsonl_path.open("r", encoding="utf-8", errors="replace") as f:
             for _ in range(RENAME_SCAN_LINES):
@@ -189,9 +198,15 @@ def extract_embedded_name(jsonl_path: Path) -> str | None:
                 # Deprecated path: top-level ``name`` string.
                 top_name = event.get("name")
                 if isinstance(top_name, str) and top_name.strip():
-                    latest = top_name.strip()
+                    renamed = top_name.strip()
                     continue
-                if event.get("type") != "system":
+                etype = event.get("type")
+                if etype == "ai-title":
+                    candidate = event.get("aiTitle")
+                    if isinstance(candidate, str) and candidate.strip():
+                        ai_title = candidate.strip()
+                    continue
+                if etype != "system":
                     continue
                 if event.get("subtype") != "local_command":
                     continue
@@ -202,10 +217,10 @@ def extract_embedded_name(jsonl_path: Path) -> str | None:
                 if match:
                     candidate = match.group("name").strip()
                     if candidate:
-                        latest = candidate
+                        renamed = candidate
     except OSError:
-        return latest
-    return latest
+        pass
+    return renamed or ai_title
 
 
 def _extract_fts_content(jsonl_path: Path) -> str:

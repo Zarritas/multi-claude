@@ -13,6 +13,7 @@ from textual.binding import Binding
 from textual.containers import Horizontal
 from textual.screen import Screen
 from textual.widgets import DataTable, Footer, Header, Input, Tab, Tabs
+from textual.widgets.data_table import ColumnKey
 
 from multi_claude.app_protocol import AppProtocol
 from multi_claude.clipboard import ClipboardError, copy_to_clipboard
@@ -34,7 +35,7 @@ from multi_claude.discovery import (
     scan_projects,
 )
 from multi_claude.filtering import FilterQuery, matches_fuzzy, parse_query
-from multi_claude.focus import find_live_session, focus_terminal
+from multi_claude.focus import LiveSession, find_live_session, focus_terminal, live_sessions
 from multi_claude.formatting import format_relative_time, format_size
 from multi_claude.launcher import PLACEMENT_LABELS, LauncherError, launch_claude
 from multi_claude.modals import (
@@ -80,12 +81,34 @@ _REMOTE_TAB_PREFIX = "tab-remote-"
 
 _SORT_KEYS_BY_COLUMN: tuple[str, ...] = (
     "prompt",
+    "status",
     "branch",
     "tags",
     "messages",
     "size",
     "last_activity",
 )
+
+# How the live registry's ``status`` renders in the Estado column, and how it sorts.
+# Rank is highest-is-most-interesting, matching every other column: picking a column
+# starts descending, and descending here means the sessions waiting on you first.
+# The vocabulary is Claude Code's, undocumented and free to grow: anything registered
+# as live but not listed here still says so, it just doesn't claim to know what it's
+# doing. A session absent from the registry isn't running at all.
+# ``busy`` and ``waiting`` are the two values observed from Claude Code 2.1; ``idle`` is
+# taken as a synonym of waiting in case a build spells it that way.
+_STATUS_CELLS: dict[str, tuple[str, str, int]] = {
+    "waiting": ("○ te espera", "bold green", 3),
+    "idle": ("○ te espera", "bold green", 3),
+    "busy": ("● trabajando", "bold yellow", 2),
+}
+_STATUS_LIVE_UNKNOWN = ("● abierta", "dim", 1)
+_STATUS_NOT_LIVE = ("—", "", 0)
+
+# How often the live registry is re-read. Two seconds is fast enough to notice a
+# session going from working to waiting on you, and the read is a handful of small
+# json files off local disk — done on a worker thread regardless.
+_LIVE_REFRESH_SECONDS = 2.0
 
 
 class SessionsScreen(Screen[None]):
@@ -113,11 +136,12 @@ class SessionsScreen(Screen[None]):
         Binding("left", "back_or_clear", "Back", show=False),
         Binding("r", "refresh", "Refresh"),
         Binding("1", "sort_column('prompt')", "Sort prompt", show=False),
-        Binding("2", "sort_column('branch')", "Sort branch", show=False),
-        Binding("3", "sort_column('tags')", "Sort tags", show=False),
-        Binding("4", "sort_column('messages')", "Sort msgs", show=False),
-        Binding("5", "sort_column('size')", "Sort tamaño", show=False),
-        Binding("6", "sort_column('last_activity')", "Sort última", show=False),
+        Binding("2", "sort_column('status')", "Sort estado", show=False),
+        Binding("3", "sort_column('branch')", "Sort branch", show=False),
+        Binding("4", "sort_column('tags')", "Sort tags", show=False),
+        Binding("5", "sort_column('messages')", "Sort msgs", show=False),
+        Binding("6", "sort_column('size')", "Sort tamaño", show=False),
+        Binding("7", "sort_column('last_activity')", "Sort última", show=False),
         Binding("shift+s", "toggle_sort_direction", "Sort dir"),
         Binding("ctrl+q", "quit", "Quit"),
     ]
@@ -130,6 +154,10 @@ class SessionsScreen(Screen[None]):
         # list). Remote rows are only ever appended, so a local action can never land on
         # one by accident — ``_selected_session`` returns None for them.
         self._rows: list[tuple[bool, int]] = []
+        # What the live registry says right now, refreshed on a timer: session_id ->
+        # entry. ``_active_session_ids`` is its key set, kept as a set because the colour
+        # rules and several actions only ask "is this one running?".
+        self._live: dict[str, LiveSession] = {}
         self._active_session_ids: set[str] = set()
         self._marked: set[str] = set()
         self._remote_sessions: list[RemoteSession] = []
@@ -140,6 +168,9 @@ class SessionsScreen(Screen[None]):
         self._own_email: str | None = None
         # None while the local tab is selected; otherwise the index into ``_remote_links``.
         self._active_remote: int | None = None
+        # Filled in ``on_mount``; the Estado column's key is how the live refresh
+        # rewrites single cells instead of repainting (which would drop the cursor).
+        self._column_keys: list[ColumnKey] = []
 
     @property
     def _claude_app(self) -> AppProtocol:
@@ -169,10 +200,13 @@ class SessionsScreen(Screen[None]):
     def on_mount(self) -> None:
         self.sub_title = f"{self.project.name} — {self.project.path}"
         table = self.query_one("#sessions", DataTable)
-        table.add_columns("Prompt", "Branch", "Tags", "Msgs", "Tamaño", "Última")
+        self._column_keys = table.add_columns(
+            "Prompt", "Estado", "Branch", "Tags", "Msgs", "Tamaño", "Última"
+        )
         self._apply_preview_visibility()
         self.query_one("#session-tabs", Tabs).display = bool(self._remote_links)
         self._populate()
+        self.set_interval(_LIVE_REFRESH_SECONDS, self._refresh_live_worker)
 
     def _apply_preview_visibility(self) -> None:
         preview = self.query_one("#preview", SessionPreview)
@@ -194,7 +228,7 @@ class SessionsScreen(Screen[None]):
     def _on_scan_complete(self, sessions: list[Session]) -> None:
         self._sessions = sessions
         self._marked &= {s.id for s in sessions}
-        self._active_session_ids = list_active_sessions()
+        self._set_live(live_sessions())
         self.sub_title = f"{self.project.name} — {self.project.path}"
         self._apply_sort()
         # Remote rows survive a local rescan; what changes is their ✓/☁ mark, which
@@ -203,9 +237,59 @@ class SessionsScreen(Screen[None]):
         if self._remote_links:
             self._load_published_index_worker()
 
+    def _set_live(self, live: dict[str, LiveSession]) -> None:
+        self._live = live
+        self._active_session_ids = set(live)
+
+    @work(thread=True, exclusive=True, group="live-status")
+    def _refresh_live_worker(self) -> None:
+        """Re-read the live registry off the UI thread and hand it to the screen."""
+        self.app.call_from_thread(self._on_live_refresh, live_sessions())
+
+    def _on_live_refresh(self, live: dict[str, LiveSession]) -> None:
+        """Apply a registry read, touching as little of the table as possible.
+
+        Two cases need a full repaint: a session appearing or disappearing (which
+        changes row colours through the ``active=true`` rule), and any change at all
+        while the table is sorted by status (the row order itself is now wrong).
+        Otherwise a status change only alters one cell per row, and rewriting those
+        keeps the cursor and scroll position — which a repaint every two seconds
+        would spend its time taking away from the user.
+        """
+        if live == self._live:
+            return
+        resort = self._claude_app.prefs.sessions_sort.key == "status"
+        appeared_or_left = set(live) != self._active_session_ids
+        self._set_live(live)
+        if appeared_or_left or resort:
+            if resort:
+                self._apply_sort()
+            self._repaint()
+            return
+        if self._active_remote is not None or not self._column_keys:
+            return
+        table = self.query_one("#sessions", DataTable)
+        for is_remote, idx in self._rows:
+            if is_remote or idx >= len(self._sessions):
+                continue
+            try:
+                table.update_cell(
+                    str(idx),
+                    self._column_keys[1],
+                    self._status_cell(self._sessions[idx]),
+                )
+            except KeyError:  # row went away between paint and refresh
+                continue
+
+    def _status_cell(self, session: Session) -> Any:
+        from rich.text import Text
+
+        label, style, _ = _status_presentation(self._live.get(session.id))
+        return Text(label, style=style) if style else label
+
     def _apply_sort(self) -> None:
         spec = self._claude_app.prefs.sessions_sort
-        self._sessions.sort(key=_session_sort_value(spec.key), reverse=spec.descending)
+        self._sessions.sort(key=_session_sort_value(spec.key, self._live), reverse=spec.descending)
 
     def _repaint(self) -> None:
         from rich.text import Text
@@ -243,6 +327,7 @@ class SessionsScreen(Screen[None]):
             tags_cell = self._format_tags_cell(session.tags)
             row = (
                 label_cell,
+                self._status_cell(session),
                 session.branch or "—",
                 tags_cell,
                 str(session.message_count),
@@ -309,6 +394,9 @@ class SessionsScreen(Screen[None]):
                 label.append(f"  {note}", style="dim")
             table.add_row(
                 label,
+                # Nothing to say: the registry only knows about sessions running here,
+                # and a row in this tab is someone else's until you hydrate it.
+                "—",
                 remote.branch or "—",
                 self._format_tags_cell(remote.tags),
                 str(remote.message_count),
@@ -1268,8 +1356,25 @@ def _format_published(published_at: str) -> str:
         return "—"
 
 
-def _session_sort_value(key: str) -> Callable[[Session], Any]:
+def _status_presentation(live: LiveSession | None) -> tuple[str, str, int]:
+    """Return ``(label, style, sort_rank)`` for a session's live state."""
+    if live is None:
+        return _STATUS_NOT_LIVE
+    if live.status is None:
+        return _STATUS_LIVE_UNKNOWN
+    return _STATUS_CELLS.get(live.status.lower(), _STATUS_LIVE_UNKNOWN)
+
+
+def _session_sort_value(
+    key: str, live: dict[str, LiveSession] | None = None
+) -> Callable[[Session], Any]:
     """Return a key fn for ``list.sort`` using session field ``key``."""
+    if key == "status":
+        # Descending (what pressing the key gives you) is the order you'd triage in:
+        # what waits on you, then what's working, then the rest. Ties fall back to
+        # recency rather than to whatever order the directory listing came in.
+        entries = live or {}
+        return lambda s: (_status_presentation(entries.get(s.id))[2], s.last_activity)
     if key == "prompt":
         return lambda s: (s.display_name or s.first_prompt or "").casefold()
     if key == "branch":

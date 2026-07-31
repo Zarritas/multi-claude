@@ -62,11 +62,21 @@ CREATE VIRTUAL TABLE IF NOT EXISTS sessions_fts USING fts5(
 """
 
 
+# Bumped whenever :mod:`multi_claude.session` starts pulling something new out of a
+# jsonl, so rows extracted by an older build are reparsed once instead of staying
+# stale forever behind an unchanged mtime.
+EXTRACT_VERSION = 1
+
+
 def _ensure_columns(conn: sqlite3.Connection) -> None:
     """Idempotent migration: add columns introduced after the initial schema."""
     existing = {row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()}
     if "embedded_name" not in existing:
         conn.execute("ALTER TABLE sessions ADD COLUMN embedded_name TEXT")
+    if "extract_version" not in existing:
+        # Default 0 = "extracted before this was tracked", so every pre-existing row
+        # looks stale and gets reparsed on its next scan.
+        conn.execute("ALTER TABLE sessions ADD COLUMN extract_version INTEGER NOT NULL DEFAULT 0")
 
 
 class SessionIndex:
@@ -102,8 +112,8 @@ class SessionIndex:
                 """
                 INSERT INTO sessions(session_id, project_dir, cwd, branch, first_prompt,
                                       message_count, size_bytes, mtime, jsonl_path,
-                                      embedded_name)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                      embedded_name, extract_version)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(session_id) DO UPDATE SET
                     project_dir=excluded.project_dir,
                     cwd=excluded.cwd,
@@ -113,7 +123,8 @@ class SessionIndex:
                     size_bytes=excluded.size_bytes,
                     mtime=excluded.mtime,
                     jsonl_path=excluded.jsonl_path,
-                    embedded_name=excluded.embedded_name
+                    embedded_name=excluded.embedded_name,
+                    extract_version=excluded.extract_version
                 """,
                 (
                     session.session_id,
@@ -126,6 +137,7 @@ class SessionIndex:
                     session.mtime,
                     session.jsonl_path,
                     session.embedded_name,
+                    EXTRACT_VERSION,
                 ),
             )
             if fts_content is not None:
@@ -164,6 +176,23 @@ class SessionIndex:
                 "SELECT mtime FROM sessions WHERE session_id = ?", (session_id,)
             ).fetchone()
         return float(row[0]) if row else None
+
+    def is_fresh(self, session_id: str, mtime: float) -> bool:
+        """Whether the cached row can be trusted for a file with this ``mtime``.
+
+        Two ways to be stale: the file changed, or the row was extracted by a build
+        that pulled less out of the jsonl than the current one does (see
+        ``EXTRACT_VERSION``). Both mean reparse.
+        """
+        with self._lock:
+            conn = self._connection()
+            row = conn.execute(
+                "SELECT mtime, extract_version FROM sessions WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+        if not row:
+            return False
+        return float(row[0]) == mtime and int(row[1]) == EXTRACT_VERSION
 
     def list_by_project(self, project_dir: str) -> list[IndexedSession]:
         with self._lock:

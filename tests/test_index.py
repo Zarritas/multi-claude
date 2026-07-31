@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -77,6 +78,29 @@ def test_get_mtime_returns_none_when_missing(index: SessionIndex) -> None:
 def test_get_mtime_returns_stored_value(index: SessionIndex) -> None:
     index.upsert_session(_session("x"))
     assert index.get_mtime("x") == 1000.0
+
+
+def test_is_fresh_false_when_missing(index: SessionIndex) -> None:
+    assert index.is_fresh("ghost", 1000.0) is False
+
+
+def test_is_fresh_true_for_unchanged_file(index: SessionIndex) -> None:
+    index.upsert_session(_session("x"))
+    assert index.is_fresh("x", 1000.0) is True
+
+
+def test_is_fresh_false_when_file_changed(index: SessionIndex) -> None:
+    index.upsert_session(_session("x"))
+    assert index.is_fresh("x", 2000.0) is False
+
+
+def test_is_fresh_false_for_older_extract_version(index: SessionIndex, tmp_path: Path) -> None:
+    """A row written by a build that extracted less needs reparsing, mtime or not."""
+    index.upsert_session(_session("x"))
+    index.close()
+    with sqlite3.connect(tmp_path / "idx.sqlite3") as conn:
+        conn.execute("UPDATE sessions SET extract_version = 0 WHERE session_id = 'x'")
+    assert SessionIndex(tmp_path / "idx.sqlite3").is_fresh("x", 1000.0) is False
 
 
 def test_list_by_project(index: SessionIndex) -> None:

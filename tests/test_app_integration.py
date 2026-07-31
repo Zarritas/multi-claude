@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -638,3 +639,161 @@ async def test_launch_passes_claude_args(synthetic_world: Path) -> None:
             await pilot.pause()
 
     assert captured == [{"claude_args": ["--dangerously-skip-permissions"]}]
+
+
+async def test_sessions_screen_shows_live_status(synthetic_world: Path) -> None:
+    """The Estado column reports what the live registry says each session is doing."""
+    from multi_claude.focus import LiveSession
+
+    registry = {
+        "ses-beta-1": LiveSession(session_id="ses-beta-1", pid=11, status="busy"),
+        "ses-beta-2": LiveSession(session_id="ses-beta-2", pid=22, status="waiting"),
+    }
+    with patch("multi_claude.screens.sessions.live_sessions", return_value=registry):
+        app = ClaudeBrowserApp()
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            from textual.widgets import DataTable
+
+            from multi_claude.screens.sessions import SessionsScreen
+
+            app.screen.query_one("#projects", DataTable).action_select_cursor()
+            await pilot.pause()
+            assert isinstance(app.screen, SessionsScreen)
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+            table = app.screen.query_one("#sessions", DataTable)
+            statuses = {
+                app.screen._sessions[idx].id: _cell_text(table, row, 1)
+                for row, (is_remote, idx) in enumerate(app.screen._rows)
+                if not is_remote
+            }
+    assert statuses == {"ses-beta-1": "● trabajando", "ses-beta-2": "○ te espera"}
+
+
+async def test_sessions_screen_labels_an_unknown_status_generically(
+    synthetic_world: Path,
+) -> None:
+    """Claude Code's status vocabulary can grow; an unmapped value still reads as live."""
+    from multi_claude.focus import LiveSession
+
+    registry = {"ses-beta-1": LiveSession(session_id="ses-beta-1", pid=11, status="compacting")}
+    with patch("multi_claude.screens.sessions.live_sessions", return_value=registry):
+        app = ClaudeBrowserApp()
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            from textual.widgets import DataTable
+
+            app.screen.query_one("#projects", DataTable).action_select_cursor()
+            await pilot.pause()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            table = app.screen.query_one("#sessions", DataTable)
+            row = next(r for r, (_, idx) in enumerate(app.screen._rows) if idx == 0)
+            assert app.screen._sessions[0].id == "ses-beta-1"
+            assert _cell_text(table, row, 1) == "● abierta"
+
+
+async def test_sessions_screen_marks_unregistered_sessions_as_not_running(
+    synthetic_world: Path,
+) -> None:
+    with patch("multi_claude.screens.sessions.live_sessions", return_value={}):
+        app = ClaudeBrowserApp()
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            from textual.widgets import DataTable
+
+            app.screen.query_one("#projects", DataTable).action_select_cursor()
+            await pilot.pause()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            table = app.screen.query_one("#sessions", DataTable)
+            assert _cell_text(table, 0, 1) == "—"
+
+
+async def test_live_status_refresh_updates_the_cell_in_place(synthetic_world: Path) -> None:
+    """A status change rewrites its cell without repainting (the cursor must survive)."""
+    from multi_claude.focus import LiveSession
+
+    def _registry(status: str, sessions: Any) -> dict[str, LiveSession]:
+        return {s.id: LiveSession(session_id=s.id, pid=1, status=status) for s in sessions}
+
+    with patch("multi_claude.screens.sessions.live_sessions", return_value={}):
+        app = ClaudeBrowserApp()
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            from textual.widgets import DataTable
+
+            from multi_claude.screens.sessions import SessionsScreen
+
+            app.screen.query_one("#projects", DataTable).action_select_cursor()
+            await pilot.pause()
+            screen = app.screen
+            assert isinstance(screen, SessionsScreen)
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+            table = screen.query_one("#sessions", DataTable)
+            # Both sessions start out working, then the cursor is parked on the second row.
+            screen._on_live_refresh(_registry("busy", screen._sessions))
+            await pilot.pause()
+            table.move_cursor(row=1)
+            await pilot.pause()
+            assert _cell_text(table, 0, 1) == "● trabajando"
+
+            # Same set of live sessions, new status → cells rewritten, cursor untouched.
+            screen._on_live_refresh(_registry("waiting", screen._sessions))
+            await pilot.pause()
+            assert _cell_text(table, 0, 1) == "○ te espera"
+            assert table.cursor_row == 1
+
+            # A session going away does change row colours and ordering, so that repaints.
+            screen._on_live_refresh({})
+            await pilot.pause()
+            assert _cell_text(table, 0, 1) == "—"
+
+
+async def test_sort_by_status_puts_waiting_sessions_first(synthetic_world: Path) -> None:
+    from multi_claude.focus import LiveSession
+
+    registry = {"ses-beta-2": LiveSession(session_id="ses-beta-2", pid=22, status="waiting")}
+    with patch("multi_claude.screens.sessions.live_sessions", return_value=registry):
+        app = ClaudeBrowserApp()
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            from textual.widgets import DataTable
+
+            from multi_claude.screens.sessions import SessionsScreen
+
+            app.screen.query_one("#projects", DataTable).action_select_cursor()
+            await pilot.pause()
+            screen = app.screen
+            assert isinstance(screen, SessionsScreen)
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            # Default order is by recency: ses-beta-1 (mtime 3000) leads.
+            assert screen._sessions[0].id == "ses-beta-1"
+
+            await pilot.press("2")
+            await pilot.pause()
+
+            assert app.prefs.sessions_sort.key == "status"
+            assert screen._sessions[0].id == "ses-beta-2"
+
+            # While sorted by status, a status change has to reorder the rows, not
+            # just rewrite a cell: leaving them in place would be a listing that
+            # claims an order it no longer has.
+            screen._on_live_refresh(
+                {"ses-beta-1": LiveSession(session_id="ses-beta-1", pid=11, status="waiting")}
+            )
+            await pilot.pause()
+            assert screen._sessions[0].id == "ses-beta-1"
+
+
+def _cell_text(table: Any, row: int, column: int) -> str:
+    """Plain text of a painted cell, whether it was styled or not."""
+    from textual.coordinate import Coordinate
+
+    value = table.get_cell_at(Coordinate(row, column))
+    return str(value.plain) if hasattr(value, "plain") else str(value)

@@ -28,6 +28,12 @@ def _append_rename_event(jsonl: Path, name: str) -> None:
         f.write(json.dumps(event) + "\n")
 
 
+def _append_ai_title_event(jsonl: Path, title: str) -> None:
+    """Append the event Claude Code writes when it titles a session by itself."""
+    with jsonl.open("a", encoding="utf-8") as f:
+        f.write(json.dumps({"type": "ai-title", "aiTitle": title}) + "\n")
+
+
 def test_strip_command_wrappers_extracts_slash_command_and_args() -> None:
     text = (
         "<command-message>refine-task</command-message>\n"
@@ -131,6 +137,70 @@ def test_extract_embedded_name_handles_slashes_and_spaces(tmp_path: Path) -> Non
     jsonl = write_session(tmp_path, session_id="sid-slash")
     _append_rename_event(jsonl, "charo-ruiz/482/JOOR-Fase 1c")
     assert extract_embedded_name(jsonl) == "charo-ruiz/482/JOOR-Fase 1c"
+
+
+def test_extract_embedded_name_falls_back_to_ai_title(tmp_path: Path) -> None:
+    """With no ``/rename``, Claude's own generated title names the session."""
+    jsonl = write_session(tmp_path, session_id="sid-ai")
+    _append_ai_title_event(jsonl, "Explorar valor agregado en multi-claude")
+    assert extract_embedded_name(jsonl) == "Explorar valor agregado en multi-claude"
+
+
+def test_extract_embedded_name_picks_last_ai_title(tmp_path: Path) -> None:
+    """Claude retitles as the conversation moves on; the newest title wins."""
+    jsonl = write_session(tmp_path, session_id="sid-ai-many")
+    _append_ai_title_event(jsonl, "Primer tema")
+    _append_ai_title_event(jsonl, "Tema final")
+    assert extract_embedded_name(jsonl) == "Tema final"
+
+
+def test_extract_embedded_name_prefers_rename_over_later_ai_title(tmp_path: Path) -> None:
+    """A name the user chose outranks a generated one even if the title came later."""
+    jsonl = write_session(tmp_path, session_id="sid-ai-vs-rename")
+    _append_rename_event(jsonl, "elegido-a-mano")
+    _append_ai_title_event(jsonl, "Título automático posterior")
+    assert extract_embedded_name(jsonl) == "elegido-a-mano"
+
+
+def test_extract_embedded_name_ignores_blank_ai_title(tmp_path: Path) -> None:
+    jsonl = write_session(tmp_path, session_id="sid-ai-blank")
+    _append_ai_title_event(jsonl, "   ")
+    assert extract_embedded_name(jsonl) is None
+
+
+def test_scan_sessions_shows_ai_title_as_display_name(tmp_path: Path) -> None:
+    jsonl = write_session(tmp_path, session_id="sid-ai-scan", first_prompt="arregla el bug")
+    _append_ai_title_event(jsonl, "Arreglo del bug de importación")
+    index = SessionIndex(tmp_path / "index.sqlite3")
+    sessions = {s.id: s for s in scan_sessions(tmp_path, index=index)}
+    assert sessions["sid-ai-scan"].display_name == "Arreglo del bug de importación"
+
+
+def test_scan_sessions_reparses_rows_indexed_before_ai_titles(tmp_path: Path) -> None:
+    """A row cached by an older build is stale even with an unchanged mtime.
+
+    Without this, every session already in the index would keep showing its
+    truncated first prompt until the file happened to change.
+    """
+    import os
+    import sqlite3
+
+    jsonl = write_session(tmp_path, session_id="sid-old-index", first_prompt="arregla el bug")
+    _append_ai_title_event(jsonl, "Arreglo del bug de importación")
+    os.utime(jsonl, (1234.5, 1234.5))
+    index_path = tmp_path / "index.sqlite3"
+    index = SessionIndex(index_path)
+    scan_sessions(tmp_path, index=index)
+
+    # Simulate what an install from before this change left behind: the row is there,
+    # the mtime matches, but it was extracted without knowing about ai-title events.
+    index.close()
+    with sqlite3.connect(index_path) as conn:
+        conn.execute("UPDATE sessions SET embedded_name = NULL, extract_version = 0")
+
+    reopened = SessionIndex(index_path)
+    sessions = {s.id: s for s in scan_sessions(tmp_path, index=reopened)}
+    assert sessions["sid-old-index"].display_name == "Arreglo del bug de importación"
 
 
 def test_scan_sessions_uses_embedded_name_when_no_store_name(tmp_path: Path) -> None:
