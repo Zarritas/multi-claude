@@ -696,6 +696,149 @@ async def test_author_finds_a_session_you_hydrated_from_a_colleague(world: Path)
         assert screen._rows == []
 
 
+async def test_publishing_over_someone_elses_version_is_blocked(world: Path) -> None:
+    """The data-loss case: Ana published on top, and publishing would replace her turns.
+
+    Nothing is written; the dialogue reports it and overwriting has to be chosen.
+    """
+    from multi_claude.index import default_index
+    from multi_claude.modals import PublishConflictModal
+
+    store = DirectoryRemote(world / "remote")
+    other = world / "de-ana"
+    write_session(other, session_id="ses-1", cwd="/home/ana/repo", first_prompt="lo de ana")
+    ana = RemoteSession(
+        session_id="ses-1",
+        published_at="2026-08-02T09:00:00+00:00",
+        published_by="ana@example.com",
+        message_count=455,
+    )
+    store.publish(ana, other)
+
+    app = ClaudeBrowserApp()
+    async with app.run_test() as pilot:
+        screen = await _open_sessions(pilot)
+        # Our copy derives from an older publish of the same session.
+        default_index().record_publish_base(
+            screen._remote_links[0].identity_key(), "ses-1", "2026-07-30T08:00:00+00:00"
+        )
+
+        await _publish(pilot)
+        for _ in range(40):
+            await pilot.pause()
+            if isinstance(pilot.app.screen, PublishConflictModal):
+                break
+        modal = pilot.app.screen
+        assert isinstance(modal, PublishConflictModal), f"no avisó del conflicto: {modal}"
+        assert any("ana" in line for line in modal.lines)
+
+        # Cancelling leaves Ana's version exactly as it was.
+        await pilot.press("escape")
+        for _ in range(20):
+            await pilot.pause()
+        (still,) = store.list_sessions()
+        assert still.published_by == "ana@example.com"
+        assert still.message_count == 455
+
+
+async def test_overwriting_a_conflict_is_possible_on_purpose(world: Path) -> None:
+    """Sometimes replacing is right — a stray republish — so the door exists."""
+    from multi_claude.index import default_index
+    from multi_claude.modals import PublishConflictModal
+
+    store = DirectoryRemote(world / "remote")
+    other = world / "de-ana"
+    write_session(other, session_id="ses-1", cwd="/home/ana/repo")
+    store.publish(
+        RemoteSession(
+            session_id="ses-1",
+            published_at="2026-08-02T09:00:00+00:00",
+            published_by="ana@example.com",
+        ),
+        other,
+    )
+
+    app = ClaudeBrowserApp()
+    async with app.run_test() as pilot:
+        screen = await _open_sessions(pilot)
+        default_index().record_publish_base(
+            screen._remote_links[0].identity_key(), "ses-1", "vieja"
+        )
+        await _publish(pilot)
+        for _ in range(40):
+            await pilot.pause()
+            if isinstance(pilot.app.screen, PublishConflictModal):
+                break
+        modal = pilot.app.screen
+        assert isinstance(modal, PublishConflictModal)
+        modal.query_one("#overwrite").press()
+        for _ in range(40):
+            await pilot.pause()
+
+        (now,) = store.list_sessions()
+        assert now.published_by != "ana@example.com"  # ours replaced hers, deliberately
+
+
+async def test_a_fast_forward_publishes_without_asking(world: Path) -> None:
+    """Nobody touched it since we published, so republishing is routine."""
+    from multi_claude.index import default_index
+    from multi_claude.modals import PublishConflictModal
+
+    app = ClaudeBrowserApp()
+    async with app.run_test() as pilot:
+        screen = await _open_sessions(pilot)
+        await _publish(pilot)  # first publish records the base
+        for _ in range(30):
+            await pilot.pause()
+        store = await _remote_store(app)
+        (published,) = store.list_sessions()
+        remote_key = screen._remote_links[0].identity_key()
+        assert default_index().publish_base(remote_key, "ses-1") == published.published_at
+
+        # Publish the same session again: same stamp on the remote, so no dialogue.
+        await _publish(pilot)
+        for _ in range(30):
+            await pilot.pause()
+        assert not isinstance(pilot.app.screen, PublishConflictModal)
+        assert len(store.list_sessions()) == 1
+
+
+async def test_fetching_records_the_base_so_a_later_publish_is_safe(world: Path) -> None:
+    """Hydrating is the other moment our copy starts deriving from a published version."""
+    from multi_claude.index import default_index
+
+    store = DirectoryRemote(world / "remote")
+    other = world / "de-ana"
+    write_session(other, session_id="ses-de-ana", cwd="/home/ana/repo")
+    store.publish(
+        RemoteSession(
+            session_id="ses-de-ana",
+            published_at="2026-08-02T09:00:00+00:00",
+            published_by="ana@example.com",
+        ),
+        other,
+    )
+
+    def fake_launch(cwd: Path, session_id: str | None = None, **kwargs: object) -> LaunchOutcome:
+        return LaunchOutcome("window", "fake")
+
+    app = ClaudeBrowserApp()
+    async with app.run_test() as pilot:
+        screen = await _open_sessions(pilot)
+        await _open_remote_tab(pilot, screen)
+        from textual.widgets import DataTable
+
+        table = screen.query_one("#sessions", DataTable)
+        table.move_cursor(row=0)
+        with patch("multi_claude.screens.sessions.launch_claude", side_effect=fake_launch):
+            table.action_select_cursor()
+            for _ in range(40):
+                await pilot.pause()
+
+        remote_key = screen._remote_links[0].identity_key()
+        assert default_index().publish_base(remote_key, "ses-de-ana") == "2026-08-02T09:00:00+00:00"
+
+
 async def test_a_teammates_session_becomes_searchable_by_its_content(world: Path) -> None:
     """The whole point of manifest v2: found by a phrase from inside, without fetching it.
 

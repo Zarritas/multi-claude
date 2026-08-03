@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import sqlite3
 import sys
 import time
@@ -53,7 +54,7 @@ from multi_claude.focus import (
     merge_live,
 )
 from multi_claude.formatting import format_relative_time, format_size
-from multi_claude.index import default_index
+from multi_claude.index import SessionIndex, default_index
 from multi_claude.launcher import PLACEMENT_LABELS, LauncherError, launch_claude
 from multi_claude.modals import (
     CleanupModal,
@@ -63,12 +64,14 @@ from multi_claude.modals import (
     FilePathModal,
     MoveSessionModal,
     ProjectRemotesModal,
+    PublishConflictModal,
     PublishModal,
     RenameModal,
     SettingsModal,
     TagEditorModal,
 )
 from multi_claude.project_remotes import RemoteLink
+from multi_claude.publish_guard import Conflict, find_conflict
 from multi_claude.remote import (
     RemoteError,
     RemoteSession,
@@ -1023,16 +1026,33 @@ class SessionsScreen(Screen[None]):
         self._publish_worker(targets, link)
 
     @work(thread=True, exclusive=True, group="publish-sessions")
-    def _publish_worker(self, targets: list[Session], link: RemoteLink) -> None:
+    def _publish_worker(
+        self, targets: list[Session], link: RemoteLink, *, force: bool = False
+    ) -> None:
+        """Publish each target, skipping the ones that would overwrite someone's work.
+
+        The skipped ones come back as conflicts and the screen asks about them; ``force``
+        is that answer coming back. Checked here rather than before the dialogue because
+        this is the last moment before the write, and it is what someone else may have
+        changed in between.
+        """
         store = self._claude_app.store_for_link(link)
         if store is None:
             return
         published_by = resolve_git_user_email(self.project.path)
         git_remote = resolve_git_remote(self.project.path)
         git_head = resolve_git_head(self.project.path)
+        remote_key = link.identity_key()
+        index = default_index()
         done = 0
         errors: list[str] = []
+        conflicts: list[Conflict] = []
         for session in targets:
+            if not force:
+                conflict = self._conflict_for(store, index, remote_key, session, published_by)
+                if conflict is not None:
+                    conflicts.append(conflict)
+                    continue
             meta = session_to_remote(
                 session,
                 published_by=published_by,
@@ -1044,23 +1064,87 @@ class SessionsScreen(Screen[None]):
                 done += 1
             except (RemoteError, OSError) as exc:
                 errors.append(f"{session.id[:8]}: {exc}")
-        self.app.call_from_thread(self._on_publish_complete, done, errors)
+                continue
+            # From now on this copy derives from what we just wrote, so a colleague
+            # publishing on top of it is detectable.
+            with contextlib.suppress(sqlite3.Error):
+                index.record_publish_base(remote_key, session.id, meta.published_at)
+        self.app.call_from_thread(self._on_publish_complete, done, errors, conflicts, targets, link)
 
-    def _on_publish_complete(self, done: int, errors: list[str]) -> None:
+    def _conflict_for(
+        self,
+        store: RemoteStore,
+        index: SessionIndex,
+        remote_key: str,
+        session: Session,
+        own_email: str | None,
+    ) -> Conflict | None:
+        """Ask the remote whether this session moved on since our copy came from it."""
+        try:
+            remote = store.get_session(session.id)
+        except (RemoteError, OSError):
+            return None  # cannot tell; publishing is the behaviour it has always had
+        try:
+            base = index.publish_base(remote_key, session.id)
+        except sqlite3.Error:
+            base = None
+        return find_conflict(
+            session_id=session.id,
+            local_messages=session.message_count,
+            remote=remote,
+            base=base,
+            own_email=own_email,
+        )
+
+    def _on_publish_complete(
+        self,
+        done: int,
+        errors: list[str],
+        conflicts: list[Conflict] | None = None,
+        targets: list[Session] | None = None,
+        link: RemoteLink | None = None,
+    ) -> None:
         self._marked.clear()
         if errors:
             self.notify(
                 f"Publicadas {done}; {len(errors)} con error — {errors[0]}",
                 severity="warning",
             )
-        else:
+        elif done:
             self.notify(f"Publicadas {done} sesión(es)")
+        if conflicts and targets is not None and link is not None:
+            self._ask_about_conflicts(conflicts, targets, link)
+            return
         if self._active_remote is not None:
             self._load_remote_worker(self._active_remote)
         else:
             self._repaint()
         # What we just uploaded has to show as published on the local tab too.
         self._load_published_index_worker()
+
+    def _ask_about_conflicts(
+        self, conflicts: list[Conflict], targets: list[Session], link: RemoteLink
+    ) -> None:
+        """Report what was not published, and let the user overwrite on purpose."""
+        blocked = {c.session_id for c in conflicts}
+        still = [s for s in targets if s.id in blocked]
+        self.app.push_screen(
+            PublishConflictModal(
+                lines=[c.describe() for c in conflicts],
+                remote_label=link.tab_label(),
+            ),
+            lambda overwrite: self._on_conflict_answer(bool(overwrite), still, link),
+        )
+
+    def _on_conflict_answer(
+        self, overwrite: bool, targets: list[Session], link: RemoteLink
+    ) -> None:
+        if not overwrite:
+            self.notify("No se publicó nada de lo que estaba en conflicto")
+            self._load_published_index_worker()
+            return
+        self.notify(f"Reemplazando {len(targets)} sesión(es) en «{link.tab_label()}»…")
+        self._publish_worker(targets, link, force=True)
 
     def action_next_tab(self) -> None:
         """Move one tab to the right, wrapping around."""
@@ -1242,6 +1326,12 @@ class SessionsScreen(Screen[None]):
             self.app.call_from_thread(self._notify_error, f"No se pudo traer la sesión: {exc}")
             return
         local_head = resolve_git_head(self.project.path)
+        # This copy now derives from the version we just fetched. Recording that is what
+        # lets a later publish tell "nobody touched it" from "someone published on top".
+        with contextlib.suppress(sqlite3.Error):
+            default_index().record_publish_base(
+                link.identity_key(), remote.session_id, remote.published_at or ""
+            )
         # Scanning in this direction too: what just landed on the disk is someone else's
         # transcript, and whoever published it may not have had a scanner in front of them.
         # Already on the worker thread, and the result feeds the ⚠ mark straight away.

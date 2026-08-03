@@ -366,6 +366,14 @@ class RemoteStore(Protocol):
         """Every published session's metadata. Malformed manifests are skipped, not fatal."""
         ...
 
+    def get_session(self, session_id: str) -> RemoteSession | None:
+        """One session's manifest, or None if it is not published here.
+
+        Part of the contract because republishing needs it: it is how a publish checks
+        whether someone else has published on top since this copy was fetched.
+        """
+        ...
+
     def fetch(self, session_id: str, dest_dir: Path) -> FetchResult:
         """Hydrate ``session_id`` into ``dest_dir``, preserving the uuid."""
         ...

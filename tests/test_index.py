@@ -146,6 +146,38 @@ def test_purge_also_forgets_the_secret_scan(index: SessionIndex, tmp_path: Path)
     assert index.secret_counts(["gone"]) == {}
 
 
+# -- which published version we derive from ---------------------------------- #
+
+
+def test_publish_base_is_absent_until_recorded(index: SessionIndex) -> None:
+    assert index.publish_base("k1", "s1") is None
+
+
+def test_recording_and_reading_a_publish_base(index: SessionIndex) -> None:
+    index.record_publish_base("k1", "s1", "2026-08-01T10:00:00+00:00")
+    assert index.publish_base("k1", "s1") == "2026-08-01T10:00:00+00:00"
+
+
+def test_a_publish_base_is_per_remote(index: SessionIndex) -> None:
+    """The same session published to two repos derives from a version in each."""
+    index.record_publish_base("k1", "s1", "uno")
+    index.record_publish_base("k2", "s1", "dos")
+    assert index.publish_base("k1", "s1") == "uno"
+    assert index.publish_base("k2", "s1") == "dos"
+
+
+def test_recording_again_moves_the_base_forward(index: SessionIndex) -> None:
+    index.record_publish_base("k1", "s1", "vieja")
+    index.record_publish_base("k1", "s1", "nueva")
+    assert index.publish_base("k1", "s1") == "nueva"
+
+
+def test_forgetting_a_publish_base(index: SessionIndex) -> None:
+    index.record_publish_base("k1", "s1", "algo")
+    index.forget_publish_base("k1", "s1")
+    assert index.publish_base("k1", "s1") is None
+
+
 # -- cached credential scan -------------------------------------------------- #
 
 

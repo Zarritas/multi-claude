@@ -2104,6 +2104,97 @@ class PublishModal(ModalScreen["RemoteLink | None"]):
         return self.destinations[self.preselected]
 
 
+class PublishConflictModal(ModalScreen[bool]):
+    """Someone published on top of a session you were about to publish.
+
+    Nothing was written when this appears: the publish stopped at the check. Overwriting is
+    offered because sometimes it is right — the other version may be a stray republish —
+    but it has to be chosen, since the remote keeps one manifest per session id and the
+    replaced version is gone from it.
+
+    Dismisses True to overwrite, False to leave the remote as it is.
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+    ]
+
+    DEFAULT_CSS = """
+    PublishConflictModal {
+        align: center middle;
+    }
+    PublishConflictModal > Vertical {
+        background: $surface;
+        border: thick $error;
+        padding: 1 2;
+        width: 86;
+        height: auto;
+    }
+    PublishConflictModal Label.title {
+        text-style: bold;
+        color: $error;
+    }
+    PublishConflictModal Label.hint {
+        color: $text-muted;
+    }
+    PublishConflictModal Static.row {
+        color: $warning;
+    }
+    PublishConflictModal Horizontal {
+        align: center middle;
+        height: auto;
+        margin-top: 1;
+    }
+    PublishConflictModal Button {
+        margin: 0 1;
+    }
+    """
+
+    def __init__(self, *, lines: list[str], remote_label: str) -> None:
+        super().__init__()
+        self.lines = lines
+        self.remote_label = remote_label
+
+    def compose(self) -> ComposeResult:
+        from textual.containers import Horizontal
+
+        with Vertical():
+            yield Label(
+                f"🛑  {len(self.lines)} sesión(es) han cambiado en «{self.remote_label}»",
+                classes="title",
+            )
+            yield Label(
+                "Alguien publicó encima desde que trajiste tu copia, así que no se ha subido nada:",
+                classes="hint",
+            )
+            for line in self.lines:
+                yield Static(line, classes="row")
+            yield Label(
+                "Publicar ahora reemplaza su versión en el repositorio. Para conservar las "
+                "dos, reanuda la sesión con `--fork-session` y publica la bifurcación: "
+                "Claude le da un uuid nuevo y el manifest anota de cuál sale.",
+                classes="hint",
+            )
+            with Horizontal():
+                yield Button("Cancelar", id="cancel", variant="primary")
+                yield Button("Publicar de todas formas", id="overwrite", variant="error")
+
+    def on_mount(self) -> None:
+        # The safe answer takes the focus: overwriting has to be a deliberate move.
+        self.query_one("#cancel", Button).focus()
+
+    @on(Button.Pressed, "#cancel")
+    def _cancel(self) -> None:
+        self.dismiss(False)
+
+    @on(Button.Pressed, "#overwrite")
+    def _overwrite(self) -> None:
+        self.dismiss(True)
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
+
+
 class ConfirmDeleteModal(ModalScreen[bool]):
     """Yes/no confirmation. Cancel-focused by default; ``y`` confirms.
 

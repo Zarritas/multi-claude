@@ -125,6 +125,20 @@ CREATE VIRTUAL TABLE IF NOT EXISTS remote_sessions_fts USING fts5(
     tokenize = 'unicode61 remove_diacritics 2'
 );
 
+-- Which published version of a session this machine is working from: the manifest's
+-- ``published_at`` at the moment it was fetched, or last published successfully. It is the
+-- base of a fast-forward — if the remote's manifest now carries a different stamp, someone
+-- published on top and overwriting would drop their work. Without this the two cases are
+-- indistinguishable: a jsonl only grows, so "mine is bigger" says nothing about whether
+-- theirs grew too.
+CREATE TABLE IF NOT EXISTS session_base (
+    remote_key   TEXT NOT NULL,
+    session_id   TEXT NOT NULL,
+    published_at TEXT NOT NULL,
+    recorded_at  REAL NOT NULL DEFAULT 0,
+    PRIMARY KEY (remote_key, session_id)
+);
+
 -- Result of the credential scan per session, so the listing can mark what looks
 -- sensitive without re-grepping megabytes on every repaint. Keyed by mtime: a session
 -- that grew since it was scanned counts as unscanned. Only the count is stored —
@@ -499,6 +513,41 @@ class SessionIndex:
                 conn.execute("ROLLBACK")
                 raise
         return len(gone)
+
+    # -- which published version we are working from ------------------------- #
+
+    def record_publish_base(self, remote_key: str, session_id: str, published_at: str) -> None:
+        """Remember the published version this machine's copy derives from."""
+        with self._lock:
+            conn = self._connection()
+            conn.execute(
+                """
+                INSERT INTO session_base(remote_key, session_id, published_at, recorded_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(remote_key, session_id) DO UPDATE SET
+                    published_at=excluded.published_at,
+                    recorded_at=excluded.recorded_at
+                """,
+                (remote_key, session_id, published_at, time.time()),
+            )
+
+    def publish_base(self, remote_key: str, session_id: str) -> str | None:
+        """The ``published_at`` this copy derives from, or None if we never recorded one."""
+        with self._lock:
+            conn = self._connection()
+            row = conn.execute(
+                "SELECT published_at FROM session_base WHERE remote_key = ? AND session_id = ?",
+                (remote_key, session_id),
+            ).fetchone()
+        return str(row[0]) if row else None
+
+    def forget_publish_base(self, remote_key: str, session_id: str) -> None:
+        with self._lock:
+            conn = self._connection()
+            conn.execute(
+                "DELETE FROM session_base WHERE remote_key = ? AND session_id = ?",
+                (remote_key, session_id),
+            )
 
     # -- credential scan results -------------------------------------------- #
 

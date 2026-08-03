@@ -381,10 +381,17 @@ con el directorio, luego **uno que exista en disco**, y solo después el más re
 
 ## Concurrencia
 
-En v1 **no hay merge**. El plan es que si dos empleados continúan la misma sesión, la segunda
-publicación cree una variante con uuid nuevo y `forked_from: <uuid-original>`, visible en el
-listado como bifurcación. **Todavía no está implementado**: hoy la segunda publicación sobrescribe
-(ver "Desviaciones del plan"). El campo `forked_from` ya viaja en el manifest.
+En v1 **no hay merge**. Lo implementado es la mitad que evita la pérdida: la segunda publicación
+**se detiene** en vez de sobrescribir. Cada máquina anota de qué versión publicada deriva su copia
+(`session_base` en el índice, anotada al traer y al publicar) y antes de subir se compara con el
+manifest del remoto — la misma forma que un fast-forward de git. Si coincide, se publica; si no,
+no se escribe nada y el diálogo ofrece cancelar o reemplazar a propósito.
+
+Lo que **no** se hace es fabricar la bifurcación automáticamente: para conservar las dos versiones
+el camino es el nativo, reanudar con `--fork-session` y publicar el uuid resultante, y el manifest
+anota `forked_from`. Decidido así porque bifurcar al publicar deja el estado local incoherente —tu
+copia seguiría teniendo el uuid original— o exige renombrar en disco una sesión que puedes tener
+abierta en otra terminal. El campo `forked_from` ya viaja en el manifest.
 
 Esto es viable porque Claude Code ya soporta `--resume <id> --fork-session` de forma nativa
 (DESIGN.md lo listaba como pendiente): el fork no hay que fabricarlo reescribiendo `sessionId`,
@@ -413,7 +420,7 @@ es v1.1. Es una limitación inherente que se documenta, no se esconde.
 | 3 | Publicar (`u`) sobre selección múltiple | **hecho** |
 | 4 | Listado remoto (`R`) | **hecho** (sin columnas de índice, ver abajo) |
 | 5 | Hidratar + `Enter` + aviso de divergencia | **hecho** |
-| 6 | Fork en re-publicación (`--fork-session`) | pendiente |
+| 6 | No sobrescribir la versión de otra persona al republicar | **hecho** (ver desviación) |
 
 ### Desviaciones del plan, y por qué
 

@@ -22,6 +22,7 @@ Las sesiones compartidas entre máquinas y compañeros tienen su propio plan en
 | Servidor MCP                  | JSON-RPC 2.0 por stdio con la stdlib, sin el SDK; solo lectura; salida en texto, no `structuredContent` |
 | Sesiones del equipo en `?`    | se cachea el listado de cada remoto al visitar su pestaña; la búsqueda nunca toca la red |
 | Contenido de una sesión ajena | payload de búsqueda en un blob aparte (`search/<uuid>.txt.gz`), no en el manifest: listar lee todos los manifests |
+| Republicar sobre otra versión | se bloquea antes de escribir (fast-forward por `published_at`); reemplazar es explícito, y bifurcar es `--fork-session` del propio Claude |
 | Escáner de secretos           | avisa, no veta; nunca imprime el valor; calibrado contra transcripts reales, no contra un corpus sintético |
 | Barrido del histórico         | informe por CLI (`--audit-secrets`), no una pantalla: la acción útil —rotar la credencial— ocurre fuera, y así se puede colgar de un hook |
 | Marca `⚠` del listado         | escaneo en worker cacheado contra el `mtime`; sin escanear ≠ limpia, y el índice guarda el número de hallazgos, nunca un valor |

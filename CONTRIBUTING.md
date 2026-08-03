@@ -89,6 +89,7 @@ A wheel installed from the tagged commit will report `0.2.0`. An install from a 
 - `src/multi_claude/modals.py` — modal dialogs (rename, add project, confirm delete, settings, merge).
 - `src/multi_claude/mcp.py` — MCP server over the index (JSON-RPC 2.0 on stdio, no SDK).
 - `src/multi_claude/remote.py` — the shared-session transport, and the manifest format. Bumping `VERSION` means adding the new version to `_READABLE_VERSIONS` too: an old manifest must stay readable, or a colleague's published sessions vanish from everyone else's listing on upgrade.
+- `src/multi_claude/publish_guard.py` — decides whether a publish would overwrite someone else's version. Pure: no UI, no network, and it never writes. If you touch it, remember the error directions are not symmetric — failing to warn loses a colleague's turns.
 - `src/multi_claude/secret_scan.py` — pre-publish credential scan. If you add or loosen a rule, re-measure against real transcripts before believing the tests: the rules were calibrated that way, and `tests/test_secret_scan.py` guards both directions (what must be caught, and the ordinary conversation that must not be). Anywhere you print transcript text back at the user, put it through `redact()` first.
 - `src/multi_claude/audit.py` — the same scan over the whole history, behind `multi-claude --audit-secrets`. Exits 1 when it finds something, so it can hang off a hook.
 

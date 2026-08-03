@@ -409,14 +409,30 @@ personal— ni nada llamado `session-env`.
 - **El código no viaja.** Tu compañero necesita el repositorio de trabajo, y si está en otro
   commit la conversación describe ficheros que ya no son esos. Al reanudar se avisa de la
   divergencia, que es lo que lo hace visible en vez de sorprendente.
-- **Con token, republicar pisa.** Si dos personas continúan la misma sesión y ambas publican, con
-  API la segunda sobrescribe a la primera en el remoto (cada una conserva la suya en local). Con
-  **SSH no**: git rechaza el push y se reintenta encima. Es la razón principal para preferir SSH
-  en un equipo.
+- **Republicar sobre la versión de otra persona se bloquea.** Si alguien publicó encima desde que
+  trajiste tu copia, la publicación se detiene antes de escribir y el diálogo lo explica con los
+  dos lados (ver [Publicar sobre lo de otra persona](#publicar-sobre-lo-de-otra-persona)). Se puede
+  reemplazar a propósito, nunca por accidente.
 - **Una sesión traída y luego continuada por el otro no se puede actualizar.** Se ve el aviso
   `↻`, pero traer los turnos nuevos exige un merge que aún no está implementado.
 
 Diseño completo y fases pendientes en [docs/REMOTE-SESSIONS.md](docs/REMOTE-SESSIONS.md).
+
+### Publicar sobre lo de otra persona
+
+El remoto guarda **un manifest por id de sesión**, así que publicar una sesión que un compañero ha publicado encima reemplazaría la suya. Con SSH git rechaza el push y el reintento aterriza encima del suyo, pero por API REST no hay nada equivalente: el segundo que escribe gana. Eso es la única operación de todo el flujo que puede **perder** trabajo.
+
+La comprobación tiene la misma forma que un fast-forward de git. Cada máquina anota de qué versión publicada deriva su copia —al traer la sesión, y al publicarla con éxito—, y antes de subir se compara con el manifest del remoto:
+
+| Situación | Qué pasa |
+|-----------|----------|
+| no está publicada | se publica, no hay nada que reemplazar |
+| el remoto sigue con la versión de la que partes | fast-forward: se publica sin preguntar |
+| el remoto tiene otra versión | **se detiene antes de escribir** y el diálogo lo cuenta |
+
+En el tercer caso no se sube nada. El diálogo muestra los dos lados —cuántos mensajes tiene la tuya, cuántos la de quien publicó— y ofrece dos salidas: cancelar (con el foco puesto ahí, porque es la respuesta segura) o **reemplazar a propósito**, que a veces es lo correcto. Para conservar las dos versiones, el camino es el nativo de Claude Code: reanudar con `--fork-session`, que le da un uuid nuevo, y publicar esa bifurcación — el manifest anota en `forked_from` de cuál sale.
+
+**Por qué no se comparan tamaños.** Un jsonl solo crece, así que «la mía es más grande que la publicada» es igual de cierto cuando el otro no ha tocado nada que cuando añadió cien turnos después de que tú la trajeras. La marca de versión distingue los dos casos; un tamaño no.
 
 ### Buscar en las sesiones del equipo sin descargarlas
 
@@ -693,7 +709,7 @@ El nombre de la carpeta `~/.claude/projects/<encoded>/` es la ruta original con 
 - **zellij no puede lanzar un comando en una pestaña nueva**: `zellij action new-tab` solo acepta un layout, no un comando, así que el modo `tab` dentro de zellij abre un panel.
 - **El estado en vivo es de esta máquina, y un valor nuevo no se interpreta**: ver [Estado en vivo](#estado-en-vivo). Un estado que no esté en `_STATUS_CELLS` (`screens/sessions.py`) se muestra como `● abierta`.
 - **Las sesiones de background tardan hasta 15 s en aparecer**: solo las conoce `claude agents --json`, que se consulta en un tick lento porque cuesta ~350 ms. Sin `claude` en el PATH no aparecen en absoluto.
-- **Con token, republicar una sesión compartida sobrescribe la versión del remoto**: si dos personas continúan la misma sesión y ambas publican vía API, la segunda pisa a la primera en el remoto (cada una conserva la suya en local). **Con autenticación SSH no ocurre**: git rechaza el segundo push y se reintenta encima, así que ambas sobreviven. El fork explícito que lo resolvería también en API está planificado, no implementado — ver [docs/REMOTE-SESSIONS.md](docs/REMOTE-SESSIONS.md).
+- **La detección de conflicto depende de haber registrado una base**: se anota al traer una sesión y al publicarla, así que una sesión publicada por una versión anterior de multi-claude no tiene base. En ese caso solo se avisa si el manifest remoto lo firmó **otra persona**; republicar la tuya propia no molesta con un diálogo, porque el único historial en juego es el tuyo.
 - **Una sesión ya descargada no se puede actualizar**: si un compañero la continúa después de que la traigas, la fila lo indica con `↻` pero no hay forma de incorporar esos turnos. Requiere el merge por `uuid` que sigue pendiente.
 - **El escáner de secretos es heurístico, no una garantía**: reconoce formatos conocidos (claves privadas, tokens con prefijo de proveedor, credenciales en URLs) y asignaciones cuyo nombre y cuyo valor parecen una credencial, pero una contraseña dictada en prosa o un formato propio se le escapan. Es una red de seguridad, no una autorización — ver [Escáner de secretos](#escáner-de-secretos-al-publicar). Los binarios y los ficheros de más de 8 MB no se revisan, y el diálogo lo dice.
 - **Publicar en GitLab/GitHub hace un commit por fichero**: una sesión con subagentes son varios commits en el repo de sesiones, no uno. El manifest siempre va el último, así que una publicación interrumpida queda invisible en vez de a medias, pero el historial del repo es más ruidoso de lo necesario.
