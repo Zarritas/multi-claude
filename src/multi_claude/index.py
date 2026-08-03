@@ -15,6 +15,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,36 @@ from typing import Any
 def default_index_path() -> Path:
     base = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
     return Path(base) / "multi-claude" / "index.sqlite3"
+
+
+@dataclass(frozen=True)
+class IndexedRemoteSession:
+    """A team-published session as the index remembers it.
+
+    Mirrors what a manifest carries, plus where it was seen: ``remote_key`` is the
+    remote's identity (:meth:`RemoteLink.identity_key`), ``remote_label`` the tab name
+    to show, and ``project_key`` the linked repo's origin, which is how a search hit
+    leads back to the project whose tab holds it.
+    """
+
+    remote_key: str
+    session_id: str
+    remote_label: str
+    project_key: str | None
+    published_by: str | None
+    published_at: str | None
+    cwd: str | None
+    branch: str | None
+    display_name: str | None
+    first_prompt: str | None
+    tags: tuple[str, ...]
+    message_count: int
+    size_bytes: int
+
+    @property
+    def title(self) -> str:
+        """What to show as the session's name, best available first."""
+        return self.display_name or self.first_prompt or self.session_id
 
 
 @dataclass(frozen=True)
@@ -58,6 +89,47 @@ CREATE VIRTUAL TABLE IF NOT EXISTS sessions_fts USING fts5(
     session_id UNINDEXED,
     content,
     tokenize = 'unicode61 remove_diacritics 2'
+);
+
+-- Sessions published by the team, as last listed from each remote. Cached so the
+-- global search can offer a teammate's session without a network round trip; the
+-- content indexed is only what a manifest carries (name, first prompt, tags,
+-- branch, author) — the transcript itself never leaves the machine that has it.
+CREATE TABLE IF NOT EXISTS remote_sessions (
+    remote_key    TEXT NOT NULL,
+    session_id    TEXT NOT NULL,
+    remote_label  TEXT NOT NULL DEFAULT '',
+    project_key   TEXT,
+    published_by  TEXT,
+    published_at  TEXT,
+    cwd           TEXT,
+    branch        TEXT,
+    display_name  TEXT,
+    first_prompt  TEXT,
+    tags          TEXT NOT NULL DEFAULT '',
+    message_count INTEGER NOT NULL DEFAULT 0,
+    size_bytes    INTEGER NOT NULL DEFAULT 0,
+    listed_at     REAL    NOT NULL DEFAULT 0,
+    PRIMARY KEY (remote_key, session_id)
+);
+CREATE INDEX IF NOT EXISTS idx_remote_sessions_project ON remote_sessions(project_key);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS remote_sessions_fts USING fts5(
+    remote_key UNINDEXED,
+    session_id UNINDEXED,
+    content,
+    tokenize = 'unicode61 remove_diacritics 2'
+);
+
+-- Result of the credential scan per session, so the listing can mark what looks
+-- sensitive without re-grepping megabytes on every repaint. Keyed by mtime: a session
+-- that grew since it was scanned counts as unscanned. Only the count is stored —
+-- never a finding, never a value: this file is not the place to keep a copy of a secret.
+CREATE TABLE IF NOT EXISTS session_secrets (
+    session_id   TEXT PRIMARY KEY,
+    mtime        REAL    NOT NULL,
+    finding_count INTEGER NOT NULL DEFAULT 0,
+    scanned_at   REAL    NOT NULL DEFAULT 0
 );
 """
 
@@ -148,10 +220,16 @@ class SessionIndex:
                 )
 
     def delete_session(self, session_id: str) -> None:
+        """Drop every trace of a session, the scan result included.
+
+        Leaving ``session_secrets`` behind would let a deleted id come back marked as
+        sensitive if the same uuid is ever hydrated again.
+        """
         with self._lock:
             conn = self._connection()
             conn.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
             conn.execute("DELETE FROM sessions_fts WHERE session_id = ?", (session_id,))
+            conn.execute("DELETE FROM session_secrets WHERE session_id = ?", (session_id,))
 
     # -- reads -------------------------------------------------------------- #
 
@@ -207,25 +285,184 @@ class SessionIndex:
             ).fetchall()
         return [_row_to_session(r) for r in rows]
 
-    def fts_search(self, query: str, limit: int = 200) -> list[IndexedSession]:
-        """Return sessions whose FTS content matches ``query``, ordered by rank."""
+    def replace_remote_sessions(
+        self, remote_key: str, sessions: list[IndexedRemoteSession], *, listed_at: float
+    ) -> None:
+        """Make the cache for ``remote_key`` match this listing exactly.
+
+        A replace rather than an upsert: the listing *is* the remote's truth at that
+        moment, so a session someone unpublished has to disappear from search instead
+        of lingering as a hit nobody can fetch.
+        """
+        with self._lock:
+            conn = self._connection()
+            conn.execute("BEGIN")
+            try:
+                conn.execute("DELETE FROM remote_sessions WHERE remote_key = ?", (remote_key,))
+                conn.execute("DELETE FROM remote_sessions_fts WHERE remote_key = ?", (remote_key,))
+                for session in sessions:
+                    conn.execute(
+                        """
+                        INSERT INTO remote_sessions(
+                            remote_key, session_id, remote_label, project_key, published_by,
+                            published_at, cwd, branch, display_name, first_prompt, tags,
+                            message_count, size_bytes, listed_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            remote_key,
+                            session.session_id,
+                            session.remote_label,
+                            session.project_key,
+                            session.published_by,
+                            session.published_at,
+                            session.cwd,
+                            session.branch,
+                            session.display_name,
+                            session.first_prompt,
+                            ",".join(session.tags),
+                            session.message_count,
+                            session.size_bytes,
+                            listed_at,
+                        ),
+                    )
+                    conn.execute(
+                        """
+                        INSERT INTO remote_sessions_fts(remote_key, session_id, content)
+                        VALUES (?, ?, ?)
+                        """,
+                        (remote_key, session.session_id, _remote_fts_content(session)),
+                    )
+                conn.execute("COMMIT")
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+
+    def fts_search_remote(self, query: str, limit: int = 200) -> list[IndexedRemoteSession]:
+        """Team-published sessions whose manifest metadata matches ``query``.
+
+        Note what this does *not* search: a manifest carries no transcript, so this
+        finds sessions by name, first prompt, tags, branch and author — never by
+        something said mid-conversation. The local :meth:`fts_search` does that.
+        """
         if not query.strip():
             return []
-        sanitised = _sanitise_fts_query(query)
         with self._lock:
             conn = self._connection()
             rows = conn.execute(
                 """
+                SELECT r.remote_key, r.session_id, r.remote_label, r.project_key,
+                       r.published_by, r.published_at, r.cwd, r.branch, r.display_name,
+                       r.first_prompt, r.tags, r.message_count, r.size_bytes
+                FROM remote_sessions_fts f
+                JOIN remote_sessions r
+                  ON r.remote_key = f.remote_key AND r.session_id = f.session_id
+                WHERE remote_sessions_fts MATCH :match
+                ORDER BY rank
+                LIMIT :limit
+                """,
+                {"match": _sanitise_fts_query(query), "limit": limit},
+            ).fetchall()
+        return [_row_to_remote_session(r) for r in rows]
+
+    # -- credential scan results -------------------------------------------- #
+
+    def record_secret_scan(self, session_id: str, mtime: float, finding_count: int) -> None:
+        """Remember how many suspected credentials a session had when last scanned."""
+        with self._lock:
+            conn = self._connection()
+            conn.execute(
+                """
+                INSERT INTO session_secrets(session_id, mtime, finding_count, scanned_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(session_id) DO UPDATE SET
+                    mtime=excluded.mtime,
+                    finding_count=excluded.finding_count,
+                    scanned_at=excluded.scanned_at
+                """,
+                (session_id, mtime, finding_count, time.time()),
+            )
+
+    def secret_counts(self, session_ids: list[str]) -> dict[str, int]:
+        """``session_id -> finding count`` for the ids that have a cached scan.
+
+        No entry means "not scanned yet", which the caller must not confuse with "clean":
+        the listing shows nothing until a scan has actually happened.
+        """
+        if not session_ids:
+            return {}
+        placeholders = ",".join("?" * len(session_ids))
+        with self._lock:
+            conn = self._connection()
+            rows = conn.execute(
+                f"SELECT session_id, finding_count FROM session_secrets "
+                f"WHERE session_id IN ({placeholders})",
+                session_ids,
+            ).fetchall()
+        return {str(sid): int(count) for sid, count in rows}
+
+    def secret_scan_is_fresh(self, session_id: str, mtime: float) -> bool:
+        """Whether the cached scan still describes the file on disk."""
+        with self._lock:
+            conn = self._connection()
+            row = conn.execute(
+                "SELECT mtime FROM session_secrets WHERE session_id = ?", (session_id,)
+            ).fetchone()
+        return bool(row) and float(row[0]) == mtime
+
+    def forget_secret_scan(self, session_id: str) -> None:
+        with self._lock:
+            conn = self._connection()
+            conn.execute("DELETE FROM session_secrets WHERE session_id = ?", (session_id,))
+
+    def count_remote_sessions(self) -> int:
+        """How many team-published sessions are cached, across every remote."""
+        with self._lock:
+            conn = self._connection()
+            row = conn.execute("SELECT COUNT(*) FROM remote_sessions").fetchone()
+        return int(row[0]) if row else 0
+
+    def count_sessions(self) -> int:
+        """How many sessions the index knows about. Zero means it was never populated."""
+        with self._lock:
+            conn = self._connection()
+            row = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()
+        return int(row[0]) if row else 0
+
+    def fts_search(
+        self, query: str, limit: int = 200, *, cwd_prefix: str | None = None
+    ) -> list[IndexedSession]:
+        """Return sessions whose FTS content matches ``query``, ordered by rank.
+
+        ``cwd_prefix`` restricts the result to sessions recorded at that path or
+        below it. The comparison is done with ``substr`` rather than ``LIKE`` on
+        purpose: a path containing ``_`` or ``%`` would otherwise act as a wildcard.
+        """
+        if not query.strip():
+            return []
+        params: dict[str, object] = {
+            "match": _sanitise_fts_query(query),
+            "limit": limit,
+        }
+        scope = ""
+        if cwd_prefix:
+            params["cwd"] = cwd_prefix.rstrip("/") or "/"
+            scope = "AND (s.cwd = :cwd OR substr(s.cwd, 1, length(:cwd) + 1) = :cwd || '/')"
+        with self._lock:
+            conn = self._connection()
+            rows = conn.execute(
+                f"""
                 SELECT s.session_id, s.project_dir, s.cwd, s.branch, s.first_prompt,
                        s.message_count, s.size_bytes, s.mtime, s.jsonl_path,
                        s.embedded_name
                 FROM sessions_fts f
                 JOIN sessions s ON s.session_id = f.session_id
-                WHERE sessions_fts MATCH ?
+                WHERE sessions_fts MATCH :match
+                {scope}
                 ORDER BY rank
-                LIMIT ?
+                LIMIT :limit
                 """,
-                (sanitised, limit),
+                params,
             ).fetchall()
         return [_row_to_session(r) for r in rows]
 
@@ -243,6 +480,51 @@ def _row_to_session(row: Any) -> IndexedSession:
         mtime=float(mtime),
         jsonl_path=str(jp),
         embedded_name=str(embedded) if embedded is not None else None,
+    )
+
+
+def _remote_fts_content(session: IndexedRemoteSession) -> str:
+    """The searchable text of a manifest: everything a person might remember about it."""
+    parts = [
+        session.display_name,
+        session.first_prompt,
+        " ".join(session.tags),
+        session.branch,
+        session.published_by,
+    ]
+    return "\n".join(p for p in parts if p)
+
+
+def _row_to_remote_session(row: Any) -> IndexedRemoteSession:
+    (
+        remote_key,
+        session_id,
+        remote_label,
+        project_key,
+        published_by,
+        published_at,
+        cwd,
+        branch,
+        display_name,
+        first_prompt,
+        tags,
+        message_count,
+        size_bytes,
+    ) = row
+    return IndexedRemoteSession(
+        remote_key=str(remote_key),
+        session_id=str(session_id),
+        remote_label=str(remote_label or ""),
+        project_key=str(project_key) if project_key is not None else None,
+        published_by=str(published_by) if published_by is not None else None,
+        published_at=str(published_at) if published_at is not None else None,
+        cwd=str(cwd) if cwd is not None else None,
+        branch=str(branch) if branch is not None else None,
+        display_name=str(display_name) if display_name is not None else None,
+        first_prompt=str(first_prompt) if first_prompt is not None else None,
+        tags=tuple(t for t in str(tags or "").split(",") if t),
+        message_count=int(message_count),
+        size_bytes=int(size_bytes),
     )
 
 

@@ -1,7 +1,17 @@
-"""SearchScreen — full-text search across every indexed session."""
+"""SearchScreen — full-text search across every indexed session, yours and the team's.
+
+Two sources, one list. Local sessions are searched by their **content** (the FTS payload
+built from the transcript); team-published ones only by what their manifest carries —
+name, first prompt, tags, branch, author — because a manifest holds no transcript. The
+column that names the source is what keeps that difference visible instead of implied.
+
+Nothing here touches the network: a remote's rows are whatever the last visit to its tab
+cached in the index.
+"""
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
 from textual import on, work
@@ -11,9 +21,20 @@ from textual.screen import Screen
 from textual.widgets import DataTable, Footer, Header, Input
 from textual.widgets.data_table import RowKey
 
-from multi_claude.discovery import Project, scan_projects
+from multi_claude.discovery import Project, project_remote_key, scan_projects
 from multi_claude.formatting import format_relative_time
-from multi_claude.index import IndexedSession, default_index
+from multi_claude.index import IndexedRemoteSession, IndexedSession, default_index
+
+# Per source, so a project with hundreds of local hits cannot crowd the team out.
+_LIMIT_PER_SOURCE = 200
+
+
+@dataclass(frozen=True)
+class _Hit:
+    """One painted row: either a local session or a team-published one."""
+
+    local: IndexedSession | None = None
+    remote: IndexedRemoteSession | None = None
 
 
 class SearchScreen(Screen[None]):
@@ -26,7 +47,7 @@ class SearchScreen(Screen[None]):
 
     def __init__(self) -> None:
         super().__init__()
-        self._results: list[IndexedSession] = []
+        self._results: list[_Hit] = []
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -37,7 +58,7 @@ class SearchScreen(Screen[None]):
     def on_mount(self) -> None:
         self.sub_title = "búsqueda global (FTS5)"
         table = self.query_one("#fts-results", DataTable)
-        table.add_columns("Sesión", "Proyecto", "Branch", "Última")
+        table.add_columns("Sesión", "Dónde", "Proyecto", "Branch", "Última")
         self.query_one("#fts-query", Input).focus()
 
     @on(Input.Changed, "#fts-query")
@@ -51,25 +72,49 @@ class SearchScreen(Screen[None]):
 
     @work(thread=True, exclusive=True, group="fts-search")
     def _search_worker(self, query: str) -> None:
-        results = default_index().fts_search(query, limit=200)
-        self.app.call_from_thread(self._on_search_complete, results)
+        index = default_index()
+        local = index.fts_search(query, limit=_LIMIT_PER_SOURCE)
+        remote = index.fts_search_remote(query, limit=_LIMIT_PER_SOURCE)
+        self.app.call_from_thread(self._on_search_complete, local, remote)
 
-    def _on_search_complete(self, results: list[IndexedSession]) -> None:
-        self._results = results
+    def _on_search_complete(
+        self, local: list[IndexedSession], remote: list[IndexedRemoteSession]
+    ) -> None:
+        # Ranks from two FTS tables are not comparable, so they are not interleaved:
+        # each source keeps its own relevance order, yours first.
+        self._results = [_Hit(local=s) for s in local] + [_Hit(remote=r) for r in remote]
         self._repaint()
+        if remote:
+            self.sub_title = f"búsqueda global · {len(local)} tuyas · {len(remote)} del equipo"
+        else:
+            self.sub_title = "búsqueda global (FTS5)"
 
     def _repaint(self) -> None:
         table = self.query_one("#fts-results", DataTable)
         table.clear()
-        for idx, session in enumerate(self._results):
-            project_label = Path(session.project_dir).name or session.project_dir
-            table.add_row(
-                (session.first_prompt or session.session_id)[:80],
-                project_label,
+        for idx, hit in enumerate(self._results):
+            table.add_row(*self._cells(hit), key=str(idx))
+
+    def _cells(self, hit: _Hit) -> tuple[str, str, str, str, str]:
+        if hit.local is not None:
+            session = hit.local
+            return (
+                (session.embedded_name or session.first_prompt or session.session_id)[:80],
+                "local",
+                _project_label(session),
                 session.branch or "—",
                 format_relative_time(session.mtime),
-                key=str(idx),
             )
+        remote = hit.remote
+        assert remote is not None  # a hit is one or the other
+        who = (remote.published_by or "?").split("@")[0]
+        return (
+            remote.title[:80],
+            f"☁ {who}",
+            remote.remote_label,
+            remote.branch or "—",
+            _published_ago(remote.published_at),
+        )
 
     @on(Input.Submitted, "#fts-query")
     def _on_query_submitted(self, event: Input.Submitted) -> None:
@@ -79,19 +124,37 @@ class SearchScreen(Screen[None]):
 
     @on(DataTable.RowSelected, "#fts-results")
     def _on_row_selected(self, event: DataTable.RowSelected) -> None:
-        result = self._result_for_row(event.row_key)
-        if result is None:
+        hit = self._result_for_row(event.row_key)
+        if hit is None:
             return
-        project = self._project_for_session(result)
+        if hit.local is not None:
+            project = self._project_for_session(hit.local)
+            if project is None:
+                self.notify("No encuentro el proyecto correspondiente", severity="warning")
+                return
+            self._open(project)
+            return
+
+        remote = hit.remote
+        assert remote is not None
+        project = self._project_for_remote(remote)
         if project is None:
-            self.notify("No encuentro el proyecto correspondiente", severity="warning")
+            self.notify(
+                f"«{remote.remote_label}» no está enlazado a ningún proyecto de esta máquina",
+                severity="warning",
+            )
             return
+        # Land on the tab that holds it, not just the project: the row the user picked
+        # is in a remote listing, and finding it again by hand defeats the search.
+        self._open(project, activate_remote=remote.remote_key)
+
+    def _open(self, project: Project, *, activate_remote: str | None = None) -> None:
         from multi_claude.screens.sessions import SessionsScreen
 
         self.app.pop_screen()  # back to ProjectsScreen
-        self.app.push_screen(SessionsScreen(project))
+        self.app.push_screen(SessionsScreen(project, activate_remote=activate_remote))
 
-    def _result_for_row(self, row_key: RowKey) -> IndexedSession | None:
+    def _result_for_row(self, row_key: RowKey) -> _Hit | None:
         if row_key.value is None:
             return None
         idx = int(row_key.value)
@@ -106,5 +169,44 @@ class SearchScreen(Screen[None]):
                 return project
         return None
 
+    def _project_for_remote(self, remote: IndexedRemoteSession) -> Project | None:
+        """The local project linked to this remote, by the key the links are stored under."""
+        if not remote.project_key:
+            return None
+        for project in scan_projects():
+            if project.is_orphan:
+                continue
+            if project_remote_key(project.path) == remote.project_key:
+                return project
+        return None
+
     def action_back(self) -> None:
         self.app.pop_screen()
+
+
+def _project_label(session: IndexedSession) -> str:
+    """The project's name, the way the projects screen shows it.
+
+    The indexed ``project_dir`` is Claude's encoded directory (``-home-me-tienda-api``),
+    which is both ugly and long in a column. The recorded ``cwd`` is the real path, so its
+    basename is the name the user knows; the encoded directory is only the fallback for a
+    session whose first event carried no cwd.
+    """
+    if session.cwd:
+        name = Path(session.cwd).name
+        if name:
+            return name
+    return Path(session.project_dir).name or session.project_dir
+
+
+def _published_ago(published_at: str | None) -> str:
+    """A manifest timestamp as a relative age, or '—' when it is missing or unparseable."""
+    if not published_at:
+        return "—"
+    from datetime import datetime
+
+    try:
+        stamp = datetime.fromisoformat(published_at.replace("Z", "+00:00"))
+    except ValueError:
+        return "—"
+    return format_relative_time(stamp.timestamp())

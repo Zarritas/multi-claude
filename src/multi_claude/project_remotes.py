@@ -198,21 +198,25 @@ class RemoteLink:
             return f"ssh://{self.ssh_user}@{self.host}:{self.ssh_port}/{path}.git"
         return f"{self.ssh_user}@{self.host}:{path}.git"
 
+    def identity_key(self) -> str:
+        """Stable string identifying *where* this link points, ignoring its label.
+
+        The single definition of "the same remote", used both to reject linking a
+        project twice to one repo and to key the cached listing in the session index —
+        so a relabelled tab does not turn into a second remote with duplicate rows.
+        """
+        n = self.normalised()
+        return "\x1f".join(
+            (n.kind, n.path, n.host or n.api_host, n.repo, n.branch, str(n.ssh_port))
+        )
+
     def same_target(self, other: RemoteLink) -> bool:
         """Whether two links point at the same place, ignoring the label.
 
         Used to keep a project from being linked twice to one repo, which would show the
         same sessions under two tabs.
         """
-        a, b = self.normalised(), other.normalised()
-        return (a.kind, a.path, a.host or a.api_host, a.repo, a.branch, a.ssh_port) == (
-            b.kind,
-            b.path,
-            b.host or b.api_host,
-            b.repo,
-            b.branch,
-            b.ssh_port,
-        )
+        return self.identity_key() == other.identity_key()
 
     @property
     def is_configured(self) -> bool:

@@ -37,6 +37,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol
 
+from multi_claude.index import IndexedRemoteSession
 from multi_claude.project_remotes import RemoteLink
 from multi_claude.session import Session
 
@@ -246,6 +247,35 @@ def session_to_remote(
         message_count=session.message_count,
         size_bytes=session.size_bytes,
         forked_from=forked_from,
+    )
+
+
+def remote_to_indexed(
+    session: RemoteSession,
+    *,
+    remote_key: str,
+    remote_label: str,
+    project_key: str | None,
+) -> IndexedRemoteSession:
+    """Turn a listed manifest into the row the session index caches.
+
+    The inverse direction of :func:`session_to_remote`, and deliberately lossy: only
+    what a manifest already carries travels, so nothing here reads a transcript.
+    """
+    return IndexedRemoteSession(
+        remote_key=remote_key,
+        session_id=session.session_id,
+        remote_label=remote_label,
+        project_key=project_key,
+        published_by=session.published_by,
+        published_at=session.published_at or None,
+        cwd=session.cwd,
+        branch=session.branch,
+        display_name=session.display_name,
+        first_prompt=session.first_prompt,
+        tags=tuple(session.tags),
+        message_count=session.message_count,
+        size_bytes=session.size_bytes,
     )
 
 

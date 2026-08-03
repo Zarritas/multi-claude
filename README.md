@@ -1,25 +1,41 @@
 # multi-claude
 
-TUI para navegar los proyectos y sesiones de Claude Code y reanudar (o crear) sesiones desde un punto central.
+El archivo compartido de las sesiones de Claude Code de un equipo: navega los cientos de conversaciones acumuladas de todos tus proyectos —y las de tus compañeros— y reanuda cualquiera desde un punto central.
+
+![Recorrido por la TUI: la lista de proyectos, las sesiones de uno de ellos con su estado en vivo, la pestaña del repositorio que comparte el equipo filtrada por autor, y la búsqueda global encontrando a la vez sesiones propias y de un compañero](docs/img/demo.gif)
 
 ## Qué resuelve
 
 Claude Code guarda cada sesión como un `.jsonl` bajo `~/.claude/projects/<encoded-path>/`. Cuando acumulas decenas de proyectos y cientos de sesiones, encontrar "aquella conversación de hace tres semanas sobre el refactor X" se vuelve incómodo: `claude --resume` te muestra solo las del cwd actual, y saltar entre proyectos implica `cd`s y memorizar UUIDs.
 
-`multi-claude` es un dashboard en terminal que lista todos tus proyectos, muestra sus sesiones con metadatos legibles, y al pulsar Enter lanza `claude --resume <id>` en un panel/pestaña nueva del multiplexer o emulador de terminal.
+Y hay una segunda mitad del problema: esas conversaciones son **de una persona y de una máquina**. El compañero que ya peleó con ese despliegue tiene la sesión en su disco, y lo único que puedes hacer es preguntarle por Slack y que te la resuma.
+
+`multi-claude` es un dashboard en terminal para las dos cosas. Lista todos tus proyectos con sus sesiones y te deja organizarlas como un archivo que se consulta meses después —carpetas, etiquetas, colores, worktrees agrupados, búsqueda por lo que se dijo dentro—, enlaza cada proyecto a uno o varios repositorios de sesiones que el equipo comparte, y al pulsar Enter lanza `claude --resume <id>` en un panel/pestaña nueva del multiplexer o emulador de terminal: sea tu sesión o la de otra persona.
+
+### Frente al `agent view` de Claude Code
+
+Claude Code trae desde la 2.1.139 su propio `claude agents`: un panel de las sesiones **en marcha**, agrupadas por estado, con un `/resume` para las históricas del repo (2.1.212+). Para saber qué está pasando ahora mismo en esta máquina, eso es mejor que cualquier herramienta de terceros — es quien produce el dato.
+
+multi-claude no compite ahí: lee el mismo registro local de sesiones vivas que alimenta a agent view (ver [Estado en vivo](#estado-en-vivo)) y muestra su estado en la tabla, para no obligarte a mirar en dos sitios. Lo que añade encima es lo que agent view no hace:
+
+- **el histórico como archivo organizable** — carpetas propias, etiquetas, colores por reglas, nombres persistentes, worktrees agrupados por repo, mover sesiones de un worktree a otro;
+- **búsqueda full-text por el contenido** de las conversaciones, no por su nombre;
+- **y el equipo** — publicar una sesión en un repositorio común y reanudar la de otra persona conservando su uuid.
 
 ## Qué trae
 
-- **Estado en vivo** de cada sesión: con varias corriendo a la vez, ves cuál trabaja y cuál te está esperando sin tabular entre terminales (ver [Estado en vivo](#estado-en-vivo)).
-- **Búsqueda full-text** (`?`) sobre el contenido de todas las sesiones, con índice FTS5 de SQLite — encuentra "aquella conversación sobre el refactor X" por lo que se dijo dentro.
-- **Preview** (`p`) de los últimos turnos de una sesión sin reanudarla.
+- **Sesiones compartidas** (`L`, `u`): enlaza cada proyecto a uno o varios repositorios de sesiones (GitLab, GitHub o una carpeta), que aparecen como pestañas; publica con `u` y reanuda la sesión de un compañero con `Enter`, sin exportar ni importar nada (ver [Sesiones compartidas](#sesiones-compartidas-l-y-u)).
+- **Escáner de secretos** antes de publicar: revisa lo que va a subir y, si encuentra algo con pinta de credencial, el diálogo cambia de forma para que publicarlo sea un acto deliberado. Las sesiones sospechosas van marcadas con `⚠` en el listado, y `multi-claude --audit-secrets` revisa el histórico completo (ver [Escáner de secretos](#escáner-de-secretos-al-publicar)).
+- **Búsqueda full-text** (`?`) sobre el contenido de todas las sesiones, con índice FTS5 de SQLite — encuentra "aquella conversación sobre el refactor X" por lo que se dijo dentro, y en la misma lista **las del equipo** que ya has visto publicadas, marcadas con quién las publicó (ver [Búsqueda global](#búsqueda-global-full-text-)).
+- **Servidor MCP** (`multi-claude-mcp`) sobre ese mismo índice: Claude busca en sus propias sesiones pasadas en vez de volver a deducir lo que ya resolvió (ver [Servidor MCP](#servidor-mcp-multi-claude-mcp)).
 - **Worktrees agrupados** por defecto: los worktrees de un mismo repo colapsan en una fila, con pantalla propia para entrar a cada uno.
 - **Carpetas de usuario** (`f`) para organizar proyectos en un árbol propio.
-- **Filtro incremental** (`/`) con `branch:`, `path:`, `id:`, `tag:` y texto libre fuzzy.
 - **Etiquetas** (`t`) y **colores** por sesión (`c`), con reglas automáticas por branch, antigüedad o actividad (`C`).
 - **Nombres persistentes** (`e`) para sesiones y proyectos, con el `/rename` de Claude y el título que Claude genera solo como fallbacks (ver [Nombres](#nombres-e)).
+- **Filtro incremental** (`/`) con `branch:`, `path:`, `id:`, `tag:`, `author:` y texto libre fuzzy.
+- **Preview** (`p`) de los últimos turnos de una sesión sin reanudarla.
 - **Mover, exportar e importar** sesiones entre worktrees o hacia un `.zip` compartible (`m`, `x`, `i`).
-- **Sesiones compartidas** (`L`, `u`): enlaza cada proyecto a uno o varios repositorios de sesiones (GitLab, GitHub o una carpeta), que aparecen como pestañas; publica con `u` y reanuda la sesión de un compañero con `Enter`, sin exportar ni importar nada.
+- **Estado en vivo** de cada sesión, leído del registro de Claude Code: con varias corriendo a la vez, ves en la misma tabla cuál trabaja y cuál te está esperando (ver [Estado en vivo](#estado-en-vivo)).
 - **Sin duplicados**: si una sesión ya está abierta en otra terminal, la trae al frente en vez de abrir una segunda.
 - **Borrado y limpieza** (`d`, `D`) que arrastran todos los artefactos en disco, no solo el jsonl.
 
@@ -36,6 +52,8 @@ Claude Code guarda cada sesión como un `.jsonl` bajo `~/.claude/projects/<encod
 ### Pantalla 1 — Proyectos
 
 `DataTable` con una fila por proyecto detectado en `~/.claude/projects/`.
+
+![Pantalla de proyectos: una fila por proyecto con su path real, número de sesiones y última actividad](docs/img/01-proyectos.png)
 
 | Columna           | Origen                                                                 |
 |-------------------|------------------------------------------------------------------------|
@@ -73,6 +91,8 @@ Atajos:
 
 `DataTable` con una fila por `.jsonl`.
 
+![Listado de sesiones de un proyecto: nombre generado por Claude, estado en vivo de cada sesión (trabajando / te espera), branch, etiquetas y una pestaña con el repositorio de sesiones del equipo](docs/img/02-sesiones.png)
+
 | Columna           | Origen                                                                                |
 |-------------------|---------------------------------------------------------------------------------------|
 | Prompt            | nombre de la sesión si tiene, y si no el primer `type=user` con `role=user`, limpiando wrappers `<command-message>` / args |
@@ -102,6 +122,7 @@ Atajos:
 - `x` — **exportar** la(s) sesión(es) seleccionada(s) a un único `.zip` compartible (para enviárselo a un compañero). Si no hay nada marcado, exporta la fila actual.
 - `u` — **publicar** la(s) sesión(es) en el repositorio de la pestaña activa, sin zip de por medio (ver [Sesiones compartidas](#sesiones-compartidas-l-y-u)). Pide confirmación mostrando qué ficheros se suben.
 - `L` — gestionar los **repositorios de sesiones** enlazados a este proyecto (añadir, editar, quitar). Cada uno aparece como pestaña del listado.
+- `Ctrl+→` / `Ctrl+←` — **cambiar de pestaña** entre el listado local y cada repositorio enlazado, dando la vuelta al llegar al final. Sin repositorios enlazados no hacen nada (la barra de pestañas está oculta).
 - `d` — borrar la(s) sesión(es) seleccionada(s) y todos sus artefactos en disco. Sobre una fila **compartida** no borra nada tuyo: la **despublica** del repositorio.
 - `D` — **limpieza** por antigüedad: eliges un umbral y borra de golpe las sesiones más viejas (las sesiones vivas quedan protegidas).
 - `/` — filtrar la lista (ver [Filtro](#filtro-)).
@@ -123,11 +144,12 @@ Claude Code registra cada sesión que está corriendo en `~/.claude/sessions/<pi
 | `● abierta`    | está viva, pero con un estado que multi-claude no sabe interpretar        |
 | `—`            | no está corriendo                                                        |
 
-Con esto la pantalla deja de ser solo un histórico: con varias sesiones en marcha a la vez, ves de un golpe cuál te está esperando sin ir tabulando entre terminales. `2` ordena por estado y pone arriba justamente eso.
+La columna no pretende sustituir al [`agent view`](#frente-al-agent-view-de-claude-code) de Claude Code, que para eso es más completo: está aquí para que, mientras buscas en el archivo, no tengas que abrir otra vista para saber si la sesión sobre la que estás ya la tienes corriendo. `2` ordena por estado y pone arriba lo que te espera.
 
-Dos cosas que conviene saber:
+Tres cosas que conviene saber:
 
-- **El vocabulario de estados es de Claude Code y no está documentado.** `busy` y `waiting` son los observados en la 2.1; cualquier otro valor se muestra como `● abierta` en lugar de inventarle un significado.
+- **El vocabulario del registro no es un contrato, pero ya existe uno público al lado.** `busy` y `waiting` son los valores observados en el `status` de las entradas del registro por PID; cualquier otro se muestra como `● abierta` en lugar de inventarle un significado. Desde la 2.1.139, `claude agents --json` expone la misma información por una vía soportada y con estados documentados (`working`, `needs input`, `idle`, `completed`, `failed`, `stopped`); migrar la fuente a ese comando, dejando la lectura del registro como fallback, está pendiente.
+- **No ve las sesiones de background.** Las que despachas desde `claude agents` no se anotan en el registro por PID, sino en `~/.claude/jobs/<id>/state.json` con un campo `state` propio, así que hoy no aparecen en la columna (sus jsonl sí están en el listado, como cualquier otra sesión del proyecto).
 - **Solo ve sesiones de esta máquina**: el registro es local, así que las filas de las pestañas de [sesiones compartidas](#sesiones-compartidas-l-y-u) siempre muestran `—`.
 
 Un registro que sobrevive a su proceso (una terminal que murió mal) no cuenta como vivo: la entrada solo vale si su PID sigue existiendo y —en Linux— si el `procStart` anotado coincide con `/proc/<pid>/stat`, para que un PID reutilizado no se haga pasar por la sesión.
@@ -160,15 +182,32 @@ El árbol se guarda en `project-folders.json` (ver [Ficheros de estado](#fichero
 
 ### Búsqueda global full-text (`?`)
 
-`?` desde la pantalla de proyectos abre una pantalla de búsqueda que consulta una tabla **FTS5 de SQLite** construida sobre la concatenación de los prompts del usuario y el texto del asistente de cada sesión. Escribes y los resultados se refrescan en un worker en background (hasta 200 filas), con columnas Sesión / Proyecto / Branch / Última.
+`?` desde la pantalla de proyectos abre una pantalla de búsqueda que consulta una tabla **FTS5 de SQLite** construida sobre la concatenación de los prompts del usuario y el texto del asistente de cada sesión. Escribes y los resultados se refrescan en un worker en background (hasta 200 filas por origen), con columnas Sesión / Dónde / Proyecto / Branch / Última.
 
-`Enter` sobre un resultado te lleva a la pantalla de sesiones del proyecto que lo contiene.
+![Búsqueda global: la query «nginx» devuelve dos sesiones propias marcadas «local» y una publicada por Ana marcada con el icono de nube, y el subtítulo cuenta cuántas hay de cada origen](docs/img/05-busqueda.png)
 
-El tokenizer es `unicode61 remove_diacritics 2`, así que `refactor` encuentra `refactorización` y los acentos son indiferentes. El índice es una **caché, no la fuente de verdad**: vive en `$XDG_DATA_HOME/multi-claude/index.sqlite3` (por defecto `~/.local/share/...`) y si se corrompe se reconstruye en el siguiente escaneo.
+En la misma lista aparecen **dos orígenes**, y la columna `Dónde` los distingue porque no se buscan igual:
+
+| `Dónde`     | Qué es                          | Sobre qué busca                                                        |
+|-------------|---------------------------------|------------------------------------------------------------------------|
+| `local`     | tus sesiones en disco            | el **contenido** de la conversación                                     |
+| `☁ ana`     | una sesión publicada por Ana     | solo los **metadatos** de su manifest: nombre, primer prompt, tags, branch y autor |
+
+La asimetría es del formato, no una limitación provisional: un manifest no lleva la transcripción —esa se queda en la máquina de quien la grabó—, así que de una sesión ajena se puede encontrar *de qué va*, no una frase dicha en el turno 400. Ver [Sesiones compartidas](#sesiones-compartidas-l-y-u).
+
+`Enter` sobre un resultado tuyo te lleva a la pantalla de sesiones del proyecto que lo contiene. Sobre uno del equipo, además **abre la pestaña del repositorio que lo tiene**, con la fila ya en pantalla: desde ahí `Enter` otra vez lo descarga y lo reanuda.
+
+Los resultados se ordenan por relevancia dentro de cada origen, los tuyos primero: los `rank` de dos tablas FTS distintas no son comparables, así que se concatenan en vez de entremezclarse fingiendo un orden común.
+
+**Nada de esto toca la red.** Las filas del equipo son las que dejó cacheadas la última visita a la pestaña de cada repositorio: la pantalla de búsqueda no habla con ningún remoto. Por eso una sesión publicada por un compañero *después* de tu última visita a esa pestaña no aparece hasta que la abras de nuevo.
+
+El tokenizer es `unicode61 remove_diacritics 2`, así que `refactor` encuentra `refactorización` y los acentos son indiferentes. El índice es una **caché, no la fuente de verdad**: vive en `$XDG_DATA_HOME/multi-claude/index.sqlite3` (por defecto `~/.local/share/...`) y si se corrompe se reconstruye en el siguiente escaneo. Re-listar un remoto **reemplaza** sus filas en lugar de acumularlas, de modo que lo que alguien despublica deja de ser un resultado.
 
 ### Preview (`p`)
 
 `p` en la pantalla de sesiones abre un panel lateral de solo lectura que renderiza los **últimos turnos** de la sesión bajo el cursor (hasta 12 turnos, leyendo las últimas 60 líneas del jsonl, con el texto recortado a 800 caracteres por mensaje). Sirve para reconocer una conversación sin reanudarla. La visibilidad se persiste en `preview_visible`.
+
+![El panel de preview junto a la tabla, mostrando los últimos turnos de usuario y de Claude de la sesión seleccionada](docs/img/03-preview.png)
 
 ### Filtro (`/`)
 
@@ -180,10 +219,18 @@ El tokenizer es `unicode61 remove_diacritics 2`, así que `refactor` encuentra `
 | `path:`   | subcadena sobre el path del proyecto                                |
 | `id:`     | subcadena sobre el id de la sesión                                  |
 | `tag:`    | lista separada por comas; **todas** las etiquetas deben coincidir   |
+| `author:` | subcadena sobre quién publicó la sesión (`author:ana`, o el correo completo) |
 
 Todo lo que no sea `clave:valor` se trata como texto libre y se puntúa con `rapidfuzz.fuzz.partial_ratio` (umbral 70), así que tolera erratas. Ejemplo: `branch:main tag:bug,urgente refacto`.
 
-> Ojo: `/` filtra las filas que ya están en pantalla. Para buscar **dentro del contenido** de las conversaciones, usa `?`.
+`author:` responde en las dos pestañas, pero cada una a una pregunta distinta:
+
+- en la pestaña de un **repositorio compartido**, cada fila tiene publicador, así que `author:ana` es "de lo que hay publicado aquí, lo de Ana";
+- en la pestaña **local**, es "de las sesiones que tengo en disco, cuáles vinieron de otra persona" — el caso de una que hidrataste de un compañero. El autor sale del índice de publicadas, que se carga en segundo plano, así que igual que la marca `✓` tarda un instante en aparecer.
+
+> Ojo: `/` filtra las filas que ya están en pantalla. Para buscar **dentro del contenido** de las conversaciones, usa `?` — donde el autor también funciona como texto libre, porque el nombre de quien publicó entra en el índice de las sesiones del equipo.
+
+Una clave que la tabla en pantalla no puede responder **no deja pasar nada**, en vez de ignorarse: `author:`, `tag:`, `id:` y `branch:` son propiedades de una sesión, así que en la lista de **proyectos** filtran a cero. Devolver todos los proyectos se leería como "ninguno tiene ese autor" cuando lo que ocurre es que la pregunta no aplica a ese nivel.
 
 ### Etiquetas (`t`)
 
@@ -212,6 +259,13 @@ Publicar una sesión en un repositorio común y que un compañero la reanude con
 viaje de ida y vuelta de `x` (exportar) → enviar el zip → `i` (importar). La sesión conserva su
 uuid, así que es literalmente la misma conversación, no una copia.
 
+Es la razón principal por la que este proyecto existe: el trabajo con Claude deja un rastro que
+hoy muere en el disco de quien lo hizo. Un repositorio de sesiones convierte ese rastro en algo
+que el equipo consulta —quién ya se peleó con este despliegue, cómo se resolvió aquel bug— con las
+mismas herramientas y los mismos permisos con los que ya comparte el código.
+
+![La pestaña de un repositorio de sesiones compartido, con tres sesiones publicadas por Ana y Carlos, cada una precedida de quién la publicó](docs/img/04-equipo.png)
+
 Está **desactivado por defecto**: hay que configurarlo.
 
 #### Puesta en marcha en un equipo
@@ -228,8 +282,10 @@ Está **desactivado por defecto**: hay que configurarlo.
    servidor por nombre e indica `grupo/repo-de-sesiones` y la rama. Aparece una pestaña nueva con
    el nombre del repositorio.
 
-4. **Publicar**: sitúate en una sesión y pulsa `u`. Revisa la lista de ficheros que muestra el
-   diálogo y confirma. En la pestaña `Locales` la sesión queda marcada con `✓`.
+4. **Publicar**: sitúate en una sesión y pulsa `u`. El diálogo lista los ficheros que van a
+   subir y avisa si encuentra algo con pinta de credencial (ver
+   [Escáner de secretos](#escáner-de-secretos-al-publicar)). Revísalo y confirma. En la
+   pestaña `Locales` la sesión queda marcada con `✓`.
 
 5. **Traer la de otro**: en la pestaña del repositorio aparecen las sesiones de los demás con `☁`.
    `Enter` la descarga y la reanuda como si fuera tuya.
@@ -348,6 +404,46 @@ personal— ni nada llamado `session-env`.
   `↻`, pero traer los turnos nuevos exige un merge que aún no está implementado.
 
 Diseño completo y fases pendientes en [docs/REMOTE-SESSIONS.md](docs/REMOTE-SESSIONS.md).
+
+### Escáner de secretos al publicar
+
+Un transcript arrastra todo lo que la conversación tocó: el `Bash` que imprimió un `.env`, el `cat` de una clave privada, el token que pegaste en un prompt. Publicar eso en un repositorio que lee todo el equipo es el fallo con más probabilidad de que la feature acabe prohibida en una organización, así que antes de abrir el diálogo se revisa lo que va a subir.
+
+Se reconocen claves privadas PEM, tokens con prefijo de proveedor (GitHub, GitLab, Anthropic, OpenAI, Slack, Google, Stripe, AWS), JWT, credenciales dentro de una URL, cabeceras `Authorization`, y asignaciones cuyo **nombre** suena a credencial *y* cuyo **valor** parece serlo.
+
+Cuando hay hallazgos, el diálogo no solo lo dice: **cambia de forma**.
+
+- El aviso pasa a rojo y encabeza el diálogo, con la lista de hallazgos: fichero, línea, qué regla y un fragmento **recortado**.
+- El foco arranca en **Cancelar**, y el botón de publicar dice «Publicar de todas formas».
+- **`Enter` deja de publicar.** El fallo del que esto protege es pulsar Enter en automático, así que con hallazgos en pantalla Enter pulsa el botón enfocado (Cancelar) y hay que ir al otro a propósito.
+
+Tres decisiones que conviene conocer:
+
+- **Nunca se imprime el valor encontrado.** Un escáner que escribe el secreto en un diálogo —y de ahí a una captura, a un scrollback o a un informe de error— lo ha filtrado por segunda vez. Solo salen los primeros caracteres, los dos últimos y la longitud.
+- **Un hallazgo avisa, no veta.** Sobre texto libre de conversación los falsos positivos son inevitables, y un escáner que impide publicar enseña a la gente a rodearlo. La fricción es deliberada; la decisión sigue siendo de la persona.
+- **Un mismo valor repetido es un hallazgo, no cien.** Una clave que imprimió un comando ejecutado setenta veces se lista una vez, con el número de apariciones — si no, entierra todo lo demás.
+
+#### Revisar todo el histórico, no solo lo que publicas
+
+Que una clave no llegue al repositorio del equipo es la mitad del problema. La otra es que **ya está en claro en tu disco**, se publique o no, y eso se arregla rotándola:
+
+```bash
+multi-claude --audit-secrets              # todo el histórico
+multi-claude --audit-secrets --project ~/work/api
+multi-claude --audit-secrets --verbose    # con un fragmento recortado de cada hallazgo
+```
+
+Imprime, por sesión afectada, su id, su título, su proyecto y qué reglas saltaron y dónde. **Sale con código 1 si encuentra algo**, así que sirve en un hook o en un `cron`. Sin `--verbose` no muestra ni los fragmentos enmascarados, para que la salida se pueda pegar en un ticket; el **título también va redactado**, porque el título es el primer prompt y ahí es donde acaba un token pegado.
+
+De paso deja el resultado en el índice, que es lo que alimenta la marca del listado:
+
+#### La marca `⚠` en el listado
+
+Una sesión con posibles credenciales lleva `⚠` delante del nombre en la pantalla de sesiones, antes de la marca de compartida: la pregunta que responde —¿esto debería salir de la máquina?— viene antes que «¿ya ha salido?».
+
+El escaneo va en segundo plano y se cachea en el índice contra el `mtime` del jsonl, así que la primera visita a un proyecto grande lo calcula y las siguientes son gratis. Una sesión que ha crecido desde su escaneo se vuelve a mirar, porque la credencial puede estar en la parte nueva. Y **una sesión sin escanear no lleva marca ni deja de llevarla**: la ausencia de `⚠` significa «escaneada y limpia» solo después de que el escaneo haya corrido.
+
+Las reglas están calibradas contra 60 MB de transcripts reales: la primera versión daba 714 avisos (nombres como `input_tokens`, `tokenize` o los `\tPassword:` de un `grep -n`), y esa versión no sirve de nada porque se ignora. Exigiendo que el nombre no lleve sufijo de letras y que el valor tenga aspecto de credencial, el mismo material da 10 hallazgos únicos en 7 de 33 sesiones. Si tocas las reglas, vuelve a medir: `tests/test_secret_scan.py` cubre tanto lo que debe detectar como lo que **no** debe.
 
 
 ## Cómo se lanza Claude
@@ -494,6 +590,46 @@ Un `config.json` ausente, corrupto o con claves inválidas cae silenciosamente a
 
 > Nota sobre `Shift+Enter`: la mayoría de los emuladores modernos lo transmiten distinto a `Enter`, pero algunos antiguos no — en ese caso `Shift+Enter` simplemente hará lo mismo que `Enter`. Si te ocurre, cambia el predeterminado en Ajustes para que ambas teclas hagan lo que quieres.
 
+## Servidor MCP (`multi-claude-mcp`)
+
+El índice FTS5 que alimenta la búsqueda global (`?`) no tiene por qué consultarse solo a mano. `multi-claude-mcp` lo pone detrás de un servidor MCP, de modo que **Claude puede buscar en su propio trabajo pasado**: en vez de volver a deducir cómo se resolvió el puerto SSH de GitLab, encuentra la conversación donde se resolvió — de cualquier proyecto, incluido uno que nunca ha tenido en contexto.
+
+Registrarlo una vez:
+
+```bash
+# para todos tus proyectos
+claude mcp add multi-claude --scope user -- multi-claude-mcp
+
+# o solo para el proyecto actual
+claude mcp add multi-claude -- multi-claude-mcp
+```
+
+Y a partir de ahí, dentro de cualquier sesión: *"¿habíamos peleado ya con la autenticación SSH de este repo?"*.
+
+> Si vienes de una versión anterior, `multi-claude-mcp` es un comando nuevo y no aparece hasta que reinstales (`uv tool upgrade multi-claude`, o `uv pip install -e .` en un checkout). Mientras, el módulo funciona igual invocado a mano: `claude mcp add multi-claude -- python -m multi_claude.mcp`.
+
+### Herramientas que expone
+
+| Herramienta       | Qué hace                                                                       |
+|-------------------|--------------------------------------------------------------------------------|
+| `search_sessions` | búsqueda full-text sobre el **contenido** de todas tus sesiones indexadas; opcionalmente acotada a un `project_path` |
+| `search_team_sessions` | las sesiones que publicó el equipo, por los **metadatos** de su manifest (nombre, primer prompt, tags, branch, autor) — nunca por la transcripción, que no sale de la máquina que la grabó |
+| `get_session`     | metadatos de una sesión y sus últimos N turnos, para leerla sin reanudarla       |
+| `list_projects`   | los proyectos con historial en esta máquina, con su path real y nº de sesiones   |
+| `refresh_index`   | puebla el índice; solo hace falta si `search_sessions` no encuentra algo que sí está en disco |
+
+### Decisiones
+
+- **Solo lectura.** Ninguna herramienta mueve, borra, publica ni renombra nada. Lo único que escribe es la caché del índice de multi-claude.
+- **Sin el SDK de MCP.** El transporte stdio del protocolo es JSON-RPC 2.0 delimitado por líneas, así que son `json` y la stdlib: unos cientos de líneas en `mcp.py` en lugar del árbol de dependencias del SDK, coherente con el resto del proyecto. Se negocia versión de protocolo (se devuelve la del cliente si la conocemos, y la nuestra si no) y se distingue error de protocolo (`-32602` y compañía) de fallo de ejecución (`isError` dentro del resultado), como manda la spec.
+- **Texto, no JSON.** Las herramientas devuelven texto legible en vez de `structuredContent`: el consumidor es un modelo, y duplicar el payload en JSON serializado solo gastaría tokens.
+- **El índice se puebla solo la primera vez.** Como se escribe al *entrar* a un proyecto en la TUI, una instalación recién hecha no tendría nada que buscar; la primera búsqueda sobre un índice vacío escanea todo y lo dice en la respuesta (medido: 1,2 s para 34 sesiones, 65 MB de jsonl). Las siguientes son de milisegundos.
+- **Una sesión borrada no se ofrece.** El índice es una caché que nunca se purga, así que sobrevive a las sesiones que describe; los resultados cuyo jsonl ya no está en disco se descartan antes de responder, en vez de devolver un id que `get_session` no podría abrir.
+
+> **Privacidad**: esto le da al modelo acceso de lectura al contenido de tus conversaciones anteriores, que es justo el objetivo — pero una sesión que en su día imprimió un `.env` o un token lo tiene dentro de su jsonl, y por tanto en el índice. Es el mismo material que ya está en tu disco, no sale de la máquina, pero conviene saber que entra en contexto.
+
+Para las sesiones del equipo, `search_team_sessions` es deliberadamente una herramienta aparte y no un flag de la otra: lo que devuelve no es comparable —metadatos frente a contenido, y una sesión que hay que descargar antes de poder leer—, y mezclarlas invitaría al modelo a dar por buscada una conversación que nadie ha indexado.
+
 ## Ficheros de estado
 
 Todo lo que multi-claude guarda por su cuenta (nunca escribe dentro de los jsonl de Claude). Las rutas respetan `$XDG_CONFIG_HOME` / `$XDG_DATA_HOME` si están definidas, con `%APPDATA%` en Windows para la config:
@@ -507,7 +643,7 @@ Todo lo que multi-claude guarda por su cuenta (nunca escribe dentro de los jsonl
 | `~/.config/multi-claude/project-folders.json`    | árbol de carpetas y asignación de proyectos (`f`)    |
 | `~/.config/multi-claude/project-remotes.json`    | repositorios de sesiones enlazados a cada proyecto (`L`), indexados por el `origin` del repo |
 | `~/.config/multi-claude/remote-tokens.json`      | un token por servidor, con permisos `0600`           |
-| `~/.local/share/multi-claude/index.sqlite3`      | índice SQLite + tabla FTS5 (caché reconstruible)     |
+| `~/.local/share/multi-claude/index.sqlite3`      | índice SQLite + tablas FTS5 de tus sesiones y del último listado de cada repositorio compartido (caché reconstruible) |
 | `~/.cache/multi-claude/repos/`                   | copias de trabajo de los repositorios de sesiones por SSH (caché reconstruible) |
 
 Borrar cualquiera de ellos es seguro: se pierde ese estado, no las sesiones. `remote-tokens.json`
@@ -528,12 +664,15 @@ El nombre de la carpeta `~/.claude/projects/<encoded>/` es la ruta original con 
 - **Proyecto movido de path**: si renombras la carpeta de un proyecto, las sesiones viejas y nuevas siguen siendo dos entradas distintas en `~/.claude/projects/`. No se reconcilian solas — la vieja queda como huérfana y la unes a mano con `m` (merge).
 - **No todos los emuladores saben abrir pestañas desde la CLI**: Ghostty (sus únicas acciones IPC son `new_window` y `toggle_quick_terminal`; upstream cerró la petición de pestañas por CLI como *not planned*), Alacritty, foot y Terminal.app solo pueden abrir ventanas, así que en modo `tab` la sesión acaba en una ventana nueva y la TUI te lo dice. Si quieres paneles o pestañas dentro de Ghostty, mete tmux o zellij por debajo. En kitty y WezTerm la pestaña exige tener el control remoto activado (`allow_remote_control` en `kitty.conf`); si está apagado, mismo fallback.
 - **zellij no puede lanzar un comando en una pestaña nueva**: `zellij action new-tab` solo acepta un layout, no un comando, así que el modo `tab` dentro de zellij abre un panel.
-- **El estado en vivo es de esta máquina y su vocabulario no es un contrato**: ver [Estado en vivo](#estado-en-vivo). Un `status` nuevo en una versión futura de Claude Code se mostrará como `● abierta` hasta que se añada a `_STATUS_CELLS` (`screens/sessions.py`).
+- **El estado en vivo es de esta máquina y su vocabulario no es un contrato**: ver [Estado en vivo](#estado-en-vivo). Un `status` nuevo en una versión futura de Claude Code se mostrará como `● abierta` hasta que se añada a `_STATUS_CELLS` (`screens/sessions.py`). La vía soportada (`claude agents --json`) todavía no se usa.
+- **Las sesiones de background no tienen estado**: las despachadas desde `claude agents` guardan el suyo en `~/.claude/jobs/<id>/state.json`, que no se lee. Aparecen en el listado como cualquier sesión, pero con `—` en la columna `Estado`.
 - **Con token, republicar una sesión compartida sobrescribe la versión del remoto**: si dos personas continúan la misma sesión y ambas publican vía API, la segunda pisa a la primera en el remoto (cada una conserva la suya en local). **Con autenticación SSH no ocurre**: git rechaza el segundo push y se reintenta encima, así que ambas sobreviven. El fork explícito que lo resolvería también en API está planificado, no implementado — ver [docs/REMOTE-SESSIONS.md](docs/REMOTE-SESSIONS.md).
 - **Una sesión ya descargada no se puede actualizar**: si un compañero la continúa después de que la traigas, la fila lo indica con `↻` pero no hay forma de incorporar esos turnos. Requiere el merge por `uuid` que sigue pendiente.
-- **No hay escáner de secretos al publicar**: el diálogo muestra la lista exacta de ficheros que suben, y revisarla es manual. Una sesión que imprimió un `.env` lo publicaría.
+- **El escáner de secretos es heurístico, no una garantía**: reconoce formatos conocidos (claves privadas, tokens con prefijo de proveedor, credenciales en URLs) y asignaciones cuyo nombre y cuyo valor parecen una credencial, pero una contraseña dictada en prosa o un formato propio se le escapan. Es una red de seguridad, no una autorización — ver [Escáner de secretos](#escáner-de-secretos-al-publicar). Los binarios y los ficheros de más de 8 MB no se revisan, y el diálogo lo dice.
 - **Publicar en GitLab/GitHub hace un commit por fichero**: una sesión con subagentes son varios commits en el repo de sesiones, no uno. El manifest siempre va el último, así que una publicación interrumpida queda invisible en vez de a medias, pero el historial del repo es más ruidoso de lo necesario.
-- **Las sesiones compartidas no entran en la búsqueda global (`?`)** hasta que las traes: el índice FTS solo indexa lo que hay en disco.
+- **De las sesiones compartidas solo se buscan sus metadatos**, no su contenido: el manifest no lleva la transcripción, así que `?` y `search_team_sessions` encuentran una sesión ajena por nombre, primer prompt, tags, branch o autor, pero no por algo dicho dentro. Para buscar en su contenido hay que traerla primero.
+- **Las filas del equipo son de la última visita a cada pestaña**: se cachean cuando abres la pestaña de un repositorio, no en segundo plano, así que lo publicado después no aparece en `?` hasta que vuelvas a abrirla. Es deliberado — la pantalla de búsqueda no debe hacer llamadas de red.
+- **La primera búsqueda del servidor MCP sobre un índice vacío escanea todo el histórico**: 1,2 s para 34 sesiones (65 MB de jsonl) en la máquina donde se midió, pero crece con el histórico y el trabajo es leer y parsear ficheros. Si tu cliente la cortase por timeout, ejecuta `multi-claude` una vez (o llama a `refresh_index`) y repite: a partir de ahí las consultas son de milisegundos.
 
 ## Instalación
 
@@ -597,6 +736,13 @@ multi-claude
 
 Deberías ver la lista de tus proyectos de Claude. Pulsa `Enter` para entrar en uno, `Enter` otra vez para reanudar una sesión.
 
+Sin argumentos abre la TUI; hay dos cosas que tienen más sentido como informe de una sola vez:
+
+```bash
+multi-claude --audit-secrets    # revisa el histórico buscando credenciales (sale 1 si hay)
+multi-claude --help
+```
+
 > **macOS**: si es la primera vez que multi-claude lanza una sesión en una ventana nueva de iTerm2 / Terminal.app, macOS te pedirá permiso para que `osascript` controle esas apps (System Settings → Privacy & Security → Automation). Acepta una vez y queda persistido.
 >
 > **Windows**: en modo `auto` o `tab` las sesiones se abren en una pestaña de la ventana actual de Windows Terminal (`wt.exe -w 0`); en modo `window`, en una ventana aparte (`wt.exe -w -1`). Si no estás en Windows Terminal (p.ej. `cmd.exe` o ConEmu), la TUI se suspende y `claude` corre inline.
@@ -659,7 +805,11 @@ src/multi_claude/
   app_protocol.py    # Protocol que las screens usan para hablar con la app
   discovery.py       # scan_projects() → list[Project], WorktreeGroup, ProjectFolder
   session.py         # scan_sessions(project) → list[Session], parsers, payload FTS
-  index.py           # SessionIndex — SQLite + tabla FTS5 (caché reconstruible)
+  index.py           # SessionIndex — SQLite + FTS5 de tus sesiones y de las del equipo
+  transcript.py      # lectura de turnos de un jsonl, sin Textual (preview y MCP)
+  mcp.py             # servidor MCP sobre el índice: JSON-RPC 2.0 por stdio, sin SDK
+  secret_scan.py     # busca credenciales en lo que se va a publicar; enmascara y redacta
+  audit.py           # barrido de todo el histórico (--audit-secrets) e informe
   launcher.py        # launch_claude(): panel/pestaña/ventana/inline según emulador y multiplexer
   focus.py           # traer al frente la terminal de una sesión ya viva
   deletion.py        # borrado de sesiones/proyectos y sus artefactos en disco
@@ -684,7 +834,7 @@ src/multi_claude/
     sessions.py      # SessionsScreen — DataTable, bindings, preview
     worktrees.py     # WorktreesScreen — miembros de un grupo de worktrees
     folder.py        # FolderScreen — subcarpetas + proyectos de una carpeta
-    search.py        # SearchScreen — búsqueda FTS5 global
+    search.py        # SearchScreen — búsqueda FTS5 global, tus sesiones y las del equipo
   widgets/
     preview.py       # SessionPreview — últimos turnos del jsonl
   styles.tcss        # estilos Textual

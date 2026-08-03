@@ -162,6 +162,28 @@ async def test_filter_in_projects_screen(synthetic_world: Path) -> None:
         assert len(app.screen._visible_indices) == len(app.screen._projects)
 
 
+async def test_session_only_filter_keys_match_nothing_in_projects(
+    synthetic_world: Path,
+) -> None:
+    """`author:`/`tag:`/`id:` ask about a session; over projects they filter to nothing.
+
+    Showing every project would read as "none of these has that author" instead of "the
+    question does not apply at this level".
+    """
+    from textual.widgets import Input
+
+    app = ClaudeBrowserApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("slash")
+        await pilot.pause()
+        filter_input = app.screen.query_one("#filter", Input)
+        for query in ("author:ana", "tag:infra", "id:abc", "branch:main"):
+            filter_input.value = query
+            await pilot.pause()
+            assert app.screen._visible_indices == [], query
+
+
 async def test_filter_keeps_focus_on_input_while_typing(synthetic_world: Path) -> None:
     """Regression: filtering on each keystroke must not steal focus from the input."""
     app = ClaudeBrowserApp()

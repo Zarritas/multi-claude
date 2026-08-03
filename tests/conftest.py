@@ -5,9 +5,29 @@ from __future__ import annotations
 import json
 import os
 import uuid
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+
+from multi_claude.index import reset_default_index_for_tests
+
+
+@pytest.fixture(autouse=True)
+def isolated_index(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Keep index writes inside ``tmp_path`` for every test, without opting in.
+
+    ``default_index()`` resolves its path from ``XDG_DATA_HOME`` once and then caches the
+    handle process-wide, so a test that reaches it through production code (any TUI test
+    scanning sessions, or listing a remote) would otherwise write synthetic rows into the
+    developer's own ``~/.local/share/multi-claude/index.sqlite3`` — and they would show up
+    in their global search. Autouse because the leak happens through code that no test
+    asks for explicitly.
+    """
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    reset_default_index_for_tests()
+    yield
+    reset_default_index_for_tests()
 
 
 @pytest.fixture

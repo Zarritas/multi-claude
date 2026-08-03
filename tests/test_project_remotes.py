@@ -172,6 +172,26 @@ def test_the_default_host_is_part_of_target_identity() -> None:
     assert explicit.same_target(implicit)
 
 
+def test_identity_key_ignores_the_label() -> None:
+    """It keys the cached listing in the index: relabelling must not fork the rows."""
+    assert _link("g/s", label="uno").identity_key() == _link("g/s", label="otro").identity_key()
+    assert _link("g/a").identity_key() != _link("g/b").identity_key()
+
+
+def test_identity_key_separates_kinds_and_ports() -> None:
+    a = RemoteLink(kind="ssh", host="h", repo="g/s", ssh_port=22)
+    b = RemoteLink(kind="ssh", host="h", repo="g/s", ssh_port=2222)
+    assert a.identity_key() != b.identity_key()
+    assert RemoteLink(kind="directory", path="/srv").identity_key() != a.identity_key()
+
+
+def test_identity_key_has_no_separator_collision() -> None:
+    """Two different links must not flatten to the same key by field-boundary accident."""
+    a = RemoteLink(kind="gitlab", repo="g/s", branch="main")
+    b = RemoteLink(kind="gitlab", repo="g", branch="s/main")
+    assert a.identity_key() != b.identity_key()
+
+
 # --- keying a project ---------------------------------------------------------------
 
 

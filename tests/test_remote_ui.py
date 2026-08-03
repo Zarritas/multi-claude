@@ -18,6 +18,7 @@ import pytest
 
 from multi_claude import discovery as discovery_module
 from multi_claude.app import ClaudeBrowserApp
+from multi_claude.index import default_index
 from multi_claude.launcher import LaunchOutcome
 from multi_claude.remote import REMOTE_DIR_ENV, DirectoryRemote, RemoteSession
 from multi_claude.screens.sessions import SessionsScreen
@@ -51,6 +52,15 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
     monkeypatch.setenv(REMOTE_DIR_ENV, str(tmp_path / "remote"))
     return tmp_path
+
+
+def _fake_token() -> str:
+    """A GitHub-shaped token, assembled at runtime.
+
+    Written literally it is a secret as far as GitHub's push protection is concerned,
+    and it would block the push of the test that proves we detect it.
+    """
+    return "ghp" + "_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456"
 
 
 async def _open_sessions(pilot: object) -> SessionsScreen:
@@ -222,6 +232,386 @@ async def test_a_colleagues_session_shows_up_and_hydrates_on_enter(world: Path) 
         assert (world / "projects" / "-repo" / "ses-de-carlos.jsonl").is_file()
         # ...and resumed by that same uuid.
         assert launched and launched[-1][1] == "ses-de-carlos"
+
+
+async def test_opening_a_remote_tab_makes_its_sessions_searchable(world: Path) -> None:
+    """Visiting a remote caches its listing, which is what lets `?` find a teammate's work.
+
+    The search screen never talks to a remote, so if this wiring breaks the team's
+    sessions simply stop existing for global search — silently.
+    """
+    remote = DirectoryRemote(world / "remote")
+    other_project = world / "otro-proyecto"
+    write_session(other_project, session_id="ses-de-carlos", cwd="/home/carlos/repo")
+    remote.publish(
+        RemoteSession(
+            session_id="ses-de-carlos",
+            published_at="2026-07-28T10:00:00+00:00",
+            published_by="carlos@example.com",
+            branch="fl-v16-9269",
+            display_name="el exporter de facturas se atraganta",
+            first_prompt="lo que hablé yo",
+            tags=("infra",),
+        ),
+        other_project,
+    )
+
+    app = ClaudeBrowserApp()
+    async with app.run_test() as pilot:
+        screen = await _open_sessions(pilot)
+        await _open_remote_tab(pilot, screen)
+
+        index = default_index()
+        for query in ("exporter", "carlos", "fl-v16-9269", "infra"):
+            hits = index.fts_search_remote(query)
+            assert [h.session_id for h in hits] == ["ses-de-carlos"], query
+        (hit,) = index.fts_search_remote("exporter")
+        assert hit.published_by == "carlos@example.com"
+        assert hit.remote_label == screen._remote_links[0].tab_label()
+        # The key is the link's identity, so relabelling the tab cannot duplicate rows.
+        assert hit.remote_key == screen._remote_links[0].identity_key()
+        # And it points back at the project whose tab holds it.
+        assert hit.project_key == screen._remote_key()
+
+
+async def test_global_search_lists_a_teammates_session_and_opens_its_tab(world: Path) -> None:
+    """`?` shows the team's sessions marked with their author, and Enter lands on the tab."""
+    from textual.widgets import DataTable, Input
+
+    from multi_claude.screens.search import SearchScreen
+    from multi_claude.screens.sessions import SessionsScreen
+
+    remote = DirectoryRemote(world / "remote")
+    other_project = world / "otro-proyecto"
+    write_session(other_project, session_id="ses-de-carlos", cwd="/home/carlos/repo")
+    remote.publish(
+        RemoteSession(
+            session_id="ses-de-carlos",
+            published_at="2026-07-28T10:00:00+00:00",
+            published_by="carlos@example.com",
+            branch="fl-v16-9269",
+            display_name="el exporter de facturas se atraganta",
+            first_prompt="lo que hablé yo",
+        ),
+        other_project,
+    )
+
+    app = ClaudeBrowserApp()
+    async with app.run_test() as pilot:
+        screen = await _open_sessions(pilot)
+        await _open_remote_tab(pilot, screen)  # this is what caches the listing
+        await pilot.press("escape")  # back to ProjectsScreen
+        await pilot.pause()
+
+        await pilot.press("question_mark")
+        for _ in range(10):
+            await pilot.pause()
+        search = pilot.app.screen
+        assert isinstance(search, SearchScreen), f"no se abrió la búsqueda: {search}"
+
+        search.query_one("#fts-query", Input).value = "exporter"
+        for _ in range(20):
+            await pilot.pause()
+
+        table = search.query_one("#fts-results", DataTable)
+        rows = [[str(cell) for cell in table.get_row_at(i)] for i in range(table.row_count)]
+        # The fixture's own session also says "exporter", and local hits come first, so
+        # both sources are in this list — which is the point of the "Dónde" column.
+        assert rows[0][1] == "local"
+        team = [i for i, cells in enumerate(rows) if cells[1].startswith("☁")]
+        assert team, f"la sesión del equipo no aparece: {rows}"
+        assert rows[team[0]][1] == "☁ carlos"  # who, not just "remote"
+        assert "exporter" in rows[team[0]][0]
+
+        table.move_cursor(row=team[0])
+        table.action_select_cursor()
+        for _ in range(30):
+            await pilot.pause()
+
+        landed = pilot.app.screen
+        assert isinstance(landed, SessionsScreen)
+        # Not merely the project: the remote's own tab, with the row in it.
+        assert landed._active_remote == 0
+        assert [r.session_id for r in landed._remote_sessions] == ["ses-de-carlos"]
+
+
+async def test_a_session_with_a_credential_is_marked_in_the_listing(world: Path) -> None:
+    """The ⚠ answers "should this leave the machine?" before you try to publish it."""
+    from textual.widgets import DataTable
+
+    from multi_claude.index import default_index
+
+    jsonl = world / "projects" / "-repo" / "ses-1.jsonl"
+    with jsonl.open("a", encoding="utf-8") as f:
+        f.write(
+            json.dumps(
+                {
+                    "type": "user",
+                    "message": {
+                        "role": "user",
+                        "content": "GITHUB_TOKEN=" + _fake_token(),
+                    },
+                    "sessionId": "ses-1",
+                }
+            )
+            + "\n"
+        )
+
+    app = ClaudeBrowserApp()
+    async with app.run_test() as pilot:
+        screen = await _open_sessions(pilot)
+        for _ in range(40):
+            await pilot.pause()
+            if screen._secret_counts:
+                break
+        assert screen._secret_counts.get("ses-1") == 1
+        assert screen._secret_counts.get("ses-2") == 0  # scanned and clean
+
+        table = screen.query_one("#sessions", DataTable)
+        rendered = {str(table.get_row_at(i)[0]): i for i in range(table.row_count)}
+        marked = [text for text in rendered if text.startswith("⚠")]
+        assert len(marked) == 1, rendered
+        # The scan result is cached, so a second visit costs nothing.
+        assert default_index().secret_scan_is_fresh("ses-1", jsonl.stat().st_mtime)
+
+
+async def test_publishing_a_session_with_a_credential_warns_and_defends_itself(
+    world: Path,
+) -> None:
+    """The whole point of the scan: the dialogue changes shape when it finds something.
+
+    Not just a louder label — the accept button moves out of reflex range, because the
+    failure this guards against is someone pressing Enter on autopilot.
+    """
+    from textual.widgets import Button
+
+    from multi_claude.modals import PublishModal
+
+    jsonl = world / "projects" / "-repo" / "ses-1.jsonl"
+    with jsonl.open("a", encoding="utf-8") as f:
+        f.write(
+            json.dumps(
+                {
+                    "type": "user",
+                    "message": {
+                        "role": "user",
+                        "content": "GITHUB_TOKEN=" + _fake_token(),
+                    },
+                    "sessionId": "ses-1",
+                }
+            )
+            + "\n"
+        )
+
+    app = ClaudeBrowserApp()
+    async with app.run_test() as pilot:
+        await _open_sessions(pilot)
+        await pilot.press("u")
+        for _ in range(30):
+            await pilot.pause()
+            if isinstance(pilot.app.screen, PublishModal):
+                break
+        modal = pilot.app.screen
+        assert isinstance(modal, PublishModal), f"no se abrió el diálogo: {modal}"
+        assert modal.suspicious
+        assert any("token de GitHub" in line for line in modal.findings)
+        # The secret itself never reaches the dialogue.
+        assert not any("aBcDeFgHiJkLmNoPqRsTuVwXyZ" in line for line in modal.findings)
+        # Cancel has the focus and the accept button says what it is doing.
+        assert modal.focused is modal.query_one("#cancel", Button)
+        assert "todas formas" in str(modal.query_one("#publish", Button).label)
+
+        # Enter must not publish: it presses the focused Cancelar instead.
+        await pilot.press("enter")
+        for _ in range(10):
+            await pilot.pause()
+        store = await _remote_store(app)
+        assert store.list_sessions() == ()
+
+
+async def test_publishing_a_clean_session_keeps_the_fast_path(world: Path) -> None:
+    """No findings → the dialogue stays as it was, Enter included."""
+    from textual.widgets import Button
+
+    from multi_claude.modals import PublishModal
+
+    app = ClaudeBrowserApp()
+    async with app.run_test() as pilot:
+        await _open_sessions(pilot)
+        await pilot.press("u")
+        for _ in range(30):
+            await pilot.pause()
+            if isinstance(pilot.app.screen, PublishModal):
+                break
+        modal = pilot.app.screen
+        assert isinstance(modal, PublishModal)
+        assert not modal.suspicious
+        assert modal.findings == []
+        assert modal.focused is modal.query_one("#publish", Button)
+
+        await pilot.press("enter")
+        for _ in range(30):
+            await pilot.pause()
+        store = await _remote_store(app)
+        assert [s.session_id for s in store.list_sessions()] == ["ses-1"]
+
+
+async def test_the_remote_tab_is_reachable_with_the_keyboard(world: Path) -> None:
+    """ctrl+→ / ctrl+← cycle the tabs, wrapping around.
+
+    Before these bindings the tab bar was mouse-only: `tab` moves focus to the preview and
+    the Tabs widget never received the arrow keys, so shared sessions were unreachable for
+    anyone driving by keyboard (or for a screen recorder, which is how this surfaced).
+    """
+    app = ClaudeBrowserApp()
+    async with app.run_test() as pilot:
+        screen = await _open_sessions(pilot)
+        assert screen._active_remote is None
+
+        await pilot.press("ctrl+right")
+        for _ in range(30):
+            await pilot.pause()
+        assert screen._active_remote == 0
+
+        # One more wraps back to the local listing (one remote → two tabs).
+        await pilot.press("ctrl+right")
+        for _ in range(20):
+            await pilot.pause()
+        assert screen._active_remote is None
+
+        # And backwards from local lands on the last remote.
+        await pilot.press("ctrl+left")
+        for _ in range(30):
+            await pilot.pause()
+        assert screen._active_remote == 0
+
+
+async def test_tab_switching_is_inert_without_linked_remotes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No remotes → the tab bar is hidden, and the binding must not blow up."""
+    projects_root = tmp_path / "projects"
+    projects_root.mkdir()
+    real = tmp_path / "repo"
+    real.mkdir()
+    write_session(projects_root / "-repo", session_id="solo", cwd=str(real))
+    monkeypatch.setattr(discovery_module, "CLAUDE_PROJECTS_DIR", projects_root)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+
+    app = ClaudeBrowserApp()
+    async with app.run_test() as pilot:
+        screen = await _open_sessions(pilot)
+        assert screen._remote_links == ()
+        await pilot.press("ctrl+right")
+        await pilot.press("ctrl+left")
+        for _ in range(10):
+            await pilot.pause()
+        assert screen._active_remote is None
+
+
+async def test_author_filters_a_remote_tab_by_who_published(world: Path) -> None:
+    """`author:` on a remote tab: two colleagues published, you want one of them."""
+    from textual.widgets import Input
+
+    remote = DirectoryRemote(world / "remote")
+    for who, sid, name in (
+        ("carlos@example.com", "ses-de-carlos", "el exporter de facturas"),
+        ("ana@example.com", "ses-de-ana", "el deploy de staging"),
+    ):
+        project = world / f"proyecto-{sid}"
+        write_session(project, session_id=sid, cwd="/home/otro/repo")
+        remote.publish(
+            RemoteSession(
+                session_id=sid,
+                published_at="2026-07-28T10:00:00+00:00",
+                published_by=who,
+                display_name=name,
+            ),
+            project,
+        )
+
+    app = ClaudeBrowserApp()
+    async with app.run_test() as pilot:
+        screen = await _open_sessions(pilot)
+        await _open_remote_tab(pilot, screen)
+        assert len(screen._rows) == 2
+
+        await pilot.press("slash")
+        await pilot.pause()
+        screen.query_one("#filter", Input).value = "author:ana"
+        for _ in range(10):
+            await pilot.pause()
+
+        assert [screen._remote_sessions[i].session_id for _, i in screen._rows] == ["ses-de-ana"]
+
+
+async def test_author_finds_a_session_you_hydrated_from_a_colleague(world: Path) -> None:
+    """The local-tab case: which of the sessions on my disk came from someone else."""
+    from textual.widgets import Input
+
+    remote = DirectoryRemote(world / "remote")
+    other_project = world / "otro-proyecto"
+    write_session(other_project, session_id="ses-de-carlos", cwd="/home/carlos/repo")
+    remote.publish(
+        RemoteSession(
+            session_id="ses-de-carlos",
+            published_at="2026-07-28T10:00:00+00:00",
+            published_by="carlos@example.com",
+            display_name="el exporter de facturas",
+        ),
+        other_project,
+    )
+    # Already on disk, as if hydrated earlier: the local tab lists it like any other.
+    write_session(
+        world / "projects" / "-repo",
+        session_id="ses-de-carlos",
+        cwd=str(world / "repo"),
+        first_prompt="el exporter de facturas",
+    )
+
+    app = ClaudeBrowserApp()
+    async with app.run_test() as pilot:
+        screen = await _open_sessions(pilot)
+        # The published index is what supplies the author, and it loads in a worker.
+        for _ in range(30):
+            if screen._published:
+                break
+            await pilot.pause()
+        assert "ses-de-carlos" in screen._published
+
+        await pilot.press("slash")
+        await pilot.pause()
+        screen.query_one("#filter", Input).value = "author:carlos"
+        for _ in range(10):
+            await pilot.pause()
+
+        shown = [screen._sessions[i].id for is_remote, i in screen._rows if not is_remote]
+        assert shown == ["ses-de-carlos"]
+
+        screen.query_one("#filter", Input).value = "author:ana"
+        for _ in range(10):
+            await pilot.pause()
+        assert screen._rows == []
+
+
+async def test_unpublishing_drops_the_session_from_search(world: Path) -> None:
+    """A re-listing is a replace: what is gone from the remote stops being a search hit."""
+    app = ClaudeBrowserApp()
+    async with app.run_test() as pilot:
+        screen = await _open_sessions(pilot)
+        await _publish(pilot)
+        for _ in range(20):
+            await pilot.pause()
+        await _open_remote_tab(pilot, screen)
+        assert default_index().fts_search_remote("exporter")
+
+        store = await _remote_store(app)
+        store.unpublish("ses-1")
+        screen._load_remote_worker(0)
+        for _ in range(30):
+            await pilot.pause()
+
+        assert default_index().fts_search_remote("exporter") == []
 
 
 async def test_a_published_session_shows_up_in_its_tab(world: Path) -> None:

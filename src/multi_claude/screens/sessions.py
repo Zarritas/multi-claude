@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import sqlite3
+import sys
+import time
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
@@ -37,6 +40,7 @@ from multi_claude.discovery import (
 from multi_claude.filtering import FilterQuery, matches_fuzzy, parse_query
 from multi_claude.focus import LiveSession, find_live_session, focus_terminal, live_sessions
 from multi_claude.formatting import format_relative_time, format_size
+from multi_claude.index import default_index
 from multi_claude.launcher import PLACEMENT_LABELS, LauncherError, launch_claude
 from multi_claude.modals import (
     CleanupModal,
@@ -56,8 +60,10 @@ from multi_claude.remote import (
     RemoteError,
     RemoteSession,
     collect_session_files,
+    remote_to_indexed,
     session_to_remote,
 )
+from multi_claude.secret_scan import scan_files, skipped_files
 from multi_claude.session import Session, scan_sessions
 from multi_claude.transfer import export_sessions, safe_filename
 from multi_claude.widgets.preview import SessionPreview
@@ -126,6 +132,12 @@ class SessionsScreen(Screen[None]):
         Binding("x", "export", "Exportar"),
         Binding("u", "publish", "Publicar"),
         Binding("L", "link_remotes", "Repos sesiones"),
+        # Until these existed the tab bar was mouse-only: `tab` moves focus to the preview
+        # and the Tabs widget's own left/right never sees a key, so the whole shared-sessions
+        # feature was unreachable from the keyboard. ctrl+arrows rather than `[`/`]` because
+        # those need AltGr on a Spanish layout.
+        Binding("ctrl+right", "next_tab", "Pestaña →"),
+        Binding("ctrl+left", "prev_tab", "Pestaña ←", show=False),
         Binding("d", "delete", "Delete"),
         Binding("D", "cleanup", "Limpieza"),
         Binding("y", "yank_id", "Copiar id"),
@@ -146,9 +158,13 @@ class SessionsScreen(Screen[None]):
         Binding("ctrl+q", "quit", "Quit"),
     ]
 
-    def __init__(self, project: Project) -> None:
+    def __init__(self, project: Project, *, activate_remote: str | None = None) -> None:
         super().__init__()
         self.project = project
+        # Identity key (RemoteLink.identity_key) of the remote tab to open on arrival,
+        # set when a global-search hit for a teammate's session sends us here. Consumed
+        # once in on_mount so a later manual tab switch is not overridden.
+        self._activate_remote = activate_remote
         self._sessions: list[Session] = []
         # Which model each painted row came from: (is_remote, index into the matching
         # list). Remote rows are only ever appended, so a local action can never land on
@@ -165,6 +181,10 @@ class SessionsScreen(Screen[None]):
         # session_id -> (manifest, etiqueta del remoto donde está). Poblado en segundo plano;
         # es lo que permite marcar en la pestaña local qué sesiones están compartidas.
         self._published: dict[str, tuple[RemoteSession, str]] = {}
+        # session_id -> nº de posibles credenciales, del escaneo cacheado en el índice.
+        # Una sesión ausente del dict es "sin escanear", que no es lo mismo que "limpia":
+        # la marca ⚠ solo aparece cuando de verdad se ha mirado.
+        self._secret_counts: dict[str, int] = {}
         self._own_email: str | None = None
         # None while the local tab is selected; otherwise the index into ``_remote_links``.
         self._active_remote: int | None = None
@@ -206,7 +226,23 @@ class SessionsScreen(Screen[None]):
         self._apply_preview_visibility()
         self.query_one("#session-tabs", Tabs).display = bool(self._remote_links)
         self._populate()
+        self._open_requested_remote_tab()
         self.set_interval(_LIVE_REFRESH_SECONDS, self._refresh_live_worker)
+
+    def _open_requested_remote_tab(self) -> None:
+        """Select the tab a global-search hit asked for, if it is still linked here.
+
+        Silent when the remote is no longer linked: the local listing is a sane place to
+        land, and the search screen already warns when it cannot map a hit to a project.
+        """
+        wanted, self._activate_remote = self._activate_remote, None
+        if not wanted:
+            return
+        for index, link in enumerate(self._remote_links):
+            if link.identity_key() == wanted:
+                # Activating the tab is what triggers the listing load, via TabActivated.
+                self.query_one("#session-tabs", Tabs).active = f"{_REMOTE_TAB_PREFIX}{index}"
+                return
 
     def _apply_preview_visibility(self) -> None:
         preview = self.query_one("#preview", SessionPreview)
@@ -234,8 +270,49 @@ class SessionsScreen(Screen[None]):
         # Remote rows survive a local rescan; what changes is their ✓/☁ mark, which
         # ``_paint_remote_rows`` derives from disk on every repaint.
         self._repaint()
+        self._scan_secrets_worker(list(sessions))
         if self._remote_links:
             self._load_published_index_worker()
+
+    @work(thread=True, exclusive=True, group="secret-marks")
+    def _scan_secrets_worker(self, sessions: list[Session]) -> None:
+        """Fill in the ⚠ marks, scanning only what the index has not seen at this mtime.
+
+        Reading and grepping every transcript of a project is a background job, and after
+        the first pass the index answers for free. A session that grew since its scan is
+        re-read, because the credential may be in the part that is new.
+        """
+        index = default_index()
+        counts: dict[str, int] = {}
+        try:
+            cached = index.secret_counts([s.id for s in sessions])
+        except sqlite3.Error:
+            cached = {}
+        for session in sessions:
+            try:
+                mtime = session.path.stat().st_mtime
+            except OSError:
+                continue
+            try:
+                if session.id in cached and index.secret_scan_is_fresh(session.id, mtime):
+                    counts[session.id] = cached[session.id]
+                    continue
+                found = len(
+                    scan_files(collect_session_files(self.project.encoded_path, session.id))
+                )
+                index.record_secret_scan(session.id, mtime, found)
+                counts[session.id] = found
+            except (OSError, sqlite3.Error, RemoteError):
+                continue  # a mark is never worth an error toast
+        self.app.call_from_thread(self._on_secret_counts, counts)
+
+    def _on_secret_counts(self, counts: dict[str, int]) -> None:
+        marked = {sid: n for sid, n in counts.items() if n}
+        if marked == {sid: n for sid, n in self._secret_counts.items() if n}:
+            return  # nothing new to show; skip the repaint and keep the cursor put
+        self._secret_counts = counts
+        if self._active_remote is None:
+            self._repaint()
 
     def _set_live(self, live: dict[str, LiveSession]) -> None:
         self._live = live
@@ -311,11 +388,16 @@ class SessionsScreen(Screen[None]):
             style = resolve_style(session, manual=manual, rules=rules, is_active=is_active)
             label = session.display_name or session.first_prompt
             glyph, glyph_style, note = self._shared_mark(session)
+            secrets = self._secret_counts.get(session.id, 0)
             label_cell: Text | str
-            if session.id in self._marked or glyph:
+            if session.id in self._marked or glyph or secrets:
                 cell = Text()
                 if session.id in self._marked:
                     cell.append("● ", style="bold green")
+                if secrets:
+                    # Before the sharing mark on purpose: the question it answers ("should
+                    # this leave the machine at all?") comes before "has it already".
+                    cell.append("⚠ ", style="bold red")
                 if glyph:
                     cell.append(glyph, style=f"bold {glyph_style}")
                 cell.append(label, style=style or "")
@@ -406,14 +488,15 @@ class SessionsScreen(Screen[None]):
             )
             self._rows.append((True, idx))
 
-    @staticmethod
-    def _matches(session: Session, query: FilterQuery) -> bool:
+    def _matches(self, session: Session, query: FilterQuery) -> bool:
         for key, value in query.constraints.items():
             if key == "branch" and value not in (session.branch or "").lower():
                 return False
             if key == "path" and value not in (session.cwd or "").lower():
                 return False
             if key == "id" and value not in session.id.lower():
+                return False
+            if key == "author" and value not in self._author_of(session).lower():
                 return False
             if key == "tag":
                 needed = [t for t in (s.strip() for s in value.split(",")) if t]
@@ -432,6 +515,18 @@ class SessionsScreen(Screen[None]):
             )
         )
         return matches_fuzzy(haystack, query.free_text)
+
+    def _author_of(self, session: Session) -> str:
+        """Who published this session, for `author:` on the local tab.
+
+        A local session has no author of its own — the useful case is the one you
+        *hydrated* from a colleague: it lives on your disk but was published by them, so
+        `author:ana` answers "which of the sessions I have here came from Ana". The answer
+        comes from ``_published``, filled in the background, so it is empty until that
+        worker has run (the same reason a `✓` takes a moment to appear).
+        """
+        published = self._published.get(session.id)
+        return (published[0].published_by or "") if published else ""
 
     @staticmethod
     def _format_tags_cell(tags: tuple[str, ...]) -> Any:
@@ -815,11 +910,41 @@ class SessionsScreen(Screen[None]):
         ]
         if len(files) > _PUBLISH_PREVIEW_LIMIT:
             listed.append(f"… y {len(files) - _PUBLISH_PREVIEW_LIMIT} más")
+        # Reading and grepping several MB of transcript is not something to do on the UI
+        # thread, so the dialogue opens from the worker once the scan is in.
+        self._scan_before_publish_worker(targets, files, listed)
+
+    @work(thread=True, exclusive=True, group="scan-secrets")
+    def _scan_before_publish_worker(
+        self, targets: list[Session], files: list[Path], listed: list[str]
+    ) -> None:
+        """Grep the payload for credentials, then open the publish dialogue with the result.
+
+        A scan that fails must not block a publish: anything unexpected is reported as
+        "could not review" and the dialogue opens with its usual warning.
+        """
+        try:
+            findings = [f.describe(self.project.encoded_path) for f in scan_files(files)]
+            unscanned = len(skipped_files(files))
+        except Exception as exc:  # a scan is never worth losing the publish over
+            findings, unscanned = [], len(files)
+            print(f"multi-claude: falló la revisión de secretos: {exc}", file=sys.stderr)
+        self.app.call_from_thread(self._open_publish_modal, targets, listed, findings, unscanned)
+
+    def _open_publish_modal(
+        self,
+        targets: list[Session],
+        listed: list[str],
+        findings: list[str],
+        unscanned: int,
+    ) -> None:
         modal = PublishModal(
             session_count=len(targets),
             files=listed,
             destinations=list(self._remote_links),
             preselected=self._default_destination(),
+            findings=findings,
+            unscanned=unscanned,
         )
         self.app.push_screen(modal, lambda link: self._apply_publish(targets, link))
 
@@ -872,6 +997,28 @@ class SessionsScreen(Screen[None]):
         # What we just uploaded has to show as published on the local tab too.
         self._load_published_index_worker()
 
+    def action_next_tab(self) -> None:
+        """Move one tab to the right, wrapping around."""
+        self._step_tab(1)
+
+    def action_prev_tab(self) -> None:
+        """Move one tab to the left, wrapping around."""
+        self._step_tab(-1)
+
+    def _step_tab(self, delta: int) -> None:
+        """Select the tab ``delta`` places along, local counting as position 0.
+
+        Setting ``Tabs.active`` is enough: it posts ``TabActivated``, which is what loads
+        the listing, so this stays the only place that knows about the ordering.
+        """
+        if not self._remote_links:
+            return  # nothing to switch to; the tab bar is hidden
+        total = len(self._remote_links) + 1  # +1 for the local listing
+        current = 0 if self._active_remote is None else self._active_remote + 1
+        target = (current + delta) % total
+        tabs = self.query_one("#session-tabs", Tabs)
+        tabs.active = _LOCAL_TAB_ID if target == 0 else f"{_REMOTE_TAB_PREFIX}{target - 1}"
+
     @on(Tabs.TabActivated)
     def _on_tab_activated(self, event: Tabs.TabActivated) -> None:
         """Switch between the local listing and one remote's listing."""
@@ -908,7 +1055,33 @@ class SessionsScreen(Screen[None]):
         except (RemoteError, OSError) as exc:
             self.app.call_from_thread(self._on_remote_failed, index, str(exc))
             return
+        self._cache_remote_listing(link, listed)
         self.app.call_from_thread(self._on_remote_loaded, index, list(listed))
+
+    def _cache_remote_listing(self, link: RemoteLink, listed: tuple[RemoteSession, ...]) -> None:
+        """Record this listing in the index so `?` can find the team's sessions.
+
+        Runs on the worker thread that just did the network call, so the search screen
+        never has to reach a remote itself: it queries whatever the last visit to each
+        tab left behind. Failing to cache must not break the listing the user asked
+        for, which is why a broken index is swallowed with a note on stderr.
+        """
+        project_key = self._remote_key()
+        rows = [
+            remote_to_indexed(
+                session,
+                remote_key=link.identity_key(),
+                remote_label=link.tab_label(),
+                project_key=project_key,
+            )
+            for session in listed
+        ]
+        try:
+            default_index().replace_remote_sessions(
+                link.identity_key(), rows, listed_at=time.time()
+            )
+        except sqlite3.Error as exc:  # a cache is never worth an error toast
+            print(f"multi-claude: no pude cachear el listado remoto: {exc}", file=sys.stderr)
 
     def _on_remote_loaded(self, index: int, listed: list[RemoteSession]) -> None:
         # A late reply from a tab the user already left must not overwrite what is on screen.
@@ -1317,7 +1490,8 @@ def _remote_matches(remote: RemoteSession, query: FilterQuery) -> bool:
     """Same filter semantics as local rows, over the fields a manifest carries.
 
     ``id:`` matters most here: it is how you land on a session a colleague pasted into
-    a chat, since you have its uuid but nothing else.
+    a chat, since you have its uuid but nothing else. ``author:`` is the other one this
+    tab answers better than the local list, because every row here has a publisher.
     """
     for key, value in query.constraints.items():
         if key == "branch" and value not in (remote.branch or "").lower():
@@ -1325,6 +1499,8 @@ def _remote_matches(remote: RemoteSession, query: FilterQuery) -> bool:
         if key == "path" and value not in (remote.cwd or "").lower():
             return False
         if key == "id" and value not in remote.session_id.lower():
+            return False
+        if key == "author" and value not in (remote.published_by or "").lower():
             return False
         if key == "tag":
             needed = [t for t in (s.strip() for s in value.split(",")) if t]

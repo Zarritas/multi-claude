@@ -213,8 +213,10 @@ class ProjectsScreen(Screen[None]):
             if key == "path":
                 if value not in haystack.lower():
                     return False
-            elif key == "branch":
-                # Branch isn't surfaced at the project level today.
+            elif key in ("branch", "author", "tag", "id"):
+                # None of these exist at the project level: a branch, an author, tags and
+                # session ids all belong to a session. Filtering to nothing says the
+                # question does not apply here; ignoring the key would answer it wrongly.
                 return False
         return matches_fuzzy(haystack, query.free_text)
 

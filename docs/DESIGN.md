@@ -18,6 +18,13 @@ Las sesiones compartidas entre máquinas y compañeros tienen su propio plan en
 | Worktrees                     | agrupados por `git_common_dir`, solo cuando el cwd es la raíz del worktree |
 | Proyecto movido de path       | sin reconciliación automática; merge manual del huérfano sobre el vivo   |
 | Escrituras en disco de Claude | ninguna, salvo mover/borrar jsonl; el estado propio va a ficheros aparte  |
+| Alcance frente a `agent view` | el "ahora mismo" es de `claude agents`; lo nuestro es el archivo histórico, su organización y el equipo |
+| Servidor MCP                  | JSON-RPC 2.0 por stdio con la stdlib, sin el SDK; solo lectura; salida en texto, no `structuredContent` |
+| Sesiones del equipo en `?`    | se cachea el listado de cada remoto al visitar su pestaña; la búsqueda nunca toca la red y solo ve metadatos del manifest |
+| Escáner de secretos           | avisa, no veta; nunca imprime el valor; calibrado contra transcripts reales, no contra un corpus sintético |
+| Barrido del histórico         | informe por CLI (`--audit-secrets`), no una pantalla: la acción útil —rotar la credencial— ocurre fuera, y así se puede colgar de un hook |
+| Marca `⚠` del listado         | escaneo en worker cacheado contra el `mtime`; sin escanear ≠ limpia, y el índice guarda el número de hallazgos, nunca un valor |
+| Estado en vivo                | registro local por PID, best-effort; `claude agents --json` como fuente soportada está pendiente |
 
 ## Fuente de verdad del cwd
 
@@ -200,6 +207,57 @@ ClaudeBrowserApp
 ```
 
 `Footer` muestra los bindings activos automáticamente.
+
+## Buscar las sesiones del equipo sin tocar la red
+
+La búsqueda global tiene dos orígenes con propiedades distintas, y el diseño consiste sobre
+todo en no disimularlo.
+
+**Dónde se puebla.** `_load_remote_worker` ya está en un thread y ya tiene el listado que
+pidió al remoto, así que ahí mismo se escribe en `remote_sessions` con
+`replace_remote_sessions`. La alternativa —que la pantalla de búsqueda consultara los
+remotos— haría que teclear en un input disparara llamadas de red por pulsación. El precio
+es que lo publicado después de tu última visita a esa pestaña no aparece hasta que vuelvas,
+y eso se documenta en lugar de ocultarse.
+
+**Replace, no upsert.** El listado *es* la verdad del remoto en ese instante. Con un upsert,
+una sesión que alguien despublicó seguiría siendo un resultado que nadie puede traer.
+
+**La clave es la identidad del enlace**, `RemoteLink.identity_key()`, no su etiqueta:
+renombrar una pestaña no debe convertirla en un segundo remoto con las filas duplicadas. La
+misma función define `same_target`, así que "el mismo remoto" significa una sola cosa en
+todo el código.
+
+**Qué se puede buscar.** Un manifest no lleva transcripción, así que el contenido indexado
+es nombre, primer prompt, tags, branch y autor. Meter el texto de la conversación en el
+manifest daría full-text real del equipo, pero exige subir la versión del formato y publicar
+más material sin revisar — y el escáner de secretos al publicar todavía no existe. Queda
+para después de él.
+
+**Dos tablas, dos búsquedas.** Los `rank` de dos tablas FTS5 no son comparables, así que los
+resultados se concatenan (los tuyos primero) en vez de entremezclarse con un orden inventado.
+La columna `Dónde` es lo que mantiene visible de qué origen es cada fila.
+
+## El servidor MCP no usa el SDK
+
+`mcp.py` habla el protocolo a mano. El transporte stdio de MCP es JSON-RPC 2.0 con un mensaje
+por línea y sin newlines embebidos, y los métodos que hace falta atender para exponer
+herramientas son cuatro: `initialize`, `notifications/initialized` (que no se responde),
+`tools/list` y `tools/call`. Eso cabe en un módulo con `json` y la stdlib; el SDK oficial
+traería pydantic, anyio y compañía a un proyecto cuyo stack son Textual, rapidfuzz y la
+librería estándar.
+
+Dos consecuencias de la spec que condicionan el código:
+
+- **Nada que no sea un mensaje MCP puede ir a stdout.** Todo diagnóstico va a stderr, y por eso
+  el bucle de `serve()` captura cualquier excepción y responde un error JSON-RPC en vez de
+  dejar que un traceback contamine el canal.
+- **La negociación de versión no es un rechazo.** Si el cliente pide una versión que conocemos
+  se le devuelve esa; si no, se devuelve la nuestra y es el cliente quien decide desconectar.
+
+Las herramientas devuelven texto legible, no `structuredContent`: la spec pide que quien
+devuelve contenido estructurado incluya *además* el JSON serializado en un bloque de texto, y
+duplicar el payload solo gastaría tokens de quien lo consume, que es un modelo.
 
 ## Plan de implementación sugerido
 

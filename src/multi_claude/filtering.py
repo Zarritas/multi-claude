@@ -10,9 +10,14 @@ Supported keys (where present):
 - ``path:``   — substring match against the project path
 - ``id:``     — substring match against the session id
 - ``tag:``    — comma-separated list, every item must match a session tag
+- ``author:`` — substring match against who published a session
 
 Free-text terms are scored with :func:`rapidfuzz.fuzz.partial_ratio`. A match
 requires score >= :data:`FUZZY_THRESHOLD`.
+
+A key that a screen's rows cannot answer filters everything out rather than being
+ignored: ``author:`` over the projects list has no meaning, and showing every project
+would read as "none of these has an author" when it means "the question did not apply".
 """
 
 from __future__ import annotations
@@ -23,7 +28,7 @@ from rapidfuzz import fuzz
 
 FUZZY_THRESHOLD = 70
 
-KNOWN_KEYS: frozenset[str] = frozenset({"branch", "path", "id", "tag"})
+KNOWN_KEYS: frozenset[str] = frozenset({"branch", "path", "id", "tag", "author"})
 
 
 @dataclass(frozen=True)

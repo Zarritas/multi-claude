@@ -213,7 +213,10 @@ un worker, así que la TUI no se congela con una sesión de varios MB.
 
 **Descubrir** (`R`): lista los manifests remotos que no están en local, mezclados en la tabla y
 marcados con su autor. El flujo "un compañero me pega un uuid por Slack" ya funciona sin código
-nuevo: `y` copia el uuid al portapapeles y el filtro soporta `id:`.
+nuevo: `y` copia el uuid al portapapeles y el filtro soporta `id:`. El filtro soporta también
+`author:`, y el listado se cachea en el índice al abrir la pestaña, de modo que la búsqueda
+global (`?`) encuentra las sesiones del equipo por los metadatos de su manifest sin descargarlas
+ni hacer llamadas de red.
 
 **Reanudar** (`Enter` sobre remota): descargar → descomprimir en `project_dir` con el uuid intacto →
 comparar `git_remote`/`git_head` del manifest con el estado local → si divergen, avisar antes de
@@ -547,7 +550,7 @@ En `tests/test_remote.py`, con `tests/test_transfer.py` como modelo:
 | Riesgo | Mitigación |
 |--------|------------|
 | La Fase 0 falla | Reescribir `cwd`/`sessionId` al hidratar; sube la Fase 5, no rompe el diseño |
-| **Secretos en `tool-results/`** | Un `Bash` que imprimió un `.env` acaba en un `.txt` que se publica sin mirar. Mínimo imprescindible: confirmación con el listado de ficheros antes de subir. Escáner de patrones en v1.1 — no lanzar al equipo sin al menos el aviso |
+| **Secretos en `tool-results/`** | ~~Escáner de patrones en v1.1~~ **hecho**: `secret_scan.py` revisa el payload antes de abrir el diálogo, que con hallazgos pone el foco en Cancelar y deja de aceptar con `Enter`. Sigue siendo heurístico: avisa, no veta, y no ve dentro de binarios ni de ficheros de más de 8 MB |
 | Divergencia de código | Aviso al hidratar (ver arriba) |
 | Payload grande en la API | gzip; medido, una sesión de 4,6 MB sube como 1,26 MB |
 | El remoto como única copia | Si sustituye al histórico local (que Claude purga a los 30 días según `cleanupPeriodDays`), pasa a ser infra crítica y necesita backup |

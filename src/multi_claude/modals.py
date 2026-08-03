@@ -1936,6 +1936,13 @@ class PublishModal(ModalScreen["RemoteLink | None"]):
         color: $warning;
         text-style: bold;
     }
+    PublishModal Label.danger {
+        color: $error;
+        text-style: bold;
+    }
+    PublishModal Static.finding {
+        color: $error;
+    }
     PublishModal Label.keys {
         color: $text-muted;
     }
@@ -1963,12 +1970,23 @@ class PublishModal(ModalScreen["RemoteLink | None"]):
         files: list[str],
         destinations: list[RemoteLink],
         preselected: int = 0,
+        findings: list[str] | None = None,
+        unscanned: int = 0,
     ) -> None:
         super().__init__()
         self.session_count = session_count
         self.files = files
         self.destinations = destinations
         self.preselected = preselected if 0 <= preselected < len(destinations) else 0
+        # Already-formatted, already-masked lines from the credential scan (see
+        # :mod:`multi_claude.secret_scan`). They change the dialogue's behaviour, not just
+        # its text: see :meth:`on_mount` and :meth:`on_key`.
+        self.findings = findings or []
+        self.unscanned = unscanned
+
+    @property
+    def suspicious(self) -> bool:
+        return bool(self.findings)
 
     def compose(self) -> ComposeResult:
         from textual.containers import Horizontal, VerticalScroll
@@ -1978,12 +1996,22 @@ class PublishModal(ModalScreen["RemoteLink | None"]):
                 f"Publicar {self.session_count} sesión(es) · {len(self.files)} ficheros",
                 classes="title",
             )
+            if self.suspicious:
+                yield Label(
+                    f"🛑  {len(self.findings)} posible(s) credencial(es) en lo que se va a subir",
+                    classes="danger",
+                )
             yield Label(
                 "⚠️  Se sube el transcript completo, incluidos los tool-results. "
                 "Revisa que no haya secretos.",
                 classes="warning",
             )
-            yield Label("Enter publica · Esc cancela", classes="keys")
+            if self.suspicious:
+                # No "Enter publica": with findings on screen, Enter must not be the way
+                # out (see on_key).
+                yield Label("Esc cancela · para publicar, el botón", classes="keys")
+            else:
+                yield Label("Enter publica · Esc cancela", classes="keys")
 
             # Everything that can grow lives in one scrollable body, so the title, the
             # warning and the buttons stay put however many repos or files there are.
@@ -2003,16 +2031,40 @@ class PublishModal(ModalScreen["RemoteLink | None"]):
                         f"Destino: {target.tab_label()} — {target.summary()}", classes="hint"
                     )
 
+                if self.suspicious:
+                    yield Label("Posibles credenciales", classes="section")
+                    for line in self.findings:
+                        yield Static(line, classes="finding")
+                    yield Label(
+                        "Los valores van recortados a propósito. Si alguno es real, "
+                        "cancela: publicar esto lo comparte con todo el repositorio, y "
+                        "borrarlo después no lo saca del historial de git.",
+                        classes="hint",
+                    )
+                if self.unscanned:
+                    yield Label(
+                        f"({self.unscanned} fichero(s) no se han podido revisar — binarios "
+                        "o demasiado grandes)",
+                        classes="hint",
+                    )
+
                 yield Label("Se suben estos ficheros", classes="section")
                 for line in self.files:
                     yield Static(line)
 
             with Horizontal():
                 yield Button("Cancelar", id="cancel", variant="default")
-                yield Button("Publicar", id="publish", variant="primary")
+                if self.suspicious:
+                    yield Button("Publicar de todas formas", id="publish", variant="error")
+                else:
+                    yield Button("Publicar", id="publish", variant="primary")
 
     def on_mount(self) -> None:
-        if len(self.destinations) > 1:
+        # With findings, Cancelar takes the focus: the safe answer has to be the one that
+        # happens by reflex, and publishing has to be a deliberate move.
+        if self.suspicious:
+            self.query_one("#cancel", Button).focus()
+        elif len(self.destinations) > 1:
             self.query_one("#publish-destination", RadioSet).focus()
         else:
             self.query_one("#publish", Button).focus()
@@ -2029,9 +2081,13 @@ class PublishModal(ModalScreen["RemoteLink | None"]):
         self.dismiss(None)
 
     def on_key(self, event: object) -> None:
-        """Enter accepts from anywhere, including with the radio focused."""
+        """Enter accepts from anywhere, including with the radio focused.
+
+        Except when the scan found something: then Enter is left to the focused widget, so
+        it presses Cancelar rather than publishing a credential by muscle memory.
+        """
         key = getattr(event, "key", None)
-        if key == "enter":
+        if key == "enter" and not self.suspicious:
             _stop_event(event)
             self.dismiss(self.chosen())
 
