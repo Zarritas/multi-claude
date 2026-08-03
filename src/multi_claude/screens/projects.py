@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import sqlite3
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
@@ -29,6 +31,7 @@ from multi_claude.discovery import (
 )
 from multi_claude.filtering import FilterQuery, matches_fuzzy, parse_query
 from multi_claude.formatting import format_relative_time
+from multi_claude.index import default_index
 from multi_claude.launcher import PLACEMENT_LABELS, LauncherError, launch_claude
 from multi_claude.modals import (
     AddProjectModal,
@@ -43,6 +46,7 @@ from multi_claude.modals import (
     SettingsModal,
 )
 from multi_claude.project_remotes import RemoteLink
+from multi_claude.session import scan_sessions
 from multi_claude.transfer import ArchiveError, ManifestSession, import_archive, read_manifest
 
 # Sort keys exposed via number keys. Order = column order in the table.
@@ -116,6 +120,37 @@ class ProjectsScreen(Screen[None]):
             self.sub_title = f"{len(self._projects)} proyectos"
         self._apply_sort()
         self._repaint()
+        self._index_everything_worker(list(projects))
+
+    @work(thread=True, exclusive=True, group="index-all")
+    def _index_everything_worker(self, projects: list[Project]) -> None:
+        """Index every project in the background, and drop rows whose jsonl is gone.
+
+        The index used to be written only when you *entered* a project, so global search
+        answered for the projects you happened to have opened and silently ignored the rest
+        — the one failure mode a search must not have, because you cannot tell a missing
+        result from no result. Doing it here means the first run after an update pays for it
+        once (0,8 s for 35 sessions on the machine this was measured on) and every later one
+        is a few ``stat`` calls, since :meth:`SessionIndex.is_fresh` skips what has not
+        changed.
+        """
+        index = default_index()
+        # A stale row is a smaller problem than a broken listing, so a corrupt index here
+        # is swallowed: the next scan rebuilds it.
+        with contextlib.suppress(sqlite3.Error):
+            index.purge_missing()
+        for project in projects:
+            if project.is_orphan:
+                continue
+            try:
+                scan_sessions(
+                    project.encoded_path,
+                    names_store=self._claude_app.names,
+                    tags_store=self._claude_app.tags,
+                    index=index,
+                )
+            except (OSError, sqlite3.Error):
+                continue
 
     def _apply_sort(self) -> None:
         spec = self._claude_app.prefs.projects_sort

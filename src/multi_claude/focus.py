@@ -35,6 +35,11 @@ ACTIVE_SESSIONS_DIR = Path.home() / ".claude" / "sessions"
 
 _SUBPROCESS_TIMEOUT = 3.0  # all helpers are quick local IPC; never hang the UI
 
+# `claude agents --json` starts a node process, so it is an order of magnitude slower than
+# the rest: ~350 ms measured. Generous enough for a loaded machine, short enough that a
+# hung CLI does not keep a worker busy.
+_AGENTS_TIMEOUT = 10.0
+
 
 @dataclass(frozen=True)
 class LiveSession:
@@ -103,6 +108,92 @@ def live_sessions(
             status_updated_at=_epoch_seconds(data.get("statusUpdatedAt") or data.get("updatedAt")),
         )
     return result
+
+
+def background_sessions() -> dict[str, LiveSession]:
+    """Sessions that ``claude agents --json`` knows about, keyed by session id.
+
+    The supported way to ask, and the only way to see **background** sessions: those are
+    dispatched from agent view and recorded under ``~/.claude/jobs/``, not in the per-PID
+    registry, so :func:`live_sessions` is blind to them. Their state also comes with a
+    documented vocabulary (``working``, ``needs input``, ``idle``, ``completed``,
+    ``failed``, ``stopped``) instead of the two values observed in the registry.
+
+    Why this does not simply replace :func:`live_sessions`: the command takes ~350 ms
+    (measured, five runs, warm) because it starts a node process. At the two-second cadence
+    the Estado column refreshes at, that would mean a subprocess spawn every two seconds
+    forever. So the registry stays the fast path and this runs on a slow tick, merged over
+    it — the interactive rows keep their latency, the background ones appear a few seconds
+    late, and nothing spawns a process ten times a minute.
+
+    Returns an empty dict on any failure (no ``claude`` on PATH, an older build without the
+    subcommand, a timeout): callers fall back to the registry, which is what they had.
+    """
+    if shutil.which("claude") is None:
+        return {}
+    try:
+        completed = subprocess.run(
+            ["claude", "agents", "--json", "--all"],
+            capture_output=True,
+            text=True,
+            timeout=_AGENTS_TIMEOUT,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    if completed.returncode != 0 or not completed.stdout.strip():
+        return {}
+    try:
+        entries = json.loads(completed.stdout)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(entries, list):
+        return {}
+
+    result: dict[str, LiveSession] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        session_id = entry.get("sessionId")
+        if not isinstance(session_id, str) or not session_id:
+            continue
+        # Interactive entries carry `status` and a pid; background ones carry `state` and
+        # an id. Both shapes are collapsed into LiveSession, with pid 0 meaning "not a
+        # process we can focus" — which is exactly true of a background session.
+        raw_state = entry.get("status") or entry.get("state")
+        pid = entry.get("pid")
+        result[session_id] = LiveSession(
+            session_id=session_id,
+            pid=pid if isinstance(pid, int) else 0,
+            status=raw_state if isinstance(raw_state, str) and raw_state else None,
+            status_updated_at=_epoch_seconds(entry.get("startedAt")),
+        )
+    return result
+
+
+def merge_live(
+    registry: dict[str, LiveSession], agents: dict[str, LiveSession]
+) -> dict[str, LiveSession]:
+    """Overlay ``agents`` on ``registry``, keeping whichever knows more about each session.
+
+    The registry wins on ``pid`` because that is what focusing a terminal needs and a
+    background session has none; ``claude agents`` wins on ``status`` because its vocabulary
+    is documented and the registry's is not. Sessions only one of them knows about are
+    carried through as they are.
+    """
+    merged = dict(registry)
+    for session_id, from_agents in agents.items():
+        known = merged.get(session_id)
+        if known is None:
+            merged[session_id] = from_agents
+            continue
+        merged[session_id] = LiveSession(
+            session_id=session_id,
+            pid=known.pid or from_agents.pid,
+            status=from_agents.status or known.status,
+            status_updated_at=known.status_updated_at or from_agents.status_updated_at,
+        )
+    return merged
 
 
 def _epoch_seconds(raw: object) -> float | None:

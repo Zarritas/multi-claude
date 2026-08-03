@@ -38,7 +38,14 @@ from multi_claude.discovery import (
     scan_projects,
 )
 from multi_claude.filtering import FilterQuery, matches_fuzzy, parse_query
-from multi_claude.focus import LiveSession, find_live_session, focus_terminal, live_sessions
+from multi_claude.focus import (
+    LiveSession,
+    background_sessions,
+    find_live_session,
+    focus_terminal,
+    live_sessions,
+    merge_live,
+)
 from multi_claude.formatting import format_relative_time, format_size
 from multi_claude.index import default_index
 from multi_claude.launcher import PLACEMENT_LABELS, LauncherError, launch_claude
@@ -95,21 +102,35 @@ _SORT_KEYS_BY_COLUMN: tuple[str, ...] = (
     "last_activity",
 )
 
-# How the live registry's ``status`` renders in the Estado column, and how it sorts.
-# Rank is highest-is-most-interesting, matching every other column: picking a column
-# starts descending, and descending here means the sessions waiting on you first.
-# The vocabulary is Claude Code's, undocumented and free to grow: anything registered
-# as live but not listed here still says so, it just doesn't claim to know what it's
-# doing. A session absent from the registry isn't running at all.
-# ``busy`` and ``waiting`` are the two values observed from Claude Code 2.1; ``idle`` is
-# taken as a synonym of waiting in case a build spells it that way.
+# How a session's state renders in the Estado column, and how it sorts. Rank is
+# highest-is-most-interesting, matching every other column: picking a column starts
+# descending, and descending here means the sessions waiting on you first.
+#
+# Two sources feed this, with two vocabularies. Anything neither of them names still says
+# it is open rather than claiming to know what it is doing, and a session absent from both
+# is not running at all.
 _STATUS_CELLS: dict[str, tuple[str, str, int]] = {
-    "waiting": ("○ te espera", "bold green", 3),
-    "idle": ("○ te espera", "bold green", 3),
-    "busy": ("● trabajando", "bold yellow", 2),
+    # From the per-PID registry (undocumented; these two observed on 2.1).
+    "waiting": ("○ te espera", "bold green", 4),
+    "busy": ("● trabajando", "bold yellow", 3),
+    # From `claude agents --json`, whose vocabulary *is* documented. `needs input` arrives
+    # with a space; both spellings are accepted rather than guessing which one a build uses.
+    "needs input": ("○ te espera", "bold green", 4),
+    "needs_input": ("○ te espera", "bold green", 4),
+    "working": ("● trabajando", "bold yellow", 3),
+    "idle": ("· libre", "dim", 2),
+    "completed": ("✓ terminada", "green", 1),
+    "failed": ("✗ falló", "red", 1),
+    "stopped": ("■ detenida", "dim", 1),
 }
 _STATUS_LIVE_UNKNOWN = ("● abierta", "dim", 1)
 _STATUS_NOT_LIVE = ("—", "", 0)
+
+# How often `claude agents --json` is consulted, as opposed to the per-PID registry. Slow
+# on purpose: the command costs ~350 ms, so at the registry's two-second cadence it would
+# mean a node process every two seconds. What it adds — background sessions and the
+# documented state names — is worth a few seconds of latency, not that.
+_AGENTS_REFRESH_SECONDS = 15.0
 
 # How often the live registry is re-read. Two seconds is fast enough to notice a
 # session going from working to waiting on you, and the read is a handful of small
@@ -174,6 +195,9 @@ class SessionsScreen(Screen[None]):
         # entry. ``_active_session_ids`` is its key set, kept as a set because the colour
         # rules and several actions only ask "is this one running?".
         self._live: dict[str, LiveSession] = {}
+        # Lo último que dijo `claude agents --json`, refrescado en un tick lento y
+        # fusionado sobre el registro por PID. Vacío si el comando no está disponible.
+        self._from_agents: dict[str, LiveSession] = {}
         self._active_session_ids: set[str] = set()
         self._marked: set[str] = set()
         self._remote_sessions: list[RemoteSession] = []
@@ -228,6 +252,8 @@ class SessionsScreen(Screen[None]):
         self._populate()
         self._open_requested_remote_tab()
         self.set_interval(_LIVE_REFRESH_SECONDS, self._refresh_live_worker)
+        self.set_interval(_AGENTS_REFRESH_SECONDS, self._refresh_agents_worker)
+        self._refresh_agents_worker()  # sin esperar los primeros 15 s
 
     def _open_requested_remote_tab(self) -> None:
         """Select the tab a global-search hit asked for, if it is still linked here.
@@ -320,8 +346,27 @@ class SessionsScreen(Screen[None]):
 
     @work(thread=True, exclusive=True, group="live-status")
     def _refresh_live_worker(self) -> None:
-        """Re-read the live registry off the UI thread and hand it to the screen."""
-        self.app.call_from_thread(self._on_live_refresh, live_sessions())
+        """Re-read the live registry off the UI thread and hand it to the screen.
+
+        The fast path: reading a handful of small json files, cheap enough for a
+        two-second cadence. What ``claude agents --json`` adds comes in on a slower tick
+        (:meth:`_refresh_agents_worker`) and is merged over this.
+        """
+        self.app.call_from_thread(
+            self._on_live_refresh, merge_live(live_sessions(), self._from_agents)
+        )
+
+    @work(thread=True, exclusive=True, group="agents-status")
+    def _refresh_agents_worker(self) -> None:
+        """Ask the supported source, on a slow tick because it costs ~350 ms."""
+        self.app.call_from_thread(self._on_agents_refresh, background_sessions())
+
+    def _on_agents_refresh(self, from_agents: dict[str, LiveSession]) -> None:
+        if from_agents == self._from_agents:
+            return
+        self._from_agents = from_agents
+        # Fold it into what is on screen right away rather than waiting for the fast tick.
+        self._on_live_refresh(merge_live(live_sessions(), from_agents))
 
     def _on_live_refresh(self, live: dict[str, LiveSession]) -> None:
         """Apply a registry read, touching as little of the table as possible.
@@ -1136,9 +1181,33 @@ class SessionsScreen(Screen[None]):
             self.app.call_from_thread(self._notify_error, f"No se pudo traer la sesión: {exc}")
             return
         local_head = resolve_git_head(self.project.path)
-        self.app.call_from_thread(self._on_hydrated, remote, mode, local_head)
+        # Scanning in this direction too: what just landed on the disk is someone else's
+        # transcript, and whoever published it may not have had a scanner in front of them.
+        # Already on the worker thread, and the result feeds the ⚠ mark straight away.
+        found = 0
+        try:
+            files = collect_session_files(self.project.encoded_path, remote.session_id)
+            found = len(scan_files(files))
+            jsonl = self.project.encoded_path / f"{remote.session_id}.jsonl"
+            default_index().record_secret_scan(remote.session_id, jsonl.stat().st_mtime, found)
+        except (OSError, sqlite3.Error, RemoteError):
+            pass  # a scan is never worth failing a fetch that already succeeded
+        self.app.call_from_thread(self._on_hydrated, remote, mode, local_head, found)
 
-    def _on_hydrated(self, remote: RemoteSession, mode: LaunchMode, local_head: str | None) -> None:
+    def _on_hydrated(
+        self,
+        remote: RemoteSession,
+        mode: LaunchMode,
+        local_head: str | None,
+        secrets: int = 0,
+    ) -> None:
+        if secrets:
+            self.notify(
+                f"Esta sesión trae {secrets} posible(s) credencial(es) — ahora está en tu "
+                "disco. Revísala con `multi-claude --audit-secrets`",
+                severity="warning",
+            )
+            self._secret_counts[remote.session_id] = secrets
         # The transcript travels, the repository does not: warn when the conversation
         # was recorded against different code, then launch anyway — it is the user's
         # call whether that matters.

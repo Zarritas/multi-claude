@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -109,6 +110,40 @@ def test_list_by_project(index: SessionIndex) -> None:
     index.upsert_session(_session("c", project_dir="/p2"))
     p1 = {s.session_id for s in index.list_by_project("/p1")}
     assert p1 == {"a", "b"}
+
+
+# -- purging what is gone ---------------------------------------------------- #
+
+
+def test_purge_drops_rows_whose_jsonl_is_gone(index: SessionIndex, tmp_path: Path) -> None:
+    """The index never forgot anything, so it outlived what it described."""
+    alive = tmp_path / "alive.jsonl"
+    alive.write_text("{}\n")
+    index.upsert_session(
+        replace(_session("alive"), jsonl_path=str(alive)), fts_content="hola alive"
+    )
+    index.upsert_session(
+        replace(_session("gone"), jsonl_path=str(tmp_path / "gone.jsonl")),
+        fts_content="hola gone",
+    )
+    assert index.purge_missing() == 1
+    assert [s.session_id for s in index.fts_search("hola")] == ["alive"]
+    assert index.get("gone") is None
+
+
+def test_purge_is_a_no_op_when_everything_exists(index: SessionIndex, tmp_path: Path) -> None:
+    path = tmp_path / "s.jsonl"
+    path.write_text("{}\n")
+    index.upsert_session(replace(_session("s"), jsonl_path=str(path)))
+    assert index.purge_missing() == 0
+    assert index.get("s") is not None
+
+
+def test_purge_also_forgets_the_secret_scan(index: SessionIndex, tmp_path: Path) -> None:
+    index.upsert_session(replace(_session("gone"), jsonl_path=str(tmp_path / "no.jsonl")))
+    index.record_secret_scan("gone", mtime=1.0, finding_count=2)
+    index.purge_missing()
+    assert index.secret_counts(["gone"]) == {}
 
 
 # -- cached credential scan -------------------------------------------------- #

@@ -24,7 +24,8 @@ Las sesiones compartidas entre máquinas y compañeros tienen su propio plan en
 | Escáner de secretos           | avisa, no veta; nunca imprime el valor; calibrado contra transcripts reales, no contra un corpus sintético |
 | Barrido del histórico         | informe por CLI (`--audit-secrets`), no una pantalla: la acción útil —rotar la credencial— ocurre fuera, y así se puede colgar de un hook |
 | Marca `⚠` del listado         | escaneo en worker cacheado contra el `mtime`; sin escanear ≠ limpia, y el índice guarda el número de hallazgos, nunca un valor |
-| Estado en vivo                | registro local por PID, best-effort; `claude agents --json` como fuente soportada está pendiente |
+| Estado en vivo                | dos fuentes: registro por PID cada 2 s (rápido) + `claude agents --json` cada 15 s (soportado, ~350 ms), fusionadas |
+| Índice                        | se puebla en segundo plano al arrancar, no al entrar a un proyecto; y se purga de filas cuyo jsonl ya no está |
 
 ## Fuente de verdad del cwd
 

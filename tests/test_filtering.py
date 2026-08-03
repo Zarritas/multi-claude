@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import pytest
+
 from multi_claude.filtering import FilterQuery, matches_fuzzy, parse_query
+from multi_claude.focus import LiveSession
 from multi_claude.remote import RemoteSession
 from multi_claude.screens.search import _project_label
-from multi_claude.screens.sessions import _remote_matches
+from multi_claude.screens.sessions import _remote_matches, _status_presentation
 
 
 def test_parse_empty_query() -> None:
@@ -87,6 +90,53 @@ def test_matches_fuzzy_empty_query_matches_anything() -> None:
 def test_filter_query_is_empty_with_only_constraints() -> None:
     q = FilterQuery(constraints={"branch": "main"})
     assert q.is_empty is False
+
+
+# --- the Estado column's two vocabularies --------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("state", "expected"),
+    [
+        # From the per-PID registry (undocumented).
+        ("busy", "● trabajando"),
+        ("waiting", "○ te espera"),
+        # From `claude agents --json` (documented).
+        ("working", "● trabajando"),
+        ("needs input", "○ te espera"),
+        ("needs_input", "○ te espera"),
+        ("idle", "· libre"),
+        ("completed", "✓ terminada"),
+        ("failed", "✗ falló"),
+        ("stopped", "■ detenida"),
+        # Case is not a contract either.
+        ("BUSY", "● trabajando"),
+    ],
+)
+def test_every_known_state_gets_its_own_label(state: str, expected: str) -> None:
+    label, _style, _rank = _status_presentation(LiveSession("s", pid=1, status=state))
+    assert label == expected
+
+
+def test_an_unknown_state_says_open_without_guessing() -> None:
+    """The vocabulary can grow; inventing a meaning for a new value would be worse."""
+    label, _, rank = _status_presentation(LiveSession("s", pid=1, status="teleporting"))
+    assert label == "● abierta"
+    assert rank == 1
+
+
+def test_not_running_and_running_without_a_state_are_different() -> None:
+    assert _status_presentation(None)[0] == "—"
+    assert _status_presentation(LiveSession("s", pid=1, status=None))[0] == "● abierta"
+
+
+def test_what_waits_on_you_sorts_above_what_works() -> None:
+    """Descending by status has to put the sessions that need you first."""
+    waiting = _status_presentation(LiveSession("s", pid=1, status="needs input"))[2]
+    working = _status_presentation(LiveSession("s", pid=1, status="working"))[2]
+    finished = _status_presentation(LiveSession("s", pid=1, status="completed"))[2]
+    not_live = _status_presentation(None)[2]
+    assert waiting > working > finished > not_live
 
 
 # --- how a search hit names its project ----------------------------------------------

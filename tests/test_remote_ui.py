@@ -335,6 +335,67 @@ async def test_global_search_lists_a_teammates_session_and_opens_its_tab(world: 
         assert [r.session_id for r in landed._remote_sessions] == ["ses-de-carlos"]
 
 
+async def test_hydrating_a_session_with_a_credential_warns_you(world: Path) -> None:
+    """Scanning in the other direction: what just landed came from someone else's disk.
+
+    Whoever published it may not have had a scanner in front of them, and now it is here.
+    """
+    remote = DirectoryRemote(world / "remote")
+    other_project = world / "otro-proyecto"
+    other_project.mkdir(exist_ok=True)
+    (other_project / "ses-ajena.jsonl").write_text(
+        json.dumps(
+            {
+                "type": "user",
+                "message": {"role": "user", "content": "GITHUB_TOKEN=" + _fake_token()},
+                "sessionId": "ses-ajena",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    remote.publish(
+        RemoteSession(
+            session_id="ses-ajena",
+            published_at="2026-07-28T10:00:00+00:00",
+            published_by="carlos@example.com",
+            display_name="lo que hizo carlos",
+        ),
+        other_project,
+    )
+
+    warnings: list[str] = []
+
+    def fake_launch(cwd: Path, session_id: str | None = None, **kwargs: object) -> LaunchOutcome:
+        return LaunchOutcome("window", "fake")
+
+    app = ClaudeBrowserApp()
+    async with app.run_test() as pilot:
+        screen = await _open_sessions(pilot)
+        original_notify = screen.notify
+
+        def capture(message: str, **kwargs: object) -> None:
+            warnings.append(message)
+            original_notify(message, **kwargs)  # type: ignore[arg-type]
+
+        screen.notify = capture  # type: ignore[method-assign]
+
+        await _open_remote_tab(pilot, screen)
+        from textual.widgets import DataTable
+
+        table = screen.query_one("#sessions", DataTable)
+        table.move_cursor(row=0)
+        with patch("multi_claude.screens.sessions.launch_claude", side_effect=fake_launch):
+            table.action_select_cursor()
+            for _ in range(40):
+                await pilot.pause()
+
+        assert (world / "projects" / "-repo" / "ses-ajena.jsonl").is_file()  # fetched
+        assert any("credencial" in w for w in warnings), warnings
+        # And it is already marked, without waiting for the next full scan.
+        assert screen._secret_counts.get("ses-ajena") == 1
+
+
 async def test_a_session_with_a_credential_is_marked_in_the_listing(world: Path) -> None:
     """The ⚠ answers "should this leave the machine?" before you try to publish it."""
     from textual.widgets import DataTable

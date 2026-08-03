@@ -137,7 +137,10 @@ CREATE TABLE IF NOT EXISTS session_secrets (
 # Bumped whenever :mod:`multi_claude.session` starts pulling something new out of a
 # jsonl, so rows extracted by an older build are reparsed once instead of staying
 # stale forever behind an unchanged mtime.
-EXTRACT_VERSION = 1
+#
+# 2: the FTS payload caps went from 64 KB / 2.000 lines to 512 KB / 20.000, so every row
+#    written before that is missing the tail of its conversation and has to be reparsed.
+EXTRACT_VERSION = 2
 
 
 def _ensure_columns(conn: sqlite3.Connection) -> None:
@@ -364,6 +367,35 @@ class SessionIndex:
                 {"match": _sanitise_fts_query(query), "limit": limit},
             ).fetchall()
         return [_row_to_remote_session(r) for r in rows]
+
+    def purge_missing(self) -> int:
+        """Drop rows whose jsonl is no longer on disk. Returns how many went.
+
+        The index never forgot anything, so it outlived what it described: sessions Claude
+        purged by ``cleanupPeriodDays``, sessions deleted from another machine's copy of a
+        shared repo, sessions moved elsewhere. Those rows still answered `?`, offering hits
+        that cannot be opened. Cheap to do — one ``stat`` per row — and safe: the index is a
+        cache, and anything still on disk gets re-added by the next scan.
+        """
+        with self._lock:
+            conn = self._connection()
+            rows = conn.execute("SELECT session_id, jsonl_path FROM sessions").fetchall()
+        gone = [str(sid) for sid, path in rows if not Path(str(path)).is_file()]
+        if not gone:
+            return 0
+        with self._lock:
+            conn = self._connection()
+            conn.execute("BEGIN")
+            try:
+                for session_id in gone:
+                    conn.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
+                    conn.execute("DELETE FROM sessions_fts WHERE session_id = ?", (session_id,))
+                    conn.execute("DELETE FROM session_secrets WHERE session_id = ?", (session_id,))
+                conn.execute("COMMIT")
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+        return len(gone)
 
     # -- credential scan results -------------------------------------------- #
 

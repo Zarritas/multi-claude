@@ -13,9 +13,11 @@ from multi_claude.focus import (
     _ancestor_chain,
     _focus_tmux,
     _focus_x11,
+    background_sessions,
     find_live_session,
     focus_terminal,
     live_sessions,
+    merge_live,
 )
 
 
@@ -341,3 +343,117 @@ def test_focus_terminal_stops_at_first_success() -> None:
         assert focus_terminal(300) is True
     tmux.assert_called_once_with([300])
     x11.assert_not_called()
+
+
+# --- `claude agents --json`, the supported source ------------------------------------
+
+
+def _agents_output(payload: object) -> object:
+    """A CompletedProcess-alike carrying ``payload`` as stdout json."""
+    from subprocess import CompletedProcess
+
+    return CompletedProcess(args=["claude"], returncode=0, stdout=json.dumps(payload), stderr="")
+
+
+def test_background_sessions_reads_both_entry_shapes() -> None:
+    """Interactive entries carry pid+status; background ones carry state and no pid."""
+    payload = [
+        {"sessionId": "inter", "pid": 42, "kind": "interactive", "status": "busy"},
+        {"sessionId": "bg", "id": "abc", "kind": "background", "state": "failed"},
+    ]
+    with (
+        patch("multi_claude.focus.shutil.which", return_value="/usr/bin/claude"),
+        patch("multi_claude.focus.subprocess.run", return_value=_agents_output(payload)),
+    ):
+        result = background_sessions()
+    assert result["inter"] == LiveSession("inter", pid=42, status="busy")
+    # pid 0 = nothing to focus, which is exactly true of a background session.
+    assert result["bg"] == LiveSession("bg", pid=0, status="failed")
+
+
+def test_background_sessions_is_empty_without_the_cli() -> None:
+    with patch("multi_claude.focus.shutil.which", return_value=None):
+        assert background_sessions() == {}
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        "not json at all",
+        json.dumps({"not": "a list"}),
+        "",
+    ],
+)
+def test_background_sessions_survives_junk_output(outcome: str) -> None:
+    from subprocess import CompletedProcess
+
+    completed = CompletedProcess(args=["claude"], returncode=0, stdout=outcome, stderr="")
+    with (
+        patch("multi_claude.focus.shutil.which", return_value="/usr/bin/claude"),
+        patch("multi_claude.focus.subprocess.run", return_value=completed),
+    ):
+        assert background_sessions() == {}
+
+
+def test_background_sessions_survives_a_failing_command() -> None:
+    """An older build without the subcommand must leave the registry path working."""
+    from subprocess import CompletedProcess
+
+    completed = CompletedProcess(args=["claude"], returncode=1, stdout="", stderr="nope")
+    with (
+        patch("multi_claude.focus.shutil.which", return_value="/usr/bin/claude"),
+        patch("multi_claude.focus.subprocess.run", return_value=completed),
+    ):
+        assert background_sessions() == {}
+
+
+def test_background_sessions_survives_a_timeout() -> None:
+    from subprocess import TimeoutExpired
+
+    with (
+        patch("multi_claude.focus.shutil.which", return_value="/usr/bin/claude"),
+        patch("multi_claude.focus.subprocess.run", side_effect=TimeoutExpired("claude", 10)),
+    ):
+        assert background_sessions() == {}
+
+
+def test_background_sessions_skips_entries_without_a_session_id() -> None:
+    payload = [{"pid": 1, "status": "busy"}, "no soy un objeto", {"sessionId": ""}]
+    with (
+        patch("multi_claude.focus.shutil.which", return_value="/usr/bin/claude"),
+        patch("multi_claude.focus.subprocess.run", return_value=_agents_output(payload)),
+    ):
+        assert background_sessions() == {}
+
+
+# --- merging the two sources ---------------------------------------------------------
+
+
+def test_merge_prefers_the_registry_pid_and_the_agents_status() -> None:
+    """The pid is what focusing needs; the state name is what is documented."""
+    registry = {"s": LiveSession("s", pid=99, status="busy", status_updated_at=5.0)}
+    agents = {"s": LiveSession("s", pid=0, status="needs input", status_updated_at=1.0)}
+    (merged,) = merge_live(registry, agents).values()
+    assert merged.pid == 99
+    assert merged.status == "needs input"
+    assert merged.status_updated_at == 5.0
+
+
+def test_merge_carries_through_what_only_one_side_knows() -> None:
+    registry = {"solo-registry": LiveSession("solo-registry", pid=1, status="busy")}
+    agents = {"solo-agents": LiveSession("solo-agents", pid=0, status="completed")}
+    merged = merge_live(registry, agents)
+    assert set(merged) == {"solo-registry", "solo-agents"}
+
+
+def test_merge_with_no_agents_is_the_registry_unchanged() -> None:
+    registry = {"s": LiveSession("s", pid=1, status="busy")}
+    assert merge_live(registry, {}) == registry
+
+
+def test_merge_takes_the_agents_pid_when_the_registry_has_none() -> None:
+    registry = {"s": LiveSession("s", pid=0, status=None)}
+    agents = {"s": LiveSession("s", pid=7, status="working")}
+    (merged,) = merge_live(registry, agents).values()
+    assert merged.pid == 7
+    assert merged.status == "working"

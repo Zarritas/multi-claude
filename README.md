@@ -135,22 +135,32 @@ Atajos:
 
 ### Estado en vivo
 
-Claude Code registra cada sesión que está corriendo en `~/.claude/sessions/<pid>.json`, y en ese fichero anota **qué está haciendo**. La columna **Estado** lo muestra, refrescada cada dos segundos desde un worker (nunca desde el hilo de la UI):
+La columna **Estado** dice qué está haciendo cada sesión ahora mismo, con **dos fuentes** y dos cadencias, porque tienen costes muy distintos:
 
-| Celda          | Significado                                                              |
-|----------------|--------------------------------------------------------------------------|
-| `○ te espera`  | la sesión está viva y parada esperando que le contestes (`waiting`)      |
-| `● trabajando` | la sesión está ocupada (`busy`)                                          |
-| `● abierta`    | está viva, pero con un estado que multi-claude no sabe interpretar        |
-| `—`            | no está corriendo                                                        |
+| Fuente | Cada | Qué aporta |
+|--------|------|------------|
+| el registro por PID (`~/.claude/sessions/<pid>.json`) | **2 s** | las sesiones interactivas, con la latencia buena. Son unos pocos ficheros json pequeños |
+| `claude agents --json` | **15 s** | la vía **soportada**: añade las sesiones de *background* (las que despachas desde `agent view`, que no están en el registro por PID) y trae los estados con vocabulario documentado |
+
+Lo segundo va en un tick lento a propósito: el comando arranca un proceso node y tarda **~350 ms** (medido, cinco ejecuciones en caliente). A la cadencia de dos segundos serían 350 ms de subproceso cada dos segundos para siempre; lo que aporta vale unos segundos de retardo, no eso. Cuando las dos fuentes conocen una sesión, el `pid` lo da el registro (es lo que hace falta para traer una terminal al frente) y el estado lo da `claude agents` (su vocabulario sí está documentado).
+
+| Celda           | Significado                                                     |
+|-----------------|-----------------------------------------------------------------|
+| `○ te espera`   | parada esperando que le contestes (`waiting`, `needs input`)     |
+| `● trabajando`  | ocupada (`busy`, `working`)                                     |
+| `· libre`       | viva y lista para el siguiente prompt (`idle`)                   |
+| `✓ terminada`   | la tarea acabó bien (`completed`)                                |
+| `✗ falló`       | acabó con error (`failed`)                                       |
+| `■ detenida`    | la paraste a mano (`stopped`)                                    |
+| `● abierta`     | viva, con un estado que multi-claude no conoce                   |
+| `—`             | no está corriendo                                                |
 
 La columna no pretende sustituir al [`agent view`](#frente-al-agent-view-de-claude-code) de Claude Code, que para eso es más completo: está aquí para que, mientras buscas en el archivo, no tengas que abrir otra vista para saber si la sesión sobre la que estás ya la tienes corriendo. `2` ordena por estado y pone arriba lo que te espera.
 
-Tres cosas que conviene saber:
+Dos cosas que conviene saber:
 
-- **El vocabulario del registro no es un contrato, pero ya existe uno público al lado.** `busy` y `waiting` son los valores observados en el `status` de las entradas del registro por PID; cualquier otro se muestra como `● abierta` en lugar de inventarle un significado. Desde la 2.1.139, `claude agents --json` expone la misma información por una vía soportada y con estados documentados (`working`, `needs input`, `idle`, `completed`, `failed`, `stopped`); migrar la fuente a ese comando, dejando la lectura del registro como fallback, está pendiente.
-- **No ve las sesiones de background.** Las que despachas desde `claude agents` no se anotan en el registro por PID, sino en `~/.claude/jobs/<id>/state.json` con un campo `state` propio, así que hoy no aparecen en la columna (sus jsonl sí están en el listado, como cualquier otra sesión del proyecto).
-- **Solo ve sesiones de esta máquina**: el registro es local, así que las filas de las pestañas de [sesiones compartidas](#sesiones-compartidas-l-y-u) siempre muestran `—`.
+- **El vocabulario puede crecer, y un valor nuevo no se interpreta.** Los estados de `claude agents` están documentados; los del registro por PID (`busy`, `waiting`) no. Cualquier otro valor se muestra como `● abierta` en lugar de inventarle un significado.
+- **Solo ve sesiones de esta máquina**: ambas fuentes son locales, así que las filas de las pestañas de [sesiones compartidas](#sesiones-compartidas-l-y-u) siempre muestran `—`. Si `claude` no está en el PATH, o es una versión sin `agents`, la columna sigue funcionando con el registro por PID: se pierden las de background, no la columna.
 
 Un registro que sobrevive a su proceso (una terminal que murió mal) no cuenta como vivo: la entrada solo vale si su PID sigue existiendo y —en Linux— si el `procStart` anotado coincide con `/proc/<pid>/stat`, para que un PID reutilizado no se haga pasar por la sesión.
 
@@ -659,13 +669,13 @@ El nombre de la carpeta `~/.claude/projects/<encoded>/` es la ruta original con 
 
 ## Limitaciones conocidas
 
-- **La búsqueda global solo ve lo indexado**: el índice FTS se puebla en `scan_sessions`, es decir al **entrar** a la pantalla de sesiones de un proyecto. Un proyecto que nunca has abierto en la TUI no aparece en los resultados de `?`. Si `?` te devuelve menos de lo esperado, entra una vez en los proyectos que te falten.
-- **Payload FTS acotado por sesión**: se indexan como máximo las primeras 2.000 líneas del jsonl y 64 KB de texto (`FTS_REINDEX_SCAN_LINES` / `FTS_CONTENT_MAX_CHARS` en `session.py`). En sesiones muy largas, el final de la conversación no es buscable.
+- **El índice se puebla en segundo plano al arrancar**, no al entrar a cada proyecto: la primera vez tras actualizar cuesta un momento (0,8 s para 35 sesiones donde se midió) y desde entonces son unos `stat`. Mientras ese primer barrido corre, `?` puede devolver menos de lo que hay.
+- **Payload FTS acotado por sesión**: como máximo las primeras 20.000 líneas del jsonl y 512 KB de texto (`FTS_REINDEX_SCAN_LINES` / `FTS_CONTENT_MAX_CHARS` en `session.py`). Cubre de sobra las sesiones medidas —la más larga tenía 7.555 líneas—, pero una conversación extraordinariamente larga seguiría cortándose por el final. Solo entra el texto de usuario y asistente: las llamadas a herramientas y su salida nunca se indexan, así que no se pueden buscar.
 - **Proyecto movido de path**: si renombras la carpeta de un proyecto, las sesiones viejas y nuevas siguen siendo dos entradas distintas en `~/.claude/projects/`. No se reconcilian solas — la vieja queda como huérfana y la unes a mano con `m` (merge).
 - **No todos los emuladores saben abrir pestañas desde la CLI**: Ghostty (sus únicas acciones IPC son `new_window` y `toggle_quick_terminal`; upstream cerró la petición de pestañas por CLI como *not planned*), Alacritty, foot y Terminal.app solo pueden abrir ventanas, así que en modo `tab` la sesión acaba en una ventana nueva y la TUI te lo dice. Si quieres paneles o pestañas dentro de Ghostty, mete tmux o zellij por debajo. En kitty y WezTerm la pestaña exige tener el control remoto activado (`allow_remote_control` en `kitty.conf`); si está apagado, mismo fallback.
 - **zellij no puede lanzar un comando en una pestaña nueva**: `zellij action new-tab` solo acepta un layout, no un comando, así que el modo `tab` dentro de zellij abre un panel.
-- **El estado en vivo es de esta máquina y su vocabulario no es un contrato**: ver [Estado en vivo](#estado-en-vivo). Un `status` nuevo en una versión futura de Claude Code se mostrará como `● abierta` hasta que se añada a `_STATUS_CELLS` (`screens/sessions.py`). La vía soportada (`claude agents --json`) todavía no se usa.
-- **Las sesiones de background no tienen estado**: las despachadas desde `claude agents` guardan el suyo en `~/.claude/jobs/<id>/state.json`, que no se lee. Aparecen en el listado como cualquier sesión, pero con `—` en la columna `Estado`.
+- **El estado en vivo es de esta máquina, y un valor nuevo no se interpreta**: ver [Estado en vivo](#estado-en-vivo). Un estado que no esté en `_STATUS_CELLS` (`screens/sessions.py`) se muestra como `● abierta`.
+- **Las sesiones de background tardan hasta 15 s en aparecer**: solo las conoce `claude agents --json`, que se consulta en un tick lento porque cuesta ~350 ms. Sin `claude` en el PATH no aparecen en absoluto.
 - **Con token, republicar una sesión compartida sobrescribe la versión del remoto**: si dos personas continúan la misma sesión y ambas publican vía API, la segunda pisa a la primera en el remoto (cada una conserva la suya en local). **Con autenticación SSH no ocurre**: git rechaza el segundo push y se reintenta encima, así que ambas sobreviven. El fork explícito que lo resolvería también en API está planificado, no implementado — ver [docs/REMOTE-SESSIONS.md](docs/REMOTE-SESSIONS.md).
 - **Una sesión ya descargada no se puede actualizar**: si un compañero la continúa después de que la traigas, la fila lo indica con `↻` pero no hay forma de incorporar esos turnos. Requiere el merge por `uuid` que sigue pendiente.
 - **El escáner de secretos es heurístico, no una garantía**: reconoce formatos conocidos (claves privadas, tokens con prefijo de proveedor, credenciales en URLs) y asignaciones cuyo nombre y cuyo valor parecen una credencial, pero una contraseña dictada en prosa o un formato propio se le escapan. Es una red de seguridad, no una autorización — ver [Escáner de secretos](#escáner-de-secretos-al-publicar). Los binarios y los ficheros de más de 8 MB no se revisan, y el diálogo lo dice.

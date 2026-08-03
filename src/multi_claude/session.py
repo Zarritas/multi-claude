@@ -21,8 +21,14 @@ from multi_claude.tags import TagsStore
 
 HEADER_SCAN_LINES = 80
 PROMPT_MAX_CHARS = 120
-FTS_CONTENT_MAX_CHARS = 64_000  # cap per-session FTS payload (~64 KB)
-FTS_REINDEX_SCAN_LINES = 2_000  # cap how much we read into the FTS payload
+# Caps on the FTS payload per session. They were 64 KB / 2.000 lines, and the line cap was
+# the one that bit: measured over 35 real sessions, the five above 2.000 lines were indexed
+# to 62 KB each while their conversational text ran to 425 KB — 85% of the longest one was
+# not searchable. Raising both covers every session on that machine (longest: 7.555 lines)
+# and costs 0,8 s to build for a 2,3 MB index, because the payload is only user/assistant
+# text: tool calls and their output never enter it.
+FTS_CONTENT_MAX_CHARS = 512_000
+FTS_REINDEX_SCAN_LINES = 20_000
 RENAME_SCAN_LINES = 50_000  # cap when scanning for the latest /rename in long sessions
 
 _RENAME_RE = re.compile(

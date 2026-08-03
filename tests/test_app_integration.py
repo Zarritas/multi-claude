@@ -12,6 +12,7 @@ from multi_claude import discovery as discovery_module
 from multi_claude.app import ClaudeBrowserApp
 from multi_claude.launcher import LaunchOutcome
 from multi_claude.names import NamesStore
+from multi_claude.screens.projects import ProjectsScreen
 from tests.conftest import write_session
 
 
@@ -160,6 +161,58 @@ async def test_filter_in_projects_screen(synthetic_world: Path) -> None:
         await pilot.pause()
         assert filter_input.display is False
         assert len(app.screen._visible_indices) == len(app.screen._projects)
+
+
+async def test_every_project_gets_indexed_without_being_opened(
+    synthetic_world: Path,
+) -> None:
+    """Global search used to answer only for the projects you happened to have entered.
+
+    That is the one failure mode a search must not have: you cannot tell a result that is
+    missing from a result that does not exist.
+    """
+    from multi_claude.index import default_index
+
+    app = ClaudeBrowserApp()
+    async with app.run_test() as pilot:
+        for _ in range(60):
+            await pilot.pause()
+            if default_index().count_sessions() >= len(app.screen._projects):
+                break
+        # Never navigated into a single project, yet every session is in the index.
+        assert isinstance(app.screen, ProjectsScreen)
+        assert default_index().count_sessions() >= len(app.screen._projects)
+
+
+async def test_the_background_pass_purges_rows_whose_file_is_gone(
+    synthetic_world: Path,
+) -> None:
+    from multi_claude.index import IndexedSession, default_index
+
+    index = default_index()
+    index.upsert_session(
+        IndexedSession(
+            session_id="fantasma",
+            project_dir="/nope",
+            cwd=None,
+            branch=None,
+            first_prompt="ya no existo",
+            message_count=1,
+            size_bytes=1,
+            mtime=1.0,
+            jsonl_path="/nope/fantasma.jsonl",
+        ),
+        fts_content="ya no existo",
+    )
+    assert index.get("fantasma") is not None
+
+    app = ClaudeBrowserApp()
+    async with app.run_test() as pilot:
+        for _ in range(60):
+            await pilot.pause()
+            if index.get("fantasma") is None:
+                break
+        assert index.get("fantasma") is None
 
 
 async def test_session_only_filter_keys_match_nothing_in_projects(
