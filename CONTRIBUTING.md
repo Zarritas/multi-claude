@@ -58,6 +58,18 @@ Two things to know if you edit the tape: vhs types keys, it cannot click — eve
 to be reachable from the keyboard — and Textual toasts last about five seconds, so actions
 that raise one need spacing or they stack up and cover the table.
 
+## Two READMEs
+
+`README.md` is English and is what PyPI and GitHub show; `README.es.md` is Spanish and matches the
+language of the interface itself. They are the same document, and they drift the moment one is edited
+alone — most of the stale claims found while translating had been true once. **If a change is
+user-visible, update both**, and cross-check the anchors: the two files have different heading slugs,
+so a link that works in one is not automatically valid in the other.
+
+The interface itself is in Spanish, which is why the English README carries screenshots with Spanish
+labels and quotes the cells verbatim (`○ te espera`, `Publicar de todas formas`). Those are what the
+user actually sees; translating them in the docs only would be worse than leaving them.
+
 ## Commit style
 
 The existing history uses short imperative subjects (`Add configurable launch modes`, `Rename console script from mc to multi-claude`). Follow that.
