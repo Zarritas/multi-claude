@@ -101,7 +101,7 @@ def _build_session(
 
     header = parse_session_header(jsonl_path)
     line_count = count_lines(jsonl_path)
-    fts_content = _extract_fts_content(jsonl_path)
+    fts_content = extract_fts_content(jsonl_path)
     embedded_name = extract_embedded_name(jsonl_path)
 
     indexed = IndexedSession(
@@ -229,7 +229,7 @@ def extract_embedded_name(jsonl_path: Path) -> str | None:
     return renamed or ai_title
 
 
-def _extract_fts_content(jsonl_path: Path) -> str:
+def extract_fts_content(jsonl_path: Path) -> str:
     """Concatenate user prompts and assistant text into one string for FTS5.
 
     Skips tool_use/tool_result payloads to keep the index small. Caps at

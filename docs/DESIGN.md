@@ -20,7 +20,8 @@ Las sesiones compartidas entre máquinas y compañeros tienen su propio plan en
 | Escrituras en disco de Claude | ninguna, salvo mover/borrar jsonl; el estado propio va a ficheros aparte  |
 | Alcance frente a `agent view` | el "ahora mismo" es de `claude agents`; lo nuestro es el archivo histórico, su organización y el equipo |
 | Servidor MCP                  | JSON-RPC 2.0 por stdio con la stdlib, sin el SDK; solo lectura; salida en texto, no `structuredContent` |
-| Sesiones del equipo en `?`    | se cachea el listado de cada remoto al visitar su pestaña; la búsqueda nunca toca la red y solo ve metadatos del manifest |
+| Sesiones del equipo en `?`    | se cachea el listado de cada remoto al visitar su pestaña; la búsqueda nunca toca la red |
+| Contenido de una sesión ajena | payload de búsqueda en un blob aparte (`search/<uuid>.txt.gz`), no en el manifest: listar lee todos los manifests |
 | Escáner de secretos           | avisa, no veta; nunca imprime el valor; calibrado contra transcripts reales, no contra un corpus sintético |
 | Barrido del histórico         | informe por CLI (`--audit-secrets`), no una pantalla: la acción útil —rotar la credencial— ocurre fuera, y así se puede colgar de un hook |
 | Marca `⚠` del listado         | escaneo en worker cacheado contra el `mtime`; sin escanear ≠ limpia, y el índice guarda el número de hallazgos, nunca un valor |
@@ -229,11 +230,13 @@ renombrar una pestaña no debe convertirla en un segundo remoto con las filas du
 misma función define `same_target`, así que "el mismo remoto" significa una sola cosa en
 todo el código.
 
-**Qué se puede buscar.** Un manifest no lleva transcripción, así que el contenido indexado
-es nombre, primer prompt, tags, branch y autor. Meter el texto de la conversación en el
-manifest daría full-text real del equipo, pero exige subir la versión del formato y publicar
-más material sin revisar — y el escáner de secretos al publicar todavía no existe. Queda
-para después de él.
+**Qué se puede buscar.** Ya es el contenido, no solo los metadatos, pero el texto **no** vive
+en el manifest: listar una pestaña lee todos los manifests, así que media MB de texto por
+sesión convertiría abrir una pestaña en una descarga de decenas de MB. Va en un blob aparte
+(`search/<uuid>.txt.gz`) que se descarga bajo demanda y pesa unas 36 veces menos que el
+transcript. El texto es el mismo payload que indexa la búsqueda local —prompts y
+respuestas, sin salida de herramientas—, lo que de paso mantiene fuera de lo que se sube el
+lugar donde es más probable que se cuele una credencial.
 
 **Dos tablas, dos búsquedas.** Los `rank` de dos tablas FTS5 no son comparables, así que los
 resultados se concatenan (los tuyos primero) en vez de entremezclarse con un orden inventado.

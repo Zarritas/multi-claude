@@ -24,7 +24,7 @@ multi-claude no compite ahí: lee el mismo registro local de sesiones vivas que 
 
 ## Qué trae
 
-- **Sesiones compartidas** (`L`, `u`): enlaza cada proyecto a uno o varios repositorios de sesiones (GitLab, GitHub o una carpeta), que aparecen como pestañas; publica con `u` y reanuda la sesión de un compañero con `Enter`, sin exportar ni importar nada (ver [Sesiones compartidas](#sesiones-compartidas-l-y-u)).
+- **Sesiones compartidas** (`L`, `u`): enlaza cada proyecto a uno o varios repositorios de sesiones (GitLab, GitHub o una carpeta), que aparecen como pestañas; publica con `u` y reanuda la sesión de un compañero con `Enter`, sin exportar ni importar nada. Y se buscan **por su contenido sin descargarlas** (ver [Sesiones compartidas](#sesiones-compartidas-l-y-u)).
 - **Escáner de secretos** antes de publicar: revisa lo que va a subir y, si encuentra algo con pinta de credencial, el diálogo cambia de forma para que publicarlo sea un acto deliberado. Las sesiones sospechosas van marcadas con `⚠` en el listado, y `multi-claude --audit-secrets` revisa el histórico completo (ver [Escáner de secretos](#escáner-de-secretos-al-publicar)).
 - **Búsqueda full-text** (`?`) sobre el contenido de todas las sesiones, con índice FTS5 de SQLite — encuentra "aquella conversación sobre el refactor X" por lo que se dijo dentro, y en la misma lista **las del equipo** que ya has visto publicadas, marcadas con quién las publicó (ver [Búsqueda global](#búsqueda-global-full-text-)).
 - **Servidor MCP** (`multi-claude-mcp`) sobre ese mismo índice: Claude busca en sus propias sesiones pasadas en vez de volver a deducir lo que ya resolvió (ver [Servidor MCP](#servidor-mcp-multi-claude-mcp)).
@@ -201,9 +201,9 @@ En la misma lista aparecen **dos orígenes**, y la columna `Dónde` los distingu
 | `Dónde`     | Qué es                          | Sobre qué busca                                                        |
 |-------------|---------------------------------|------------------------------------------------------------------------|
 | `local`     | tus sesiones en disco            | el **contenido** de la conversación                                     |
-| `☁ ana`     | una sesión publicada por Ana     | solo los **metadatos** de su manifest: nombre, primer prompt, tags, branch y autor |
+| `☁ ana`     | una sesión publicada por Ana     | también el **contenido**, en cuanto se ha descargado su payload de búsqueda; mientras no, solo los metadatos del manifest |
 
-La asimetría es del formato, no una limitación provisional: un manifest no lleva la transcripción —esa se queda en la máquina de quien la grabó—, así que de una sesión ajena se puede encontrar *de qué va*, no una frase dicha en el turno 400. Ver [Sesiones compartidas](#sesiones-compartidas-l-y-u).
+Que una sesión ajena se pueda buscar por lo que se dijo dentro **sin descargarla** es lo que hace el [payload de búsqueda](#buscar-en-las-sesiones-del-equipo-sin-descargarlas): un blob por sesión con el texto de la conversación, unas 36 veces más pequeño que el transcript. Se descarga solo, en segundo plano, al abrir la pestaña del repositorio. Ver [Sesiones compartidas](#sesiones-compartidas-l-y-u).
 
 `Enter` sobre un resultado tuyo te lleva a la pantalla de sesiones del proyecto que lo contiene. Sobre uno del equipo, además **abre la pestaña del repositorio que lo tiene**, con la fila ya en pantalla: desde ahí `Enter` otra vez lo descarga y lo reanuda.
 
@@ -418,6 +418,20 @@ personal— ni nada llamado `session-env`.
 
 Diseño completo y fases pendientes en [docs/REMOTE-SESSIONS.md](docs/REMOTE-SESSIONS.md).
 
+### Buscar en las sesiones del equipo sin descargarlas
+
+Al publicar, además del transcript sube un **payload de búsqueda**: `search/<uuid>.txt.gz`, con el texto de la conversación y nada más. Eso es lo que permite que `?` encuentre la sesión de un compañero por una frase dicha dentro, sin traerse la sesión entera.
+
+Tres decisiones detrás:
+
+- **Va en un blob aparte, no en el manifest.** Listar una pestaña lee *todos* los manifests, así que media MB de texto por sesión convertiría abrir una pestaña en una descarga de decenas de MB (y en los backends REST, en una respuesta enorme por sesión). Aparte se descarga una vez por sesión y bajo demanda.
+- **Es pequeño**: medido sobre 35 sesiones reales, los payloads comprimen a 0,5 MB frente a 18,5 MB de esos mismos transcripts — **36 veces menos** para poder buscarlos. El mayor pesaba 126 KB comprimido, para una sesión de 3,9 MB.
+- **Es el mismo texto que indexa la búsqueda local**: prompts y respuestas, sin llamadas a herramientas ni su salida. Eso lo hace pequeño y, a la vez, mantiene fuera de lo que se sube para buscar el sitio donde es más probable que se cuele una credencial — la salida de un comando.
+
+La descarga va en segundo plano al abrir la pestaña, hasta 25 sesiones por visita (un repositorio con cientos se completa en varias visitas en vez de atascar una), y no repite lo que ya está indexado. Si alguien **republica** una sesión, el texto cacheado se invalida y se vuelve a bajar; si alguien la **despublica**, desaparece de la búsqueda.
+
+El **manifest sube a la versión 2** para anunciar que el payload existe (`search_bytes`). Los manifests v1 se siguen leyendo: esas sesiones simplemente no tienen payload y quedan buscables por metadatos, que es lo que siempre fueron. Una versión *futura* desconocida se sigue rechazando.
+
 ### Escáner de secretos al publicar
 
 Un transcript arrastra todo lo que la conversación tocó: el `Bash` que imprimió un `.env`, el `cat` de una clave privada, el token que pegaste en un prompt. Publicar eso en un repositorio que lee todo el equipo es el fallo con más probabilidad de que la feature acabe prohibida en una organización, así que antes de abrir el diálogo se revisa lo que va a subir.
@@ -626,7 +640,7 @@ Y a partir de ahí, dentro de cualquier sesión: *"¿habíamos peleado ya con la
 | Herramienta       | Qué hace                                                                       |
 |-------------------|--------------------------------------------------------------------------------|
 | `search_sessions` | búsqueda full-text sobre el **contenido** de todas tus sesiones indexadas; opcionalmente acotada a un `project_path` |
-| `search_team_sessions` | las sesiones que publicó el equipo, por los **metadatos** de su manifest (nombre, primer prompt, tags, branch, autor) — nunca por la transcripción, que no sale de la máquina que la grabó |
+| `search_team_sessions` | las sesiones que publicó el equipo: por su **contenido** cuando su payload de búsqueda ya está descargado, y por los metadatos del manifest mientras no |
 | `get_session`     | metadatos de una sesión y sus últimos N turnos, para leerla sin reanudarla       |
 | `list_projects`   | los proyectos con historial en esta máquina, con su path real y nº de sesiones   |
 | `refresh_index`   | puebla el índice; solo hace falta si `search_sessions` no encuentra algo que sí está en disco |
@@ -641,7 +655,7 @@ Y a partir de ahí, dentro de cualquier sesión: *"¿habíamos peleado ya con la
 
 > **Privacidad**: esto le da al modelo acceso de lectura al contenido de tus conversaciones anteriores, que es justo el objetivo — pero una sesión que en su día imprimió un `.env` o un token lo tiene dentro de su jsonl, y por tanto en el índice. Es el mismo material que ya está en tu disco, no sale de la máquina, pero conviene saber que entra en contexto.
 
-Para las sesiones del equipo, `search_team_sessions` es deliberadamente una herramienta aparte y no un flag de la otra: lo que devuelve no es comparable —metadatos frente a contenido, y una sesión que hay que descargar antes de poder leer—, y mezclarlas invitaría al modelo a dar por buscada una conversación que nadie ha indexado.
+Para las sesiones del equipo, `search_team_sessions` es deliberadamente una herramienta aparte y no un flag de la otra: lo que devuelve sigue sin ser comparable —son sesiones que hay que descargar antes de poder leer con `get_session`, y su cobertura depende de que el payload de búsqueda esté ya bajado—, y mezclarlas invitaría al modelo a dar por buscada una conversación que nadie ha indexado.
 
 ## Ficheros de estado
 
@@ -683,7 +697,7 @@ El nombre de la carpeta `~/.claude/projects/<encoded>/` es la ruta original con 
 - **Una sesión ya descargada no se puede actualizar**: si un compañero la continúa después de que la traigas, la fila lo indica con `↻` pero no hay forma de incorporar esos turnos. Requiere el merge por `uuid` que sigue pendiente.
 - **El escáner de secretos es heurístico, no una garantía**: reconoce formatos conocidos (claves privadas, tokens con prefijo de proveedor, credenciales en URLs) y asignaciones cuyo nombre y cuyo valor parecen una credencial, pero una contraseña dictada en prosa o un formato propio se le escapan. Es una red de seguridad, no una autorización — ver [Escáner de secretos](#escáner-de-secretos-al-publicar). Los binarios y los ficheros de más de 8 MB no se revisan, y el diálogo lo dice.
 - **Publicar en GitLab/GitHub hace un commit por fichero**: una sesión con subagentes son varios commits en el repo de sesiones, no uno. El manifest siempre va el último, así que una publicación interrumpida queda invisible en vez de a medias, pero el historial del repo es más ruidoso de lo necesario.
-- **De las sesiones compartidas solo se buscan sus metadatos**, no su contenido: el manifest no lleva la transcripción, así que `?` y `search_team_sessions` encuentran una sesión ajena por nombre, primer prompt, tags, branch o autor, pero no por algo dicho dentro. Para buscar en su contenido hay que traerla primero.
+- **El contenido de una sesión compartida es buscable en cuanto se descarga su payload de búsqueda**, que ocurre en segundo plano al abrir la pestaña del repositorio (hasta 25 por visita). Hasta entonces —o si la publicó una versión anterior, o si su texto pasaba de 512 KB— solo se busca por los metadatos del manifest.
 - **Las filas del equipo son de la última visita a cada pestaña**: se cachean cuando abres la pestaña de un repositorio, no en segundo plano, así que lo publicado después no aparece en `?` hasta que vuelvas a abrirla. Es deliberado — la pantalla de búsqueda no debe hacer llamadas de red.
 - **La primera búsqueda del servidor MCP sobre un índice vacío escanea todo el histórico**: 1,2 s para 34 sesiones (65 MB de jsonl) en la máquina donde se midió, pero crece con el histórico y el trabajo es leer y parsear ficheros. Si tu cliente la cortase por timeout, ejecuta `multi-claude` una vez (o llama a `refresh_index`) y repite: a partir de ahí las consultas son de milisegundos.
 
@@ -828,7 +842,7 @@ src/multi_claude/
   deletion.py        # borrado de sesiones/proyectos y sus artefactos en disco
   transfer.py        # export/import de sesiones en .zip
   project_remotes.py # RemoteServer, RemoteLink y qué repos tiene enlazado cada proyecto
-  remote.py          # RemoteStore (protocolo), DirectoryRemote, TokenStore, manifests
+  remote.py          # RemoteStore (protocolo), DirectoryRemote, TokenStore, manifests v1/v2
   remote_http.py     # GitLabRemote / GitHubRemote sobre sus API REST
   remote_git.py      # GitSshRemote — git por SSH, y comprobación de acceso con ssh -T
   filtering.py       # parseo de las queries de `/` + matching fuzzy

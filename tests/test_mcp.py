@@ -384,11 +384,22 @@ def test_team_search_finds_by_name_author_branch_and_tag(tools: SessionTools) ->
         assert "cliente-x" in body
 
 
-def test_team_search_says_the_transcript_is_not_searchable(tools: SessionTools) -> None:
-    """A manifest carries no conversation, and the answer must not pretend otherwise."""
+def test_team_search_says_how_much_of_the_team_is_actually_searchable(
+    tools: SessionTools,
+) -> None:
+    """A miss must not read as "nobody discussed it" when the text is not downloaded yet."""
     _cache_team_session(tools)
     body = text_of(call(tools, "search_team_sessions", {"query": "proxy_read_timeout"}))
-    assert "never the transcript" in body
+    assert "0 of 1" in body  # cached, but only its metadata is indexed
+    assert "not proof that nobody discussed it" in body
+
+
+def test_team_search_finds_downloaded_text(tools: SessionTools) -> None:
+    """Once the search payload is in, a phrase from inside the conversation matches."""
+    _cache_team_session(tools)
+    tools.index.add_remote_search_text("remote-a", "team-1", "era el proxy_read_timeout del vhost")
+    body = text_of(call(tools, "search_team_sessions", {"query": "proxy_read_timeout"}))
+    assert "team-1" in body
 
 
 def test_team_search_explains_an_empty_cache(tools: SessionTools) -> None:

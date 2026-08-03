@@ -36,9 +36,13 @@ from multi_claude.remote import (
     RemoteSession,
     blob_name_for,
     collect_session_files,
+    decode_search_payload,
     is_compressed_blob,
     local_path_for,
     safe_session_id,
+    search_blob_name,
+    search_payload_for,
+    with_search_size,
 )
 
 # Long enough for a clone of a repo full of transcripts on a slow link.
@@ -208,13 +212,33 @@ class GitSshRemote:
             payload = path.read_bytes()
             target.write_bytes(gzip.compress(payload) if is_compressed_blob(name) else payload)
 
+        # One small blob so colleagues can search this session's content without cloning
+        # its transcript.
+        search = search_payload_for(project_dir, session.session_id)
+        if search is not None:
+            search_target = self.work / search_blob_name(session.session_id)
+            search_target.parent.mkdir(parents=True, exist_ok=True)
+            search_target.write_bytes(search)
+
         manifest = self.work / MANIFEST_ROOT / f"{session.session_id}.json"
         manifest.parent.mkdir(parents=True, exist_ok=True)
         manifest.write_text(
-            json.dumps(session.to_manifest(), indent=2, ensure_ascii=False), encoding="utf-8"
+            json.dumps(
+                with_search_size(session, search).to_manifest(), indent=2, ensure_ascii=False
+            ),
+            encoding="utf-8",
         )
 
         self._commit_and_push(session.session_id)
+
+    def fetch_search_text(self, session_id: str) -> str | None:
+        """Read the search blob out of the local clone, refreshing it first."""
+        try:
+            self._fetch()
+            payload = (self.work / search_blob_name(session_id)).read_bytes()
+        except (OSError, RemoteError):
+            return None
+        return decode_search_payload(payload)
 
     def unpublish(self, session_id: str) -> None:
         """Remove a published session with ``git rm`` and push the removal.
@@ -226,9 +250,10 @@ class GitSshRemote:
         self._fetch()
         manifest = self.work / MANIFEST_ROOT / f"{session_id}.json"
         blob_dir = self.work / BLOB_ROOT / session_id
+        search = self.work / search_blob_name(session_id)
         if not manifest.exists() and not blob_dir.exists():
             raise RemoteError(f"la sesión {session_id} no está publicada aquí")
-        for target in (manifest, blob_dir):
+        for target in (manifest, search, blob_dir):
             if target.exists():
                 self._git("rm", "-r", "--quiet", "--", str(target), cwd=self.work)
         self._commit_and_push(session_id, message=_DELETE_MESSAGE)

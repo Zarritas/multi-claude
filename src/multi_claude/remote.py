@@ -8,12 +8,21 @@ The remote keeps metadata and payload apart, because they differ in size and in 
 conflict::
 
     manifest/<uuid>.json                # light metadata, one file per session
+    search/<uuid>.txt.gz                # just the conversation's text, for searching
     blobs/<uuid>/session.jsonl.gz       # the transcript
     blobs/<uuid>/subagents/...          # subagent transcripts (+ their .meta.json)
     blobs/<uuid>/tool-results/...       # large tool outputs kept outside the jsonl
 
 One manifest **per session** rather than a single global one: two people publishing at the
 same moment then write disjoint files and never conflict. Listing costs one directory read.
+
+The **search blob** is why a colleague's session can be searched by what was said inside it
+without fetching it. It could not live in the manifest: listing reads every manifest, so
+half a megabyte of text per session would turn opening a tab into a multi-megabyte download
+(and, over the REST backends, into a much larger response per session). Kept apart it is
+downloaded once per session, lazily, and it is *small* — measured over 35 real sessions,
+the search payloads compress to 0,5 MB against 18,5 MB for the same sessions' transcripts:
+**36 times less** to be able to search them.
 
 The session uuid is preserved as the shared key. A spike confirmed Claude resumes a jsonl
 whose embedded ``cwd`` points at a ``$HOME`` that does not exist locally, so neither
@@ -42,11 +51,22 @@ from multi_claude.project_remotes import RemoteLink
 from multi_claude.session import Session
 
 FORMAT = "multi-claude/remote-session"
-VERSION = 1
+
+# 2 adds ``search_bytes``, telling a reader that ``search/<uuid>.txt.gz`` exists. Readers
+# accept 1 as well: a session published by an older build simply has no search blob and
+# stays searchable by its metadata, which is what it always was.
+VERSION = 2
+_READABLE_VERSIONS = frozenset({1, 2})
 
 MANIFEST_ROOT = "manifest"
+SEARCH_ROOT = "search"
 BLOB_ROOT = "blobs"
 MAIN_BLOB = "session.jsonl.gz"
+
+# A search payload above this is not uploaded: past a point it stops being the cheap
+# alternative to fetching the session, which is the only reason it exists. Sessions over it
+# stay searchable by metadata. 512 KB is also the cap the local FTS payload uses.
+MAX_SEARCH_BYTES = 512_000
 
 # Compressed on the way up: JSON-per-line and tool output are repetitive text. Measured
 # ~3.7:1 on a real 4.6 MB session, so a big one lands near 1 MB.
@@ -98,6 +118,14 @@ class RemoteSession:
     message_count: int = 0
     size_bytes: int = 0
     forked_from: str | None = None
+    # Size of the plain-text search payload on the remote, 0 when there is none. Only a
+    # size: the text itself lives in ``search/<uuid>.txt.gz`` precisely so that listing
+    # does not drag it along.
+    search_bytes: int = 0
+
+    @property
+    def has_search_text(self) -> bool:
+        return self.search_bytes > 0
 
     def to_manifest(self) -> dict[str, object]:
         return {
@@ -116,20 +144,22 @@ class RemoteSession:
             "message_count": self.message_count,
             "size_bytes": self.size_bytes,
             "forked_from": self.forked_from,
+            "search_bytes": self.search_bytes,
         }
 
     @classmethod
     def from_manifest(cls, data: object) -> RemoteSession:
         """Parse and validate a manifest. Raises :class:`RemoteError` on anything odd.
 
-        Unknown keys are ignored so a newer publisher does not break an older reader,
-        but an unknown ``version`` is refused: we cannot know what changed.
+        Unknown keys are ignored so a newer publisher does not break an older reader, and
+        every version we have ever written is accepted — a v1 manifest just has no search
+        blob. An unknown *future* version is still refused: we cannot know what changed.
         """
         if not isinstance(data, dict):
             raise RemoteError("manifest no es un objeto JSON")
         if data.get("format") != FORMAT:
             raise RemoteError("no parece un manifest de multi-claude")
-        if data.get("version") != VERSION:
+        if data.get("version") not in _READABLE_VERSIONS:
             raise RemoteError(f"versión de manifest no soportada: {data.get('version')!r}")
         session_id = data.get("id")
         if not isinstance(session_id, str):
@@ -152,6 +182,7 @@ class RemoteSession:
             message_count=_opt_int(data.get("message_count")),
             size_bytes=_opt_int(data.get("size_bytes")),
             forked_from=_opt_str(data.get("forked_from")),
+            search_bytes=_opt_int(data.get("search_bytes")),
         )
 
 
@@ -250,6 +281,51 @@ def session_to_remote(
     )
 
 
+def with_search_size(session: RemoteSession, payload: bytes | None) -> RemoteSession:
+    """The manifest as written: it records the payload's *plain* size, or 0 when absent."""
+    from dataclasses import replace as _replace
+
+    if payload is None:
+        return _replace(session, search_bytes=0)
+    text = decode_search_payload(payload) or ""
+    return _replace(session, search_bytes=len(text.encode("utf-8")))
+
+
+def search_blob_name(session_id: str) -> str:
+    """Where a session's search payload lives on the remote."""
+    return f"{SEARCH_ROOT}/{safe_session_id(session_id)}.txt.gz"
+
+
+def search_payload_for(project_dir: Path, session_id: str) -> bytes | None:
+    """The gzipped search payload for a local session, or None when there is nothing to send.
+
+    The same text the local FTS index uses — user prompts and assistant replies, no tool
+    calls and no tool output. That matters twice: it is what makes the blob small, and it
+    keeps the most likely place for a stray credential (a command's output) out of what
+    gets uploaded for searching.
+    """
+    from multi_claude.session import extract_fts_content
+
+    jsonl = project_dir / f"{safe_session_id(session_id)}.jsonl"
+    if not jsonl.is_file():
+        return None
+    try:
+        text = extract_fts_content(jsonl)
+    except OSError:
+        return None
+    if not text.strip() or len(text.encode("utf-8")) > MAX_SEARCH_BYTES:
+        return None
+    return gzip.compress(text.encode("utf-8"))
+
+
+def decode_search_payload(payload: bytes) -> str | None:
+    """Undo :func:`search_payload_for`. None when the blob is not readable as one."""
+    try:
+        return gzip.decompress(payload).decode("utf-8", errors="replace")
+    except (OSError, gzip.BadGzipFile, EOFError):
+        return None
+
+
 def remote_to_indexed(
     session: RemoteSession,
     *,
@@ -292,6 +368,15 @@ class RemoteStore(Protocol):
 
     def fetch(self, session_id: str, dest_dir: Path) -> FetchResult:
         """Hydrate ``session_id`` into ``dest_dir``, preserving the uuid."""
+        ...
+
+    def fetch_search_text(self, session_id: str) -> str | None:
+        """The session's search payload, or None if it has none on this remote.
+
+        Deliberately separate from :meth:`fetch`: the point is to be able to search a
+        colleague's conversation without downloading it, and the payload is ~36x smaller
+        than the transcript. A backend that cannot do it may return None.
+        """
         ...
 
     def publish(self, session: RemoteSession, project_dir: Path) -> None:
@@ -384,13 +469,30 @@ class DirectoryRemote:
             payload = path.read_bytes()
             _atomic_write(target, gzip.compress(payload) if is_compressed_blob(name) else payload)
 
+        # The search payload, so colleagues can search this by content without fetching it.
+        search = search_payload_for(project_dir, session.session_id)
+        if search is not None:
+            target = self.root / search_blob_name(session.session_id)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            _atomic_write(target, search)
+
         # Last, so a half-finished upload is invisible rather than broken.
         manifest = self.root / MANIFEST_ROOT / f"{session.session_id}.json"
         manifest.parent.mkdir(parents=True, exist_ok=True)
         _atomic_write(
             manifest,
-            json.dumps(session.to_manifest(), indent=2, ensure_ascii=False).encode("utf-8"),
+            json.dumps(
+                with_search_size(session, search).to_manifest(), indent=2, ensure_ascii=False
+            ).encode("utf-8"),
         )
+
+    def fetch_search_text(self, session_id: str) -> str | None:
+        path = self.root / search_blob_name(session_id)
+        try:
+            payload = path.read_bytes()
+        except OSError:
+            return None
+        return decode_search_payload(payload)
 
     def unpublish(self, session_id: str) -> None:
         """Remove the manifest first, then the blobs.
@@ -402,9 +504,11 @@ class DirectoryRemote:
         safe_session_id(session_id)
         manifest = self.root / MANIFEST_ROOT / f"{session_id}.json"
         blob_dir = self.root / BLOB_ROOT / session_id
+        search = self.root / search_blob_name(session_id)
         if not manifest.exists() and not blob_dir.exists():
             raise RemoteError(f"la sesión {session_id} no está publicada aquí")
         manifest.unlink(missing_ok=True)
+        search.unlink(missing_ok=True)  # or it lingers as an orphan nothing references
         shutil.rmtree(blob_dir, ignore_errors=True)
 
 

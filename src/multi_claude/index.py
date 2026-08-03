@@ -110,6 +110,10 @@ CREATE TABLE IF NOT EXISTS remote_sessions (
     message_count INTEGER NOT NULL DEFAULT 0,
     size_bytes    INTEGER NOT NULL DEFAULT 0,
     listed_at     REAL    NOT NULL DEFAULT 0,
+    -- 1 once the session's search blob has been downloaded and folded into the FTS row.
+    -- Until then the row is searchable by its manifest's metadata only, and this is what
+    -- tells the downloader which ones are still missing.
+    has_text      INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (remote_key, session_id)
 );
 CREATE INDEX IF NOT EXISTS idx_remote_sessions_project ON remote_sessions(project_key);
@@ -293,24 +297,54 @@ class SessionIndex:
     ) -> None:
         """Make the cache for ``remote_key`` match this listing exactly.
 
-        A replace rather than an upsert: the listing *is* the remote's truth at that
-        moment, so a session someone unpublished has to disappear from search instead
-        of lingering as a hit nobody can fetch.
+        The listing *is* the remote's truth at that moment, so a session someone
+        unpublished has to disappear from search instead of lingering as a hit nobody can
+        fetch. But this cannot be a wholesale delete-and-reinsert: that would throw away
+        every downloaded search payload on each visit to the tab and re-download them all.
+        So it is a diff — rows that are gone are deleted, rows that are still there keep
+        their indexed text unless the manifest says it was republished (a different
+        ``published_at``), which is exactly when the text is stale.
         """
         with self._lock:
             conn = self._connection()
+            known = {
+                str(sid): (str(stamp or ""), int(flag))
+                for sid, stamp, flag in conn.execute(
+                    "SELECT session_id, published_at, has_text FROM remote_sessions "
+                    "WHERE remote_key = ?",
+                    (remote_key,),
+                ).fetchall()
+            }
+            incoming = {s.session_id for s in sessions}
             conn.execute("BEGIN")
             try:
-                conn.execute("DELETE FROM remote_sessions WHERE remote_key = ?", (remote_key,))
-                conn.execute("DELETE FROM remote_sessions_fts WHERE remote_key = ?", (remote_key,))
+                for gone in set(known) - incoming:
+                    conn.execute(
+                        "DELETE FROM remote_sessions WHERE remote_key = ? AND session_id = ?",
+                        (remote_key, gone),
+                    )
+                    conn.execute(
+                        "DELETE FROM remote_sessions_fts WHERE remote_key = ? AND session_id = ?",
+                        (remote_key, gone),
+                    )
                 for session in sessions:
+                    previous = known.get(session.session_id)
+                    keeps_text = (
+                        previous is not None
+                        and previous[1] == 1
+                        and previous[0] == (session.published_at or "")
+                    )
+                    conn.execute(
+                        "DELETE FROM remote_sessions WHERE remote_key = ? AND session_id = ?",
+                        (remote_key, session.session_id),
+                    )
                     conn.execute(
                         """
                         INSERT INTO remote_sessions(
                             remote_key, session_id, remote_label, project_key, published_by,
                             published_at, cwd, branch, display_name, first_prompt, tags,
-                            message_count, size_bytes, listed_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            message_count, size_bytes, listed_at, has_text)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             remote_key,
@@ -327,7 +361,14 @@ class SessionIndex:
                             session.message_count,
                             session.size_bytes,
                             listed_at,
+                            1 if keeps_text else 0,
                         ),
+                    )
+                    if keeps_text:
+                        continue  # its FTS row already holds metadata + downloaded text
+                    conn.execute(
+                        "DELETE FROM remote_sessions_fts WHERE remote_key = ? AND session_id = ?",
+                        (remote_key, session.session_id),
                     )
                     conn.execute(
                         """
@@ -340,6 +381,68 @@ class SessionIndex:
             except Exception:
                 conn.execute("ROLLBACK")
                 raise
+
+    def remote_sessions_without_text(self, remote_key: str) -> list[str]:
+        """Ids under ``remote_key`` whose search blob has not been indexed yet."""
+        with self._lock:
+            conn = self._connection()
+            rows = conn.execute(
+                "SELECT session_id FROM remote_sessions WHERE remote_key = ? AND has_text = 0",
+                (remote_key,),
+            ).fetchall()
+        return [str(sid) for (sid,) in rows]
+
+    def add_remote_search_text(self, remote_key: str, session_id: str, text: str) -> None:
+        """Fold a downloaded search payload into that session's FTS row.
+
+        The metadata stays in the indexed content: someone looking for "lo de Ana sobre
+        nginx" is as likely to remember the author or the branch as a phrase from inside
+        the conversation, and dropping them to make room would trade one kind of hit for
+        another. ``has_text`` flips so the row is not downloaded again.
+        """
+        with self._lock:
+            conn = self._connection()
+            row = conn.execute(
+                """
+                SELECT display_name, first_prompt, tags, branch, published_by
+                FROM remote_sessions WHERE remote_key = ? AND session_id = ?
+                """,
+                (remote_key, session_id),
+            ).fetchone()
+            if row is None:
+                return  # unpublished between listing and download; nothing to attach to
+            metadata = "\n".join(str(value) for value in row if value)
+            conn.execute("BEGIN")
+            try:
+                conn.execute(
+                    "DELETE FROM remote_sessions_fts WHERE remote_key = ? AND session_id = ?",
+                    (remote_key, session_id),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO remote_sessions_fts(remote_key, session_id, content)
+                    VALUES (?, ?, ?)
+                    """,
+                    (remote_key, session_id, f"{metadata}\n{text}"),
+                )
+                conn.execute(
+                    """
+                    UPDATE remote_sessions SET has_text = 1
+                    WHERE remote_key = ? AND session_id = ?
+                    """,
+                    (remote_key, session_id),
+                )
+                conn.execute("COMMIT")
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+
+    def count_remote_with_text(self) -> int:
+        """How many cached team sessions are searchable by their content, not just metadata."""
+        with self._lock:
+            conn = self._connection()
+            row = conn.execute("SELECT COUNT(*) FROM remote_sessions WHERE has_text = 1").fetchone()
+        return int(row[0]) if row else 0
 
     def fts_search_remote(self, query: str, limit: int = 200) -> list[IndexedRemoteSession]:
         """Team-published sessions whose manifest metadata matches ``query``.

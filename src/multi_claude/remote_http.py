@@ -34,9 +34,13 @@ from multi_claude.remote import (
     RemoteSession,
     blob_name_for,
     collect_session_files,
+    decode_search_payload,
     is_compressed_blob,
     local_path_for,
     safe_session_id,
+    search_blob_name,
+    search_payload_for,
+    with_search_size,
 )
 
 _TIMEOUT = 15
@@ -195,12 +199,26 @@ class HttpRepoRemote:
                 f"{BLOB_ROOT}/{session.session_id}/{name}",
                 gzip.compress(payload) if is_compressed_blob(name) else payload,
             )
+        # The search payload: one small blob that lets colleagues search this session's
+        # content without downloading it.
+        search = search_payload_for(project_dir, session.session_id)
+        if search is not None:
+            self._write_file(search_blob_name(session.session_id), search)
         # Manifest last: a publish interrupted halfway leaves unreferenced blobs, which
         # are invisible to listing, rather than a manifest pointing at a partial session.
         self._write_file(
             f"{MANIFEST_ROOT}/{session.session_id}.json",
-            json.dumps(session.to_manifest(), indent=2, ensure_ascii=False).encode("utf-8"),
+            json.dumps(
+                with_search_size(session, search).to_manifest(), indent=2, ensure_ascii=False
+            ).encode("utf-8"),
         )
+
+    def fetch_search_text(self, session_id: str) -> str | None:
+        try:
+            payload = self._read_file(search_blob_name(session_id))
+        except RemoteError:
+            return None  # published by an older build, or simply too big to have one
+        return decode_search_payload(payload)
 
     def unpublish(self, session_id: str) -> None:
         """Delete the manifest first, then every blob.
@@ -217,6 +235,9 @@ class HttpRepoRemote:
             raise RemoteError(f"la sesión {session_id} no está publicada aquí")
         with contextlib.suppress(RemoteError):
             self._delete_file(manifest)
+        # The search blob too, or it lingers as an orphan nothing references.
+        with contextlib.suppress(RemoteError):
+            self._delete_file(search_blob_name(session_id))
         for path in blobs:
             with contextlib.suppress(RemoteError):
                 self._delete_file(path)

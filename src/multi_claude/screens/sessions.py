@@ -72,6 +72,7 @@ from multi_claude.project_remotes import RemoteLink
 from multi_claude.remote import (
     RemoteError,
     RemoteSession,
+    RemoteStore,
     collect_session_files,
     remote_to_indexed,
     session_to_remote,
@@ -137,6 +138,11 @@ _STATUS_NOT_LIVE = ("—", "", 0)
 # mean a node process every two seconds. What it adds — background sessions and the
 # documented state names — is worth a few seconds of latency, not that.
 _AGENTS_REFRESH_SECONDS = 15.0
+
+# How many of a remote's search payloads are downloaded per visit to its tab. They are
+# small (~36x smaller than the transcripts) but one request each, so a repository with
+# hundreds of sessions fills in over a few visits instead of stalling one.
+_SEARCH_FETCH_PER_VISIT = 25
 
 # How often the live registry is re-read. Two seconds is fast enough to notice a
 # session going from working to waiting on you, and the read is a handful of small
@@ -1116,6 +1122,47 @@ class SessionsScreen(Screen[None]):
             return
         self._cache_remote_listing(link, listed)
         self.app.call_from_thread(self._on_remote_loaded, index, list(listed))
+        # Then, on the same worker, pull the small search payloads that are still missing
+        # so `?` can find these sessions by what was said inside them.
+        self._download_search_text(link, store, listed)
+
+    def _download_search_text(
+        self, link: RemoteLink, store: RemoteStore, listed: tuple[RemoteSession, ...]
+    ) -> None:
+        """Fetch and index the search blobs this remote has and the index does not.
+
+        Bounded per visit (:data:`_SEARCH_FETCH_PER_VISIT`): the blobs are small — ~36x
+        smaller than the transcripts — but they are still one request each, and a repo with
+        hundreds of sessions should fill in over a few visits rather than stall one.
+        Sessions whose manifest says there is no payload (published before v2, or too big)
+        are skipped and stay searchable by metadata.
+        """
+        remote_key = link.identity_key()
+        try:
+            pending = set(default_index().remote_sessions_without_text(remote_key))
+        except sqlite3.Error:
+            return
+        fetched = 0
+        for session in listed:
+            if fetched >= _SEARCH_FETCH_PER_VISIT:
+                break
+            if session.session_id not in pending or not session.has_search_text:
+                continue
+            try:
+                text = store.fetch_search_text(session.session_id)
+            except (RemoteError, OSError):
+                continue
+            if not text:
+                continue
+            try:
+                default_index().add_remote_search_text(remote_key, session.session_id, text)
+            except sqlite3.Error:
+                continue
+            fetched += 1
+        if fetched:
+            self.app.call_from_thread(
+                self.notify, f"{fetched} sesión(es) del equipo ya son buscables por contenido"
+            )
 
     def _cache_remote_listing(self, link: RemoteLink, listed: tuple[RemoteSession, ...]) -> None:
         """Record this listing in the index so `?` can find the team's sessions.

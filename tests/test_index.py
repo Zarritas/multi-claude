@@ -268,6 +268,64 @@ def test_the_same_session_can_live_in_two_remotes(index: SessionIndex) -> None:
     assert labels == {"cliente-x", "producto"}
 
 
+def test_downloaded_text_survives_a_relisting(index: SessionIndex) -> None:
+    """Re-listing a tab must not throw away the payloads it already downloaded.
+
+    A wholesale delete-and-reinsert would re-fetch every blob on each visit to the tab.
+    """
+    index.replace_remote_sessions("k1", [_remote("r1")], listed_at=5.0)
+    index.add_remote_search_text("k1", "r1", "proxy_read_timeout del vhost")
+    assert index.count_remote_with_text() == 1
+
+    index.replace_remote_sessions("k1", [_remote("r1")], listed_at=6.0)
+    assert index.count_remote_with_text() == 1
+    assert [s.session_id for s in index.fts_search_remote("proxy_read_timeout")] == ["r1"]
+    assert index.remote_sessions_without_text("k1") == []
+
+
+def test_republishing_invalidates_the_downloaded_text(index: SessionIndex) -> None:
+    """A different published_at means the session was published again: the text is stale."""
+    index.replace_remote_sessions("k1", [_remote("r1")], listed_at=5.0)
+    index.add_remote_search_text("k1", "r1", "proxy_read_timeout del vhost")
+    republished = replace(_remote("r1"), published_at="2026-08-02T10:00:00+00:00")
+    index.replace_remote_sessions("k1", [republished], listed_at=6.0)
+    assert index.count_remote_with_text() == 0
+    assert index.fts_search_remote("proxy_read_timeout") == []
+    assert index.remote_sessions_without_text("k1") == ["r1"]
+    # Metadata is searchable again in the meantime.
+    assert [s.session_id for s in index.fts_search_remote("staging")] == ["r1"]
+
+
+def test_indexing_text_keeps_the_metadata_searchable(index: SessionIndex) -> None:
+    """Someone may remember the author or the branch rather than a phrase from inside."""
+    index.replace_remote_sessions("k1", [_remote("r1")], listed_at=5.0)
+    index.add_remote_search_text("k1", "r1", "un párrafo de la conversación")
+    for query in ("staging", "ana", "nginx", "infra", "párrafo"):
+        assert [s.session_id for s in index.fts_search_remote(query)] == ["r1"], query
+
+
+def test_sessions_without_text_are_listed_for_download(index: SessionIndex) -> None:
+    index.replace_remote_sessions("k1", [_remote("a"), _remote("b")], listed_at=5.0)
+    assert sorted(index.remote_sessions_without_text("k1")) == ["a", "b"]
+    index.add_remote_search_text("k1", "a", "texto")
+    assert index.remote_sessions_without_text("k1") == ["b"]
+    assert index.remote_sessions_without_text("otro-remoto") == []
+
+
+def test_adding_text_to_an_unknown_session_is_a_no_op(index: SessionIndex) -> None:
+    """It may have been unpublished between listing and download."""
+    index.add_remote_search_text("k1", "fantasma", "texto")
+    assert index.count_remote_with_text() == 0
+
+
+def test_unpublishing_drops_the_text_as_well(index: SessionIndex) -> None:
+    index.replace_remote_sessions("k1", [_remote("r1")], listed_at=5.0)
+    index.add_remote_search_text("k1", "r1", "proxy_read_timeout")
+    index.replace_remote_sessions("k1", [], listed_at=6.0)
+    assert index.count_remote_with_text() == 0
+    assert index.fts_search_remote("proxy_read_timeout") == []
+
+
 def test_remote_search_is_separate_from_local_search(index: SessionIndex) -> None:
     index.upsert_session(_session("local-1", prompt="deploy staging"), fts_content="deploy staging")
     index.replace_remote_sessions("k1", [_remote("r1")], listed_at=5.0)

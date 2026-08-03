@@ -78,6 +78,7 @@ Lo que **no** viaja y no tiene solución: el código. Ver "Divergencia de códig
 
 ```
 manifest/<uuid>.json
+search/<uuid>.txt.gz
 blobs/<uuid>/session.jsonl.gz
 blobs/<uuid>/subagents/agent-*.jsonl.gz
 blobs/<uuid>/subagents/agent-*.meta.json
@@ -89,7 +90,7 @@ blobs/<uuid>/tool-results/*.txt.gz
 ```json
 {
   "format": "multi-claude/remote-session",
-  "version": 1,
+  "version": 2,
   "id": "<uuid>",
   "published_at": "<iso8601>",
   "published_by": "<email>",
@@ -102,12 +103,20 @@ blobs/<uuid>/tool-results/*.txt.gz
   "first_prompt": "...",
   "message_count": 412,
   "size_bytes": 1234567,
-  "forked_from": null
+  "forked_from": null,
+  "search_bytes": 41234
 }
 ```
 
 `git_remote` + `git_head` son la base del aviso de divergencia y, más adelante, de la
 reconciliación de proyectos por remote URL que DESIGN.md deja fuera de alcance.
+
+`search_bytes` (v2) anuncia que existe `search/<uuid>.txt.gz`: el texto de la conversación
+—prompts y respuestas, sin salida de herramientas— para que un compañero pueda buscar dentro
+de la sesión sin traérsela. Va en un blob y no en el manifest porque listar lee *todos* los
+manifests: media MB de texto por sesión convertiría abrir una pestaña en una descarga de
+decenas de MB. Medido sobre 35 sesiones reales, los payloads comprimen a 0,5 MB frente a
+18,5 MB de sus transcripts. Un manifest v1 se sigue leyendo y simplemente no tiene payload.
 
 ## Arquitectura
 
@@ -214,9 +223,10 @@ un worker, así que la TUI no se congela con una sesión de varios MB.
 **Descubrir** (`R`): lista los manifests remotos que no están en local, mezclados en la tabla y
 marcados con su autor. El flujo "un compañero me pega un uuid por Slack" ya funciona sin código
 nuevo: `y` copia el uuid al portapapeles y el filtro soporta `id:`. El filtro soporta también
-`author:`, y el listado se cachea en el índice al abrir la pestaña, de modo que la búsqueda
-global (`?`) encuentra las sesiones del equipo por los metadatos de su manifest sin descargarlas
-ni hacer llamadas de red.
+`author:` y `secrets:`, y el listado se cachea en el índice al abrir la pestaña. Desde el
+manifest v2 se descarga además el payload de búsqueda de cada sesión (`search/<uuid>.txt.gz`,
+unas 36 veces más pequeño que el transcript), así que `?` las encuentra **por su contenido**
+sin traerlas — y sin que la pantalla de búsqueda toque la red.
 
 **Reanudar** (`Enter` sobre remota): descargar → descomprimir en `project_dir` con el uuid intacto →
 comparar `git_remote`/`git_head` del manifest con el estado local → si divergen, avisar antes de

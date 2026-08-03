@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gzip
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -84,6 +85,135 @@ def test_publish_then_fetch_round_trips_every_artifact(tmp_path: Path) -> None:
     assert len(result.written) == 4
 
 
+def test_the_search_blob_is_published_and_readable(tmp_path: Path) -> None:
+    """The point of v2: a colleague can search this session without fetching it."""
+    project = tmp_path / "projects" / "-repo"
+    project.mkdir(parents=True)
+    jsonl = project / "sid-1.jsonl"
+    jsonl.write_text(
+        "\n".join(
+            json.dumps(
+                {
+                    "type": role,
+                    "message": {"role": role, "content": [{"type": "text", "text": text}]},
+                    "sessionId": "sid-1",
+                }
+            )
+            for role, text in (
+                ("user", "por qué nginx corta el exportador"),
+                ("assistant", "por el proxy_read_timeout del vhost"),
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    remote = DirectoryRemote(tmp_path / "remote")
+    remote.publish(session_to_remote(_session(jsonl, sid="sid-1")), project)
+
+    assert (tmp_path / "remote" / "search" / "sid-1.txt.gz").is_file()
+    text = remote.fetch_search_text("sid-1")
+    assert text is not None
+    assert "proxy_read_timeout" in text
+    (listed,) = remote.list_sessions()
+    assert listed.has_search_text
+    assert listed.search_bytes == len(text.encode("utf-8"))
+
+
+def test_the_search_blob_carries_no_tool_output(tmp_path: Path) -> None:
+    """It is the FTS payload, so a command's output — the likeliest place for a stray
+    credential — never travels for searching."""
+    project = tmp_path / "projects" / "-repo"
+    project.mkdir(parents=True)
+    jsonl = project / "sid-1.jsonl"
+    jsonl.write_text(
+        json.dumps(
+            {
+                "type": "user",
+                "message": {"role": "user", "content": [{"type": "text", "text": "mira el env"}]},
+                "sessionId": "sid-1",
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": [{"type": "tool_result", "content": "SECRETO_DEL_ENV=zzz"}],
+                },
+                "sessionId": "sid-1",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    remote = DirectoryRemote(tmp_path / "remote")
+    remote.publish(session_to_remote(_session(jsonl, sid="sid-1")), project)
+    text = remote.fetch_search_text("sid-1") or ""
+    assert "mira el env" in text
+    assert "SECRETO_DEL_ENV" not in text
+
+
+def test_fetch_search_text_is_none_when_there_is_no_blob(tmp_path: Path) -> None:
+    remote = DirectoryRemote(tmp_path / "remote")
+    assert remote.fetch_search_text("no-existe") is None
+
+
+def test_a_v1_manifest_is_still_readable(tmp_path: Path) -> None:
+    """A session published by an older build has no search blob and must not be dropped."""
+    root = tmp_path / "remote"
+    (root / "manifest").mkdir(parents=True)
+    (root / "manifest" / "vieja.json").write_text(
+        json.dumps(
+            {
+                "format": "multi-claude/remote-session",
+                "version": 1,
+                "id": "vieja",
+                "published_at": "2026-01-01T00:00:00+00:00",
+                "display_name": "de antes",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (listed,) = DirectoryRemote(root).list_sessions()
+    assert listed.session_id == "vieja"
+    assert listed.search_bytes == 0
+    assert not listed.has_search_text
+
+
+def test_a_future_manifest_version_is_still_refused(tmp_path: Path) -> None:
+    root = tmp_path / "remote"
+    (root / "manifest").mkdir(parents=True)
+    (root / "manifest" / "futura.json").write_text(
+        json.dumps({"format": "multi-claude/remote-session", "version": 99, "id": "futura"}),
+        encoding="utf-8",
+    )
+    assert DirectoryRemote(root).list_sessions() == ()
+
+
+def test_unpublishing_removes_the_search_blob_too(tmp_path: Path) -> None:
+    project = tmp_path / "projects" / "-repo"
+    project.mkdir(parents=True)
+    jsonl = project / "sid-1.jsonl"
+    jsonl.write_text(
+        json.dumps(
+            {
+                "type": "user",
+                "message": {"role": "user", "content": [{"type": "text", "text": "hola"}]},
+                "sessionId": "sid-1",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    remote = DirectoryRemote(tmp_path / "remote")
+    remote.publish(session_to_remote(_session(jsonl, sid="sid-1")), project)
+    blob = tmp_path / "remote" / "search" / "sid-1.txt.gz"
+    assert blob.is_file()
+    remote.unpublish("sid-1")
+    assert not blob.is_file()
+
+
 def test_manifest_metadata_survives_the_round_trip(tmp_path: Path) -> None:
     project = tmp_path / "project"
     write_session(project, session_id="sid-1")
@@ -100,7 +230,10 @@ def test_manifest_metadata_survives_the_round_trip(tmp_path: Path) -> None:
     remote.publish(meta, project)
 
     (listed,) = remote.list_sessions()
-    assert listed == meta
+    # publish() fills in search_bytes, which the caller cannot know: it is the size of the
+    # search payload it just uploaded. Everything else survives untouched.
+    assert listed.search_bytes > 0
+    assert listed == replace(meta, search_bytes=listed.search_bytes)
     assert listed.display_name == "Mi sesión"
     assert listed.tags == ("bug", "urgente")
     assert listed.git_head == "abc1234"

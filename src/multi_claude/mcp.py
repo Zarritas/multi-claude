@@ -207,10 +207,14 @@ class SessionTools:
                     "repository's listing when its tab is opened in the TUI, so either "
                     "no project here is linked to one, or none has been visited yet."
                 )
+            with_text = self.index.count_remote_with_text()
+            total = self.index.count_remote_sessions()
             return (
-                f"No team session matches {query!r}. Only manifest metadata is searchable "
-                "here (name, first prompt, tags, branch, author) — never the transcript, "
-                "which stays on the machine that recorded it."
+                f"No team session matches {query!r}. {with_text} of {total} cached team "
+                "session(s) are searchable by their full text; the rest only by their "
+                "metadata (name, first prompt, tags, branch, author) because their search "
+                "payload has not been downloaded yet, so this is not proof that nobody "
+                "discussed it."
             )
 
         lines = [f"{len(results)} team session(s) matching {query!r}, best first:", ""]
@@ -342,10 +346,10 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "description": (
             "Search the sessions teammates published to a shared sessions repository, as "
             "last listed on this machine. Use it to find out whether a colleague already "
-            "solved something. IMPORTANT: only manifest metadata is searchable — session "
-            "name, first prompt, tags, branch and author — because the transcript itself "
-            "never leaves the machine that recorded it. So this finds sessions by what "
-            "they are about, not by a phrase said inside them."
+            "solved something. Coverage varies per session: one whose search payload has "
+            "been downloaded is searchable by its full conversation text, one whose has not "
+            "(or that was published before that existed) only by its metadata — name, first "
+            "prompt, tags, branch, author. So a miss is not proof that nobody discussed it."
         ),
         "inputSchema": {
             "type": "object",

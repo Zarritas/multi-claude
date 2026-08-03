@@ -696,6 +696,119 @@ async def test_author_finds_a_session_you_hydrated_from_a_colleague(world: Path)
         assert screen._rows == []
 
 
+async def test_a_teammates_session_becomes_searchable_by_its_content(world: Path) -> None:
+    """The whole point of manifest v2: found by a phrase from inside, without fetching it.
+
+    Before this, a colleague's session could only be found by its name, tags, branch or
+    author — the metadata a manifest carries.
+    """
+    from multi_claude.index import default_index
+
+    remote = DirectoryRemote(world / "remote")
+    other_project = world / "otro-proyecto"
+    write_session(other_project, session_id="ses-de-ana", cwd="/home/ana/repo")
+    # A real conversation, so there is a search payload to publish.
+    (other_project / "ses-de-ana.jsonl").write_text(
+        "\n".join(
+            json.dumps(
+                {
+                    "type": role,
+                    "message": {"role": role, "content": [{"type": "text", "text": text}]},
+                    "sessionId": "ses-de-ana",
+                }
+            )
+            for role, text in (
+                ("user", "el exportador se corta a los 60 segundos"),
+                ("assistant", "es el proxy_read_timeout del vhost de nginx"),
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    remote.publish(
+        RemoteSession(
+            session_id="ses-de-ana",
+            published_at="2026-07-28T10:00:00+00:00",
+            published_by="ana@example.com",
+            display_name="algo que no menciona el timeout",
+        ),
+        other_project,
+    )
+
+    app = ClaudeBrowserApp()
+    async with app.run_test() as pilot:
+        screen = await _open_sessions(pilot)
+        await _open_remote_tab(pilot, screen)
+        index = default_index()
+        for _ in range(40):
+            await pilot.pause()
+            if index.count_remote_with_text():
+                break
+
+        # A phrase that appears only inside the conversation, never in its metadata.
+        hits = index.fts_search_remote("proxy_read_timeout")
+        assert [h.session_id for h in hits] == ["ses-de-ana"]
+        # And the session was never downloaded.
+        assert not (world / "projects" / "-repo" / "ses-de-ana.jsonl").exists()
+        # Metadata still matches too: the text is added, not swapped in.
+        assert index.fts_search_remote("ana")
+
+
+async def test_the_search_text_is_not_downloaded_twice(world: Path) -> None:
+    """Re-listing a tab must not re-fetch what is already indexed."""
+    from multi_claude.index import default_index
+
+    remote = DirectoryRemote(world / "remote")
+    other = world / "otro"
+    write_session(other, session_id="ses-x", cwd="/home/otra/repo")
+    (other / "ses-x.jsonl").write_text(
+        json.dumps(
+            {
+                "type": "user",
+                "message": {"role": "user", "content": [{"type": "text", "text": "buscable"}]},
+                "sessionId": "ses-x",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    remote.publish(
+        RemoteSession(
+            session_id="ses-x",
+            published_at="2026-07-28T10:00:00+00:00",
+            published_by="otra@example.com",
+        ),
+        other,
+    )
+
+    app = ClaudeBrowserApp()
+    async with app.run_test() as pilot:
+        screen = await _open_sessions(pilot)
+        await _open_remote_tab(pilot, screen)
+        for _ in range(40):
+            await pilot.pause()
+            if default_index().count_remote_with_text():
+                break
+        assert default_index().count_remote_with_text() == 1
+
+        calls: list[str] = []
+        store = await _remote_store(app)
+        original = store.fetch_search_text
+
+        def counting(session_id: str) -> str | None:
+            calls.append(session_id)
+            return original(session_id)
+
+        store.fetch_search_text = counting  # type: ignore[method-assign]
+        with patch.object(app, "store_for_link", return_value=store):
+            screen._load_remote_worker(0)
+            for _ in range(40):
+                await pilot.pause()
+
+        assert calls == []  # already indexed, so nothing was asked for again
+        assert default_index().count_remote_with_text() == 1
+
+
 async def test_unpublishing_drops_the_session_from_search(world: Path) -> None:
     """A re-listing is a replace: what is gone from the remote stops being a search hit."""
     app = ClaudeBrowserApp()
