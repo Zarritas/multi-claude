@@ -218,7 +218,7 @@ async def test_the_background_pass_purges_rows_whose_file_is_gone(
 async def test_session_only_filter_keys_match_nothing_in_projects(
     synthetic_world: Path,
 ) -> None:
-    """`author:`/`tag:`/`id:` ask about a session; over projects they filter to nothing.
+    """`author:`/`tag:`/`id:`/`secrets:` ask about a session; over projects, nothing.
 
     Showing every project would read as "none of these has that author" instead of "the
     question does not apply at this level".
@@ -231,7 +231,7 @@ async def test_session_only_filter_keys_match_nothing_in_projects(
         await pilot.press("slash")
         await pilot.pause()
         filter_input = app.screen.query_one("#filter", Input)
-        for query in ("author:ana", "tag:infra", "id:abc", "branch:main"):
+        for query in ("author:ana", "tag:infra", "id:abc", "branch:main", "secrets:yes"):
             filter_input.value = query
             await pilot.pause()
             assert app.screen._visible_indices == [], query

@@ -32,7 +32,7 @@ multi-claude no compite ahí: lee el mismo registro local de sesiones vivas que 
 - **Carpetas de usuario** (`f`) para organizar proyectos en un árbol propio.
 - **Etiquetas** (`t`) y **colores** por sesión (`c`), con reglas automáticas por branch, antigüedad o actividad (`C`).
 - **Nombres persistentes** (`e`) para sesiones y proyectos, con el `/rename` de Claude y el título que Claude genera solo como fallbacks (ver [Nombres](#nombres-e)).
-- **Filtro incremental** (`/`) con `branch:`, `path:`, `id:`, `tag:`, `author:` y texto libre fuzzy.
+- **Filtro incremental** (`/`) con `branch:`, `path:`, `id:`, `tag:`, `author:`, `secrets:` y texto libre fuzzy.
 - **Preview** (`p`) de los últimos turnos de una sesión sin reanudarla.
 - **Mover, exportar e importar** sesiones entre worktrees o hacia un `.zip` compartible (`m`, `x`, `i`).
 - **Estado en vivo** de cada sesión, leído del registro de Claude Code: con varias corriendo a la vez, ves en la misma tabla cuál trabaja y cuál te está esperando (ver [Estado en vivo](#estado-en-vivo)).
@@ -230,6 +230,7 @@ El tokenizer es `unicode61 remove_diacritics 2`, así que `refactor` encuentra `
 | `id:`     | subcadena sobre el id de la sesión                                  |
 | `tag:`    | lista separada por comas; **todas** las etiquetas deben coincidir   |
 | `author:` | subcadena sobre quién publicó la sesión (`author:ana`, o el correo completo) |
+| `secrets:` | veredicto del [escáner de credenciales](#escáner-de-secretos-al-publicar): `yes` / `no` / `unknown` |
 
 Todo lo que no sea `clave:valor` se trata como texto libre y se puntúa con `rapidfuzz.fuzz.partial_ratio` (umbral 70), así que tolera erratas. Ejemplo: `branch:main tag:bug,urgente refacto`.
 
@@ -238,9 +239,11 @@ Todo lo que no sea `clave:valor` se trata como texto libre y se puntúa con `rap
 - en la pestaña de un **repositorio compartido**, cada fila tiene publicador, así que `author:ana` es "de lo que hay publicado aquí, lo de Ana";
 - en la pestaña **local**, es "de las sesiones que tengo en disco, cuáles vinieron de otra persona" — el caso de una que hidrataste de un compañero. El autor sale del índice de publicadas, que se carga en segundo plano, así que igual que la marca `✓` tarda un instante en aparecer.
 
+`secrets:` responde con lo que dejó el escáner en el índice, así que en un proyecto recién abierto tarda un momento en tener respuesta. Acepta `yes`/`si`/`true`/`1`, `no`/`false`/`0`/`limpias` y `unknown`/`desconocido`/`?`. Los tres son respuestas distintas y **`unknown` no es un sinónimo de `no`**: una sesión que nadie ha escaneado todavía no es una sesión que salió limpia, y juntarlas convertiría el filtro en una afirmación que no puede hacer. Un valor que no reconoce (`secrets:quizá`) no deja pasar nada, por lo mismo.
+
 > Ojo: `/` filtra las filas que ya están en pantalla. Para buscar **dentro del contenido** de las conversaciones, usa `?` — donde el autor también funciona como texto libre, porque el nombre de quien publicó entra en el índice de las sesiones del equipo.
 
-Una clave que la tabla en pantalla no puede responder **no deja pasar nada**, en vez de ignorarse: `author:`, `tag:`, `id:` y `branch:` son propiedades de una sesión, así que en la lista de **proyectos** filtran a cero. Devolver todos los proyectos se leería como "ninguno tiene ese autor" cuando lo que ocurre es que la pregunta no aplica a ese nivel.
+Una clave que la tabla en pantalla no puede responder **no deja pasar nada**, en vez de ignorarse: `author:`, `tag:`, `id:`, `branch:` y `secrets:` son propiedades de una sesión, así que en la lista de **proyectos** filtran a cero. Y `secrets:` tampoco aplica en la pestaña de un repositorio compartido: un manifest no dice nada de credenciales, así que solo las filas ya descargadas tendrían veredicto — media lista respondiendo y media no es peor que decir que la pregunta no aplica. Devolver todos los proyectos se leería como "ninguno tiene ese autor" cuando lo que ocurre es que la pregunta no aplica a ese nivel.
 
 ### Etiquetas (`t`)
 
@@ -449,7 +452,7 @@ De paso deja el resultado en el índice, que es lo que alimenta la marca del lis
 
 #### La marca `⚠` en el listado
 
-Una sesión con posibles credenciales lleva `⚠` delante del nombre en la pantalla de sesiones, antes de la marca de compartida: la pregunta que responde —¿esto debería salir de la máquina?— viene antes que «¿ya ha salido?».
+Una sesión con posibles credenciales lleva `⚠` delante del nombre en la pantalla de sesiones, antes de la marca de compartida: la pregunta que responde —¿esto debería salir de la máquina?— viene antes que «¿ya ha salido?». Y `/secrets:yes` aísla justo esas (ver [Filtro](#filtro-)).
 
 El escaneo va en segundo plano y se cachea en el índice contra el `mtime` del jsonl, así que la primera visita a un proyecto grande lo calcula y las siguientes son gratis. Una sesión que ha crecido desde su escaneo se vuelve a mirar, porque la credencial puede estar en la parte nueva. Y **una sesión sin escanear no lleva marca ni deja de llevarla**: la ausencia de `⚠` significa «escaneada y limpia» solo después de que el escaneo haya corrido.
 

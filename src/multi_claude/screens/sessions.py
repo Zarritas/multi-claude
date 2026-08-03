@@ -37,7 +37,13 @@ from multi_claude.discovery import (
     resolve_git_user_email,
     scan_projects,
 )
-from multi_claude.filtering import FilterQuery, matches_fuzzy, parse_query
+from multi_claude.filtering import (
+    FilterQuery,
+    matches_fuzzy,
+    parse_query,
+    secrets_verdict,
+    secrets_wanted,
+)
 from multi_claude.focus import (
     LiveSession,
     background_sessions,
@@ -543,6 +549,14 @@ class SessionsScreen(Screen[None]):
                 return False
             if key == "author" and value not in self._author_of(session).lower():
                 return False
+            if key == "secrets":
+                wanted = secrets_wanted(value)
+                # An unrecognised value lets nothing through: quietly ignoring
+                # `secrets:puede` would answer a different question than the one asked.
+                if wanted is None:
+                    return False
+                if secrets_verdict(self._secret_counts.get(session.id)) != wanted:
+                    return False
             if key == "tag":
                 needed = [t for t in (s.strip() for s in value.split(",")) if t]
                 tags_lower = [t.lower() for t in session.tags]
@@ -1570,6 +1584,12 @@ def _remote_matches(remote: RemoteSession, query: FilterQuery) -> bool:
         if key == "id" and value not in remote.session_id.lower():
             return False
         if key == "author" and value not in (remote.published_by or "").lower():
+            return False
+        if key == "secrets":
+            # Not answerable here. A manifest says nothing about credentials, so only the
+            # rows already fetched would have a verdict — half the list answering and half
+            # not is worse than saying the question does not apply, which is what filtering
+            # to nothing means everywhere else in this filter.
             return False
         if key == "tag":
             needed = [t for t in (s.strip() for s in value.split(",")) if t]

@@ -335,6 +335,47 @@ async def test_global_search_lists_a_teammates_session_and_opens_its_tab(world: 
         assert [r.session_id for r in landed._remote_sessions] == ["ses-de-carlos"]
 
 
+async def test_secrets_filter_isolates_the_sensitive_sessions(world: Path) -> None:
+    """`/secrets:yes` answers "what should not leave this machine", in one keystroke."""
+    from textual.widgets import Input
+
+    jsonl = world / "projects" / "-repo" / "ses-1.jsonl"
+    with jsonl.open("a", encoding="utf-8") as f:
+        f.write(
+            json.dumps(
+                {
+                    "type": "user",
+                    "message": {"role": "user", "content": "GITHUB_TOKEN=" + _fake_token()},
+                    "sessionId": "ses-1",
+                }
+            )
+            + "\n"
+        )
+
+    app = ClaudeBrowserApp()
+    async with app.run_test() as pilot:
+        screen = await _open_sessions(pilot)
+        for _ in range(40):
+            await pilot.pause()
+            if screen._secret_counts:
+                break
+
+        async def shown(query: str) -> list[str]:
+            screen.query_one("#filter", Input).value = query
+            for _ in range(10):
+                await pilot.pause()
+            return [screen._sessions[i].id for is_remote, i in screen._rows if not is_remote]
+
+        await pilot.press("slash")
+        await pilot.pause()
+        assert await shown("secrets:yes") == ["ses-1"]
+        assert await shown("secrets:no") == ["ses-2"]
+        # Both were scanned, so nothing is unknown…
+        assert await shown("secrets:unknown") == []
+        # …and a value the filter does not understand lets nothing through.
+        assert await shown("secrets:quizá") == []
+
+
 async def test_hydrating_a_session_with_a_credential_warns_you(world: Path) -> None:
     """Scanning in the other direction: what just landed came from someone else's disk.
 

@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import pytest
 
-from multi_claude.filtering import FilterQuery, matches_fuzzy, parse_query
+from multi_claude.filtering import (
+    FilterQuery,
+    matches_fuzzy,
+    parse_query,
+    secrets_verdict,
+    secrets_wanted,
+)
 from multi_claude.focus import LiveSession
 from multi_claude.remote import RemoteSession
 from multi_claude.screens.search import _project_label
@@ -90,6 +96,51 @@ def test_matches_fuzzy_empty_query_matches_anything() -> None:
 def test_filter_query_is_empty_with_only_constraints() -> None:
     q = FilterQuery(constraints={"branch": "main"})
     assert q.is_empty is False
+
+
+# --- secrets: -------------------------------------------------------------------------
+
+
+def test_parse_secrets_constraint() -> None:
+    q = parse_query("secrets:yes nginx")
+    assert q.free_text == "nginx"
+    assert q.constraints == {"secrets": "yes"}
+
+
+@pytest.mark.parametrize("spelling", ["yes", "si", "sí", "true", "1", "YES"])
+def test_secrets_yes_spellings(spelling: str) -> None:
+    assert secrets_wanted(spelling) == "yes"
+
+
+@pytest.mark.parametrize("spelling", ["no", "false", "0", "clean", "limpias"])
+def test_secrets_no_spellings(spelling: str) -> None:
+    assert secrets_wanted(spelling) == "no"
+
+
+@pytest.mark.parametrize("spelling", ["unknown", "desconocido", "?"])
+def test_secrets_unknown_spellings(spelling: str) -> None:
+    assert secrets_wanted(spelling) == "unknown"
+
+
+def test_an_unrecognised_secrets_value_is_not_silently_ignored() -> None:
+    """Returning None makes the caller filter to nothing, which is the honest answer."""
+    assert secrets_wanted("puede") is None
+    assert secrets_wanted("") is None
+
+
+def test_never_scanned_is_its_own_answer_not_a_no() -> None:
+    """Collapsing unknown into no would have the filter claim something it cannot know."""
+    assert secrets_verdict(None) == "unknown"
+    assert secrets_verdict(0) == "no"
+    assert secrets_verdict(1) == "yes"
+    assert secrets_verdict(7) == "yes"
+
+
+def test_secrets_is_not_answerable_on_a_remote_tab() -> None:
+    """A manifest says nothing about credentials, so no row can answer — not even the
+    ones already fetched, because half a list answering is worse than none."""
+    assert not _remote_matches(_published(), parse_query("secrets:yes"))
+    assert not _remote_matches(_published(), parse_query("secrets:no"))
 
 
 # --- the Estado column's two vocabularies --------------------------------------------

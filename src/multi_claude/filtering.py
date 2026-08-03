@@ -11,6 +11,7 @@ Supported keys (where present):
 - ``id:``     — substring match against the session id
 - ``tag:``    — comma-separated list, every item must match a session tag
 - ``author:`` — substring match against who published a session
+- ``secrets:`` — ``yes`` / ``no`` / ``unknown``, against the credential scan's verdict
 
 Free-text terms are scored with :func:`rapidfuzz.fuzz.partial_ratio`. A match
 requires score >= :data:`FUZZY_THRESHOLD`.
@@ -28,7 +29,46 @@ from rapidfuzz import fuzz
 
 FUZZY_THRESHOLD = 70
 
-KNOWN_KEYS: frozenset[str] = frozenset({"branch", "path", "id", "tag", "author"})
+KNOWN_KEYS: frozenset[str] = frozenset({"branch", "path", "id", "tag", "author", "secrets"})
+
+# What ``secrets:`` accepts, in both languages, mapped onto the three answers the scan can
+# give. "unknown" is a real answer and not a synonym of "no": a session nobody has scanned
+# yet is not a session that came back clean, and collapsing the two would turn the filter
+# into a claim it cannot make.
+SECRETS_VALUES: dict[str, str] = {
+    "yes": "yes",
+    "si": "yes",
+    "sí": "yes",
+    "true": "yes",
+    "1": "yes",
+    "no": "no",
+    "false": "no",
+    "0": "no",
+    "clean": "no",
+    "limpias": "no",
+    "unknown": "unknown",
+    "desconocido": "unknown",
+    "?": "unknown",
+}
+
+
+def secrets_wanted(value: str) -> str | None:
+    """Normalise a ``secrets:`` value, or None if it is not one we understand.
+
+    A caller that gets None must let nothing through rather than ignore the constraint:
+    silently dropping ``secrets:puede`` would answer a question nobody asked.
+    """
+    return SECRETS_VALUES.get(value.strip().lower())
+
+
+def secrets_verdict(count: int | None) -> str:
+    """The scan's answer for a session, as ``secrets:`` spells it.
+
+    ``None`` means never scanned, which is why this is not just ``bool(count)``.
+    """
+    if count is None:
+        return "unknown"
+    return "yes" if count else "no"
 
 
 @dataclass(frozen=True)
