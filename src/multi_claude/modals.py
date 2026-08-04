@@ -30,6 +30,7 @@ from multi_claude.config import (
 from multi_claude.discovery import Project
 from multi_claude.launcher import PLACEMENT_LABELS, preview_dispatch
 from multi_claude.project_remotes import RemoteLink, RemoteServer
+from multi_claude.secret_scan import Exposure
 from multi_claude.tags import parse_tag_list
 
 
@@ -1943,6 +1944,14 @@ class PublishModal(ModalScreen["RemoteLink | None"]):
     PublishModal Static.finding {
         color: $error;
     }
+    /* The action reads as the important line of the three, because it is the one the
+       reader has to do something about. */
+    PublishModal Static.rotation {
+        color: $warning;
+    }
+    PublishModal Static.where {
+        color: $text-muted;
+    }
     PublishModal Label.keys {
         color: $text-muted;
     }
@@ -1970,7 +1979,7 @@ class PublishModal(ModalScreen["RemoteLink | None"]):
         files: list[str],
         destinations: list[RemoteLink],
         preselected: int = 0,
-        findings: list[str] | None = None,
+        exposures: list[Exposure] | None = None,
         unscanned: int = 0,
     ) -> None:
         super().__init__()
@@ -1978,15 +1987,24 @@ class PublishModal(ModalScreen["RemoteLink | None"]):
         self.files = files
         self.destinations = destinations
         self.preselected = preselected if 0 <= preselected < len(destinations) else 0
-        # Already-formatted, already-masked lines from the credential scan (see
+        # One row per issuer from the credential scan, masked at the source (see
         # :mod:`multi_claude.secret_scan`). They change the dialogue's behaviour, not just
         # its text: see :meth:`on_mount` and :meth:`on_key`.
-        self.findings = findings or []
+        self.exposures = exposures or []
         self.unscanned = unscanned
 
     @property
     def suspicious(self) -> bool:
-        return bool(self.findings)
+        return bool(self.exposures)
+
+    @property
+    def credential_count(self) -> int:
+        """Distinct values found, which is what the headline counts.
+
+        Not ``len(self.exposures)``: two GitHub tokens are one row and two things to
+        rotate, and the number that belongs next to a stop sign is the second one.
+        """
+        return sum(e.distinct for e in self.exposures)
 
     def compose(self) -> ComposeResult:
         from textual.containers import Horizontal, VerticalScroll
@@ -1998,7 +2016,8 @@ class PublishModal(ModalScreen["RemoteLink | None"]):
             )
             if self.suspicious:
                 yield Label(
-                    f"🛑  {len(self.findings)} posible(s) credencial(es) en lo que se va a subir",
+                    f"🛑  {self.credential_count} posible(s) credencial(es) "
+                    "en lo que se va a subir",
                     classes="danger",
                 )
             yield Label(
@@ -2032,13 +2051,17 @@ class PublishModal(ModalScreen["RemoteLink | None"]):
                     )
 
                 if self.suspicious:
-                    yield Label("Posibles credenciales", classes="section")
-                    for line in self.findings:
-                        yield Static(line, classes="finding")
+                    yield Label("Qué habría que rotar", classes="section")
+                    for exposure in self.exposures:
+                        yield Static(exposure.headline(), classes="finding")
+                        yield Static(f"  ↻ {exposure.rotation}", classes="rotation")
+                        yield Static(f"  en {exposure.where()}", classes="where")
                     yield Label(
-                        "Los valores van recortados a propósito. Si alguno es real, "
-                        "cancela: publicar esto lo comparte con todo el repositorio, y "
-                        "borrarlo después no lo saca del historial de git.",
+                        "Los valores van recortados a propósito. Si alguna es real, "
+                        "cancelar no la pone a salvo: lleva en claro en este disco desde "
+                        "la conversación, y lo que la desactiva es rotarla. Cancelar evita "
+                        "lo otro — que quede además en el historial de git del "
+                        "repositorio, de donde borrarla después no la saca.",
                         classes="hint",
                     )
                 if self.unscanned:

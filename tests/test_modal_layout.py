@@ -22,6 +22,7 @@ from multi_claude.app import ClaudeBrowserApp
 from multi_claude.colors import ColorRule
 from multi_claude.config import Config
 from multi_claude.project_remotes import RemoteLink, RemoteServer
+from multi_claude.secret_scan import Exposure
 
 # Box-drawing and scrollbar glyphs that sit between words once the screen is flattened.
 _CHROME = re.compile(r"[█▀▄▔▁▊▎▆▃▂▅▇░▒▓│─┌┐└┘├┤┬┴┼]")
@@ -111,6 +112,26 @@ CASES: dict[str, tuple[Callable[[], ModalScreen], list[str], list[str]]] = {
         # The warning is in the always-list on purpose: it is the whole point of the dialog.
         ["Publicar 2", "Revisa que no haya secretos", "Publicar", "Cancelar"],
         ["Repositorio de destino", "cliente-x"],
+    ),
+    "publish-with-credentials": (
+        lambda: M.PublishModal(
+            session_count=1,
+            files=["· ses-1.jsonl"],
+            destinations=[RemoteLink(kind="directory", path="/mnt/equipo/sesiones")],
+            exposures=[
+                Exposure(
+                    rule="token de GitHub",
+                    distinct=1,
+                    occurrences=7,
+                    excerpts=("ghp_…34 (40 car.)",),
+                    locations=("ses-1.jsonl:12",),
+                ),
+            ],
+        ),
+        # On the smallest terminal the count and the button that is not "publish anyway"
+        # have to survive: they are what stops the reflex.
+        ["1 posible(s) credencial(es)", "Cancelar", "todas formas"],
+        ["Qué habría que rotar", "revócalo en los tokens de acceso de GitHub"],
     ),
     "delete-confirmation": (
         lambda: M.ConfirmDeleteModal(

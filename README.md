@@ -486,14 +486,15 @@ Google, Stripe, AWS), JWTs, credentials inside a URL, `Authorization` headers, a
 
 With findings, the dialogue does not merely say so: it **changes shape**.
 
-- The warning turns red and heads the dialogue, with the list of findings: file, line, which rule,
-  and a **clipped** excerpt.
+- The warning turns red and heads the dialogue, followed by **what to rotate**: one row per issuer,
+  with a **clipped** excerpt, how often it turns up, where, and the action — because "a GitHub token"
+  is only useful once it also says "revoke it in GitHub's access tokens".
 - Focus starts on **Cancelar**, and the publish button reads "Publicar de todas formas".
 - **`Enter` stops publishing.** The failure this guards against is pressing Enter on autopilot, so
   with findings on screen Enter presses the focused button (Cancelar) and reaching the other one is
   deliberate.
 
-Three decisions worth knowing:
+Four decisions worth knowing:
 
 - **The value found is never printed.** A scanner that writes the secret into a dialogue — and from
   there into a screenshot, a scrollback or a bug report — has leaked it a second time. Only the first
@@ -503,6 +504,14 @@ Three decisions worth knowing:
   deliberate; the decision stays with the person.
 - **The same value repeated is one finding, not a hundred.** A key printed by a command that ran
   seventy times is listed once, with the number of occurrences — otherwise it buries everything else.
+- **Rows group by issuer, and each one says what to do.** Seven rows reading "token de GitHub" at
+  seven line numbers answer a question the reader has already answered; the one still open is *what
+  do I have to rotate*. And the dialogue states the thing that is usually understood backwards:
+  **cancelling does not make the credential safe** — it has been in plain text on your disk since the
+  conversation happened, and what disables it is rotating it. Cancelling only keeps it out of the
+  repository's git history, where deleting it later does not remove it. When the issuer is not
+  recognisable (the generic rule, which fires on a variable's *name*) the row admits that instead of
+  inventing advice.
 
 #### Sweeping the whole history, not just what you publish
 
@@ -515,10 +524,31 @@ multi-claude --audit-secrets --project ~/work/api
 multi-claude --audit-secrets --verbose    # with a clipped excerpt per finding
 ```
 
-It prints, per affected session, its id, its title, its project, and which rules fired where. **It
-exits 1 when it finds something**, so it works in a hook or a `cron`. Without `--verbose` it shows
-not even the masked excerpts, so the output can be pasted into a ticket; the **title is redacted
-too**, because a title is the first prompt and that is where a pasted token ends up.
+It prints, per affected session, its id, its title, its project, and **one row per issuer** — the
+same grouping the dialogue uses — with where it turned up. And it ends with the list that answers
+what a sweep is really asking, *what do I have to rotate on this machine*:
+
+```
+Qué habría que rotar (3):
+  · token de GitHub — en 2 sesiones
+    ↻ revócalo en los tokens de acceso de GitHub
+  · credenciales en una URL — en 1 sesión
+    ↻ cambia la contraseña del servicio al que apunta
+  · asignación con nombre de secreto — en 1 sesión
+    ↻ sin emisor reconocible: abre la línea y decide qué es
+```
+
+Aggregated **across sessions**, because that is the scale the action happens at: one key pasted into
+six conversations is one token to revoke, and six rows spread over six sessions is the shape that
+hides it. Which is why the action appears once at the end rather than in every session. What that
+block does **not** state is how many distinct values there are: within a session the scan dedups by
+value, but across sessions it cannot, so the same key seen in four sessions would add up to "4
+distintas" and send someone to rotate four things where there is one. The number of sessions can be
+claimed truthfully; the number of keys cannot.
+
+**It exits 1 when it finds something**, so it works in a hook or a `cron`. Without `--verbose` it
+shows not even the masked excerpts, so the output can be pasted into a ticket; the **title is
+redacted too**, because a title is the first prompt and that is where a pasted token ends up.
 
 It also leaves the result in the index, which is what feeds the listing's mark:
 

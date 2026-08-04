@@ -17,6 +17,12 @@ false positives (a base64 blob, an example key in documentation), and a scanner 
 refuses to publish teaches people to work around it. The dialogue makes the risk loud and
 the accept path deliberate; the decision stays with the person.
 
+What the dialogue shows is not the raw findings but :class:`Exposure` — one row per
+*issuer*, carrying what to do about it. A :class:`Finding` answers "where did this match",
+which is the question a reader has already answered by the time they are looking at the
+dialogue; the one still open is "what do I have to rotate". Seven rows reading
+``token de GitHub`` at seven line numbers hide that answer instead of giving it.
+
 Named ``secret_scan`` rather than ``secrets`` so it cannot be confused with the stdlib
 module of that name.
 """
@@ -57,13 +63,131 @@ class Finding:
     occurrences: int = 1
 
     def describe(self, root: Path | None = None) -> str:
-        """One line for the dialogue: where, which rule, and a masked sample."""
-        shown: Path = self.path
-        if root is not None:
-            with contextlib.suppress(ValueError):  # not under root: show the full path
-                shown = self.path.relative_to(root)
+        """One line for a report: where, which rule, and a masked sample."""
         repeats = f" ({self.occurrences} veces)" if self.occurrences > 1 else ""
-        return f"{shown}:{self.line} · {self.rule} · {self.excerpt}{repeats}"
+        return f"{_shown_path(self.path, root)}:{self.line} · {self.rule} · {self.excerpt}{repeats}"
+
+
+def _shown_path(path: Path, root: Path | None) -> Path:
+    if root is None:
+        return path
+    with contextlib.suppress(ValueError):  # not under root: show the full path
+        return path.relative_to(root)
+    return path
+
+
+# What to do about each issuer, so a warning becomes an instruction. Keyed on the rule's
+# name, and deliberately without URLs or menu paths: a provider rearranges its console far
+# more often than this file changes, and a stale click-path is worse than none.
+#
+# Every entry says *revoke or rotate*, never "remove it from the transcript". By the time
+# this text is on screen the credential has been sitting in plain text on the disk since
+# the conversation happened; not publishing it limits the blast radius but does not undo
+# the exposure.
+ROTATION: dict[str, str] = {
+    "clave privada": "regenera el par y retira la pública de donde estuviera autorizada",
+    "AWS access key": "desactiva la clave en IAM y crea otra",
+    "AWS secret key": "desactiva la clave en IAM y crea otra",
+    "token de GitHub": "revócalo en los tokens de acceso de GitHub",
+    "token de GitLab": "revócalo en los tokens de acceso de GitLab",
+    "clave de API de Anthropic": "revócala en la consola de Anthropic",
+    "clave de API de OpenAI": "revócala en la consola de OpenAI",
+    "token de Slack": "revócalo en la configuración de la app de Slack",
+    "clave de API de Google": "revócala en las credenciales del proyecto de Google Cloud",
+    "token de Stripe": "rótala en el panel de Stripe — es una clave «live»",
+    "JWT": "caduca solo, pero mira qué lo firmó: si hay una clave detrás, rótala",
+    "credenciales en una URL": "cambia la contraseña del servicio al que apunta",
+    "cabecera Authorization": "depende de quién la emitiera: abre la línea para saberlo",
+}
+
+# For the generic rule, which matches on the variable's *name* and so cannot know who
+# issued the value. Saying "look at it" is the honest advice, and it is also the rule most
+# likely to be a false positive.
+GENERIC_ROTATION = "sin emisor reconocible: abre la línea y decide qué es"
+
+# How many masked samples one row shows before it just gives the count.
+_EXCERPTS_SHOWN = 2
+
+# How many places one row names before it says "and N more".
+_LOCATIONS_SHOWN = 2
+
+
+@dataclass(frozen=True)
+class Exposure:
+    """Every finding of one rule, as the single thing it probably is: a key to rotate.
+
+    ``distinct`` counts different values, ``occurrences`` how many times they appear in
+    total. ``excerpts`` are masked, like the findings they come from.
+    """
+
+    rule: str
+    distinct: int
+    occurrences: int
+    excerpts: tuple[str, ...]
+    locations: tuple[str, ...]
+
+    @property
+    def rotation(self) -> str:
+        """What to do about it."""
+        return ROTATION.get(self.rule, GENERIC_ROTATION)
+
+    def headline(self, *, excerpts: bool = True) -> str:
+        """The issuer, a masked sample or two, and how much of it there is.
+
+        ``excerpts=False`` drops the masked samples, for output meant to be safe to paste
+        somewhere — a ticket does not need even the first four characters of a key.
+        """
+        parts = [self.rule]
+        if self.distinct > 1:
+            parts.append(f"{self.distinct} distintas")
+        if excerpts:
+            parts.extend(self.excerpts[:_EXCERPTS_SHOWN])
+            if self.distinct > _EXCERPTS_SHOWN:
+                parts.append(f"y {self.distinct - _EXCERPTS_SHOWN} más")
+        if self.occurrences > self.distinct:
+            parts.append(f"{self.occurrences} apariciones")
+        return " · ".join(parts)
+
+    def where(self) -> str:
+        """The first places it turns up, capped: the file list is not the point here."""
+        shown = self.locations[:_LOCATIONS_SHOWN]
+        hidden = len(self.locations) - len(shown)
+        listed = ", ".join(shown)
+        return f"{listed} y {hidden} sitio(s) más" if hidden > 0 else listed
+
+
+def group_findings(findings: list[Finding], root: Path | None = None) -> list[Exposure]:
+    """Collapse findings into one :class:`Exposure` per rule, keeping the rules' order.
+
+    Two findings of the same rule are the same credential often enough — a token printed
+    by one command that ran seventy times, a key that appears in both the transcript and a
+    tool result — that the grouping is what makes the count readable. Where it is wrong
+    (two different GitHub tokens in one session) ``distinct`` says so and both masks show.
+
+    The order comes from :data:`_RULE_ORDER`, defined with the rules further down.
+    """
+    excerpts: dict[str, list[str]] = {}
+    locations: dict[str, list[str]] = {}
+    occurrences: dict[str, int] = {}
+    for finding in findings:
+        rule = finding.rule
+        excerpts.setdefault(rule, []).append(finding.excerpt)
+        occurrences[rule] = occurrences.get(rule, 0) + finding.occurrences
+        where = f"{_shown_path(finding.path, root)}:{finding.line}"
+        seen = locations.setdefault(rule, [])
+        if where not in seen:  # a rule matching twice on one line is one place, not two
+            seen.append(where)
+    grouped = [
+        Exposure(
+            rule=rule,
+            distinct=len(rule_excerpts),
+            occurrences=occurrences[rule],
+            excerpts=tuple(rule_excerpts),
+            locations=tuple(locations[rule]),
+        )
+        for rule, rule_excerpts in excerpts.items()
+    ]
+    return sorted(grouped, key=lambda e: rule_order(e.rule))
 
 
 @dataclass(frozen=True)
@@ -134,6 +258,21 @@ def _rules() -> tuple[_Rule, ...]:
 
 
 RULES = _rules()
+
+# Rules report in the order they are declared — specific before generic — and
+# :func:`group_findings` preserves it, so what has a known issuer (and therefore a real
+# action) reads before the guesses.
+_RULE_ORDER: dict[str, int] = {rule.name: index for index, rule in enumerate(RULES)}
+
+
+def rule_order(rule: str) -> int:
+    """Where ``rule`` sits among the rules, for callers that sort issuers themselves.
+
+    The history sweep aggregates across sessions and cannot reuse :func:`group_findings`
+    for the order, but it must present issuers the same way the dialogue does.
+    """
+    return _RULE_ORDER.get(rule, len(_RULE_ORDER))
+
 
 # Values that look like a credential but are obviously not one. Checked against the
 # generic rule only, where the false-positive rate would otherwise make the scanner noise.

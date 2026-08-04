@@ -15,9 +15,13 @@ from pathlib import Path
 import pytest
 
 from multi_claude.secret_scan import (
+    GENERIC_ROTATION,
     MAX_FILE_BYTES,
     MAX_FINDINGS,
+    ROTATION,
+    RULES,
     Finding,
+    group_findings,
     mask,
     redact,
     scan_files,
@@ -298,3 +302,83 @@ def test_a_very_long_line_does_not_hang_the_scan(tmp_path: Path) -> None:
     path = tmp_path / "long.jsonl"
     path.write_text("x" * 5_000_000 + f" GITHUB_TOKEN={REAL_LOOKING}\n")
     assert scan_files([path]) == []  # past the truncation point, so not seen — and fast
+
+
+# --- grouping into something actionable -------------------------------------------------
+
+
+def test_findings_of_one_rule_become_one_row_that_says_what_to_rotate() -> None:
+    """The reason grouping exists: the reader needs a key to rotate, not a line number.
+
+    Seven matches of the same rule are one instruction, and the instruction has to name
+    the issuer — that is what a reader can act on without opening the transcript.
+    """
+    text = "\n".join(f"GITHUB_TOKEN={REAL_LOOKING}" for _ in range(7))
+    (exposure,) = group_findings(scan_text(text, HERE))
+    assert exposure.rule == "token de GitHub"
+    assert exposure.distinct == 1
+    assert exposure.occurrences == 7
+    assert "GitHub" in exposure.rotation
+    assert "7 apariciones" in exposure.headline()
+
+
+def test_every_rule_with_a_known_issuer_has_rotation_advice() -> None:
+    """A typo in a ROTATION key would silently downgrade a real issuer to the vague hint.
+
+    The generic rule is the one exception, by definition: it matches on a variable's name
+    and so cannot know who issued the value.
+    """
+    missing = [rule.name for rule in RULES if not rule.strict_value and rule.name not in ROTATION]
+    assert missing == []
+    assert set(ROTATION) <= {rule.name for rule in RULES}
+
+
+def test_the_generic_rule_admits_it_does_not_know_the_issuer() -> None:
+    (exposure,) = group_findings(scan_text("DB_PASSWORD=Tr0ub4dor3xyz!", HERE))
+    assert exposure.rotation == GENERIC_ROTATION
+
+
+def test_two_different_values_of_one_rule_keep_both_masks() -> None:
+    """Grouping must not claim one key where there are two: both have to be rotated."""
+    other = _like("ghp", "_zYxWvUtSrQpOnMlKjIhGfEdCbA9876543")
+    (exposure,) = group_findings(scan_text(f"a={REAL_LOOKING}\nb={other}", HERE))
+    assert exposure.distinct == 2
+    assert "2 distintas" in exposure.headline()
+    assert len(exposure.excerpts) == 2
+
+
+def test_the_grouped_row_never_carries_the_secret() -> None:
+    (exposure,) = group_findings(scan_text(f"GITHUB_TOKEN={REAL_LOOKING}", HERE))
+    rendered = f"{exposure.headline()} {exposure.rotation} {exposure.where()} {exposure!r}"
+    assert REAL_LOOKING not in rendered
+
+
+def test_rules_with_a_known_issuer_are_listed_before_the_guesses() -> None:
+    """A confirmed GitHub token outranks an assignment that merely looks suspicious."""
+    text = f"DB_PASSWORD=Tr0ub4dor3xyz!\nGITHUB_TOKEN={REAL_LOOKING}"
+    assert [e.rule for e in group_findings(scan_text(text, HERE))] == [
+        "token de GitHub",
+        "asignación con nombre de secreto",
+    ]
+
+
+def test_locations_are_relative_to_the_project_and_capped(tmp_path: Path) -> None:
+    """Four different tokens on four lines: the row names the first places, then counts."""
+    lines = "\n".join("GITHUB_TOKEN=" + _like("ghp", f"_{letter * 34}") for letter in "abcd")
+    (exposure,) = group_findings(scan_text(lines, tmp_path / "sub" / "ses.jsonl"), tmp_path)
+    where = exposure.where()
+    assert where.startswith("sub/ses.jsonl:1")
+    assert str(tmp_path) not in where  # relative, so the row fits on a line
+    assert "y 2 sitio(s) más" in where
+
+
+def test_one_rule_matching_twice_on_a_line_is_one_place() -> None:
+    """Same line, two values: two credentials to rotate but only one place to look."""
+    other = _like("ghp", "_zYxWvUtSrQpOnMlKjIhGfEdCbA9876543")
+    (exposure,) = group_findings(scan_text(f"a={REAL_LOOKING} b={other}", HERE))
+    assert exposure.distinct == 2
+    assert len(exposure.locations) == 1
+
+
+def test_nothing_found_groups_to_nothing() -> None:
+    assert group_findings([]) == []

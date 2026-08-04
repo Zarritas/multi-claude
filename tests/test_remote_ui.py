@@ -516,9 +516,14 @@ async def test_publishing_a_session_with_a_credential_warns_and_defends_itself(
         modal = pilot.app.screen
         assert isinstance(modal, PublishModal), f"no se abrió el diálogo: {modal}"
         assert modal.suspicious
-        assert any("token de GitHub" in line for line in modal.findings)
+        (exposure,) = modal.exposures
+        assert exposure.rule == "token de GitHub"
+        # And it says what to do about it, which is the point of showing it at all.
+        assert "revócalo" in exposure.rotation
+        assert "ses-1.jsonl" in exposure.where()
         # The secret itself never reaches the dialogue.
-        assert not any("aBcDeFgHiJkLmNoPqRsTuVwXyZ" in line for line in modal.findings)
+        rendered = f"{exposure.headline()} {exposure.rotation} {exposure.where()}"
+        assert "aBcDeFgHiJkLmNoPqRsTuVwXyZ" not in rendered
         # Cancel has the focus and the accept button says what it is doing.
         assert modal.focused is modal.query_one("#cancel", Button)
         assert "todas formas" in str(modal.query_one("#publish", Button).label)
@@ -548,7 +553,7 @@ async def test_publishing_a_clean_session_keeps_the_fast_path(world: Path) -> No
         modal = pilot.app.screen
         assert isinstance(modal, PublishModal)
         assert not modal.suspicious
-        assert modal.findings == []
+        assert modal.exposures == []
         assert modal.focused is modal.query_one("#publish", Button)
 
         await pilot.press("enter")
