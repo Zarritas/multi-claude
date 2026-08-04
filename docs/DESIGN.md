@@ -24,6 +24,7 @@ Las sesiones compartidas entre máquinas y compañeros tienen su propio plan en
 | Contenido de una sesión ajena | payload de búsqueda en un blob aparte (`search/<uuid>.txt.gz`), no en el manifest: listar lee todos los manifests |
 | Republicar sobre otra versión | se bloquea antes de escribir (fast-forward por `published_at`); reemplazar es explícito, y bifurcar es `--fork-session` del propio Claude |
 | Escáner de secretos           | avisa, no veta; nunca imprime el valor; calibrado contra transcripts reales, no contra un corpus sintético |
+| Hallazgos, en diálogo e informe | agrupados por emisor y con la acción («rótalo aquí»), no una fila por coincidencia: la pregunta abierta es qué rotar, no dónde salió. El informe del CLI cierra con la lista agregada entre sesiones, sin contar valores distintos —entre sesiones no se puede deduplicar por valor y afirmarlo mandaría a rotar de más— |
 | Barrido del histórico         | informe por CLI (`--audit-secrets`), no una pantalla: la acción útil —rotar la credencial— ocurre fuera, y así se puede colgar de un hook |
 | Marca `⚠` del listado         | escaneo en worker cacheado contra el `mtime`; sin escanear ≠ limpia, y el índice guarda el número de hallazgos, nunca un valor |
 | Estado en vivo                | dos fuentes: registro por PID cada 2 s (rápido) + `claude agents --json` cada 15 s (soportado, ~350 ms), fusionadas |

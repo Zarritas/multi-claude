@@ -139,28 +139,60 @@ def test_a_clean_history_says_so_without_claiming_certainty(
     assert "heurístico" in text  # never sold as a certificate
 
 
-def test_grouping_collapses_identical_rows(world: Path, tmp_path: Path) -> None:
-    """Two different keys on one line render the same without excerpts; say it once."""
-    jsonl = world / "projects" / "-api" / "con-secreto.jsonl"
+def _append_prompt(jsonl: Path, content: str, session_id: str) -> None:
     with jsonl.open("a", encoding="utf-8") as f:
         f.write(
             json.dumps(
                 {
                     "type": "user",
-                    "message": {
-                        "role": "user",
-                        "content": (
-                            "-----BEGIN RSA PRIVATE KEY----- y -----BEGIN OPENSSH PRIVATE KEY-----"
-                        ),
-                    },
-                    "sessionId": "con-secreto",
+                    "message": {"role": "user", "content": content},
+                    "sessionId": session_id,
                 }
             )
             + "\n"
         )
+
+
+def test_grouping_collapses_a_session_to_one_row_per_issuer(world: Path, tmp_path: Path) -> None:
+    """Two private keys on one line are one issuer and one row, with the count on it."""
+    _append_prompt(
+        world / "projects" / "-api" / "con-secreto.jsonl",
+        "-----BEGIN RSA PRIVATE KEY----- y -----BEGIN OPENSSH PRIVATE KEY-----",
+        "con-secreto",
+    )
     text = format_report(audit(index=SessionIndex(tmp_path / "i.sqlite3")))
-    assert text.count("clave privada en") == 1
-    assert "2 distintos" in text
+    assert text.count("· clave privada · 2 distintas en") == 1
+    # The session's row says where — and not by repeating the id it is named after.
+    assert "en línea 2" in text
+    assert "con-secreto.jsonl" not in text
+    # What to do about it is not repeated per session; it goes once, at the end.
+    assert text.count("regenera el par") == 1
+
+
+def test_the_report_ends_with_what_to_rotate(world: Path, tmp_path: Path) -> None:
+    """The question a history sweep is really asking, answered once at the end."""
+    text = format_report(audit(index=SessionIndex(tmp_path / "i.sqlite3")))
+    assert "Qué habría que rotar (1):" in text
+    assert "· token de GitHub — en 1 sesión" in text
+    assert "↻ revócalo en los tokens de acceso de GitHub" in text
+
+
+def test_one_issuer_across_sessions_is_one_thing_to_rotate(world: Path, tmp_path: Path) -> None:
+    """The same key pasted twice is one token to revoke, and the summary counts sessions."""
+    _append_prompt(world / "projects" / "-web" / "otra.jsonl", f"GITHUB_TOKEN={TOKEN}", "otra")
+    text = format_report(audit(index=SessionIndex(tmp_path / "i.sqlite3")))
+    assert "· token de GitHub — en 2 sesiones" in text
+    assert text.count("↻ revócalo en los tokens de acceso de GitHub") == 1
+    # Never a count of distinct values: across sessions the scan cannot dedup by value,
+    # so claiming "2 distintas" would send someone to rotate two keys where there is one.
+    summary = text.split("Qué habría que rotar")[1]
+    assert "distintas" not in summary
+
+
+def test_an_unrecognised_issuer_admits_it_in_the_summary(world: Path, tmp_path: Path) -> None:
+    _append_prompt(world / "projects" / "-web" / "otra.jsonl", "DB_PASSWORD=Tr0ub4dor3xyz!", "otra")
+    text = format_report(audit(index=SessionIndex(tmp_path / "i.sqlite3")))
+    assert "sin emisor reconocible" in text
 
 
 # --- the CLI --------------------------------------------------------------------------

@@ -459,15 +459,16 @@ Se reconocen claves privadas PEM, tokens con prefijo de proveedor (GitHub, GitLa
 
 Cuando hay hallazgos, el diálogo no solo lo dice: **cambia de forma**.
 
-- El aviso pasa a rojo y encabeza el diálogo, con la lista de hallazgos: fichero, línea, qué regla y un fragmento **recortado**.
+- El aviso pasa a rojo y encabeza el diálogo, seguido de **qué habría que rotar**: una fila por emisor, con un fragmento **recortado**, cuántas veces sale, dónde, y la acción — porque «un token de GitHub» solo sirve cuando además dice «revócalo en los tokens de acceso de GitHub».
 - El foco arranca en **Cancelar**, y el botón de publicar dice «Publicar de todas formas».
 - **`Enter` deja de publicar.** El fallo del que esto protege es pulsar Enter en automático, así que con hallazgos en pantalla Enter pulsa el botón enfocado (Cancelar) y hay que ir al otro a propósito.
 
-Tres decisiones que conviene conocer:
+Cuatro decisiones que conviene conocer:
 
 - **Nunca se imprime el valor encontrado.** Un escáner que escribe el secreto en un diálogo —y de ahí a una captura, a un scrollback o a un informe de error— lo ha filtrado por segunda vez. Solo salen los primeros caracteres, los dos últimos y la longitud.
 - **Un hallazgo avisa, no veta.** Sobre texto libre de conversación los falsos positivos son inevitables, y un escáner que impide publicar enseña a la gente a rodearlo. La fricción es deliberada; la decisión sigue siendo de la persona.
 - **Un mismo valor repetido es un hallazgo, no cien.** Una clave que imprimió un comando ejecutado setenta veces se lista una vez, con el número de apariciones — si no, entierra todo lo demás.
+- **Se agrupa por emisor, y cada fila dice qué hacer.** Siete filas diciendo «token de GitHub» en siete números de línea contestan a una pregunta que el lector ya tiene resuelta; la que sigue abierta es *qué tengo que rotar*. Y el diálogo dice lo que se suele entender al revés: **cancelar no pone la credencial a salvo** —lleva en claro en tu disco desde la conversación, y lo que la desactiva es rotarla—, solo evita que además quede en el historial de git del repositorio, de donde borrarla luego no la saca. Cuando el emisor no se reconoce (la regla genérica, que salta por el *nombre* de la variable) la fila lo admite en vez de inventarse un consejo.
 
 #### Revisar todo el histórico, no solo lo que publicas
 
@@ -479,7 +480,21 @@ multi-claude --audit-secrets --project ~/work/api
 multi-claude --audit-secrets --verbose    # con un fragmento recortado de cada hallazgo
 ```
 
-Imprime, por sesión afectada, su id, su título, su proyecto y qué reglas saltaron y dónde. **Sale con código 1 si encuentra algo**, así que sirve en un hook o en un `cron`. Sin `--verbose` no muestra ni los fragmentos enmascarados, para que la salida se pueda pegar en un ticket; el **título también va redactado**, porque el título es el primer prompt y ahí es donde acaba un token pegado.
+Imprime, por sesión afectada, su id, su título, su proyecto y **una fila por emisor** —el mismo agrupado que el diálogo— con dónde salió. Y termina con la lista que contesta a lo que un barrido pregunta de verdad, *qué hay que rotar en esta máquina*:
+
+```
+Qué habría que rotar (3):
+  · token de GitHub — en 2 sesiones
+    ↻ revócalo en los tokens de acceso de GitHub
+  · credenciales en una URL — en 1 sesión
+    ↻ cambia la contraseña del servicio al que apunta
+  · asignación con nombre de secreto — en 1 sesión
+    ↻ sin emisor reconocible: abre la línea y decide qué es
+```
+
+Agregado **entre sesiones**, porque es la escala a la que ocurre la acción: una clave pegada en seis conversaciones es un token que revocar, y seis filas repartidas por seis sesiones es la forma que lo esconde. Por eso la acción va una sola vez al final y no en cada sesión. Lo que ese bloque **no** dice es cuántos valores distintos hay: dentro de una sesión el escáner deduplica por valor, pero entre sesiones no puede, así que la misma clave vista en cuatro sesiones sumaría «4 distintas» y mandaría a alguien a rotar cuatro cosas donde hay una. El número de sesiones sí se puede afirmar; el de claves no.
+
+**Sale con código 1 si encuentra algo**, así que sirve en un hook o en un `cron`. Sin `--verbose` no muestra ni los fragmentos enmascarados, para que la salida se pueda pegar en un ticket; el **título también va redactado**, porque el título es el primer prompt y ahí es donde acaba un token pegado.
 
 De paso deja el resultado en el índice, que es lo que alimenta la marca del listado:
 

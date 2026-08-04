@@ -80,7 +80,7 @@ from multi_claude.remote import (
     remote_to_indexed,
     session_to_remote,
 )
-from multi_claude.secret_scan import scan_files, skipped_files
+from multi_claude.secret_scan import Exposure, group_findings, scan_files, skipped_files
 from multi_claude.session import Session, scan_sessions
 from multi_claude.transfer import export_sessions, safe_filename
 from multi_claude.widgets.preview import SessionPreview
@@ -992,18 +992,18 @@ class SessionsScreen(Screen[None]):
         "could not review" and the dialogue opens with its usual warning.
         """
         try:
-            findings = [f.describe(self.project.encoded_path) for f in scan_files(files)]
+            exposures = group_findings(scan_files(files), self.project.encoded_path)
             unscanned = len(skipped_files(files))
         except Exception as exc:  # a scan is never worth losing the publish over
-            findings, unscanned = [], len(files)
+            exposures, unscanned = [], len(files)
             print(f"multi-claude: falló la revisión de secretos: {exc}", file=sys.stderr)
-        self.app.call_from_thread(self._open_publish_modal, targets, listed, findings, unscanned)
+        self.app.call_from_thread(self._open_publish_modal, targets, listed, exposures, unscanned)
 
     def _open_publish_modal(
         self,
         targets: list[Session],
         listed: list[str],
-        findings: list[str],
+        exposures: list[Exposure],
         unscanned: int,
     ) -> None:
         modal = PublishModal(
@@ -1011,7 +1011,7 @@ class SessionsScreen(Screen[None]):
             files=listed,
             destinations=list(self._remote_links),
             preselected=self._default_destination(),
-            findings=findings,
+            exposures=exposures,
             unscanned=unscanned,
         )
         self.app.push_screen(modal, lambda link: self._apply_publish(targets, link))

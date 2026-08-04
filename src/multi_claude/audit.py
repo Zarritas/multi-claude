@@ -9,6 +9,13 @@ rotating.
 Written as a report rather than a fix on purpose: the tool has no business editing a
 transcript, and the useful action — rotate the credential — happens somewhere else
 entirely.
+
+Which is why the report is shaped around that action. Per session it names the *issuers*
+(via :func:`multi_claude.secret_scan.group_findings`, the same grouping the publish
+dialogue shows) rather than one row per match, and it ends with the list that answers the
+question the sweep is really asking: **what do I have to rotate on this machine.** One key
+pasted into six sessions is one thing to revoke, and six rows spread over six sessions is
+the shape that hides it.
 """
 
 from __future__ import annotations
@@ -21,12 +28,16 @@ from pathlib import Path
 from multi_claude import discovery
 from multi_claude.discovery import scan_projects
 from multi_claude.index import SessionIndex, default_index
-from multi_claude.secret_scan import Finding, redact, scan_files, skipped_files
+from multi_claude.secret_scan import (
+    Exposure,
+    Finding,
+    group_findings,
+    redact,
+    rule_order,
+    scan_files,
+    skipped_files,
+)
 from multi_claude.session import extract_embedded_name, parse_session_header
-
-# How many finding rows one session gets in the report before the rest is summarised: a
-# conversation *about* credentials trips every rule and would bury the real cases.
-_FINDINGS_PER_SESSION = 8
 
 
 @dataclass(frozen=True)
@@ -44,6 +55,16 @@ class SessionAudit:
     @property
     def occurrences(self) -> int:
         return sum(f.occurrences for f in self.findings)
+
+    @property
+    def exposures(self) -> list[Exposure]:
+        """The findings grouped by issuer, as the dialogue groups them.
+
+        Paths are shown relative to the session's own directory — the report already names
+        the project on the line above, and an absolute ``~/.claude/projects/…`` path would
+        wrap every row.
+        """
+        return group_findings(self.findings, self.jsonl.parent)
 
 
 @dataclass(frozen=True)
@@ -134,50 +155,72 @@ def format_report(report: AuditReport, *, verbose: bool = False) -> str:
         lines.append(f"  {entry.session_id}")
         lines.append(f"    {entry.title}")
         lines.append(f"    {entry.project_name} — {entry.project_path}")
-        lines.extend(_finding_lines(entry, verbose=verbose))
+        lines.extend(_issuer_lines(entry, verbose=verbose))
         if entry.unscanned:
             lines.append(f"    · {entry.unscanned} fichero(s) no revisados (binarios o grandes)")
         lines.append("")
+    lines.extend(_rotation_lines(report))
+    lines.append("")
+    # After a block of "↻ revoke it here", repeating "you have to rotate it" would be
+    # noise. What the closing line adds is the *why* — the reason not publishing is not a
+    # fix — which is the part people get backwards.
     lines.append(
-        "Lo importante no es dejar de publicarlas: si alguna credencial es real, ya está "
-        "en claro en el disco y hay que **rotarla**."
+        "Ninguna de estas se arregla no publicando la sesión: si la credencial es real, "
+        "lleva en claro en este disco desde la conversación, y **rotarla** es lo único "
+        "que la desactiva."
     )
     if not verbose:
         lines.append("Con --verbose se muestra un fragmento recortado de cada hallazgo.")
     return "\n".join(lines)
 
 
-def _finding_lines(entry: SessionAudit, *, verbose: bool) -> list[str]:
-    """The findings of one session, grouped and capped.
+def _issuer_lines(entry: SessionAudit, *, verbose: bool) -> list[str]:
+    """One row per issuer in one session: who, how much of it, and where.
 
-    Without ``verbose`` two different keys on the same line of the same file render
-    identically, so they are collapsed into one row with the totals added up — three rows
-    reading "clave privada … :1963" told the reader nothing the first one did not.
-    A session that *discusses* credentials (documentation, a test fixture) trips every
-    rule at once, hence the cap.
+    Not one row per match: three rows reading "clave privada … :1963" told the reader
+    nothing the first one did not, and a session that *discusses* credentials (a test
+    fixture, documentation) trips every rule at once. Grouping by issuer is also what
+    removes the old per-session cap — the number of rules is the ceiling now.
+
+    What to do about each one is **not** here: it would repeat verbatim in every session
+    that shares an issuer. It goes once, at the end, in :func:`_rotation_lines`.
     """
-    grouped: dict[tuple[str, str, int], tuple[int, int, str]] = {}
-    for finding in entry.findings:
-        key = (finding.rule, finding.path.name, finding.line)
-        distinct, occurrences, excerpt = grouped.get(key, (0, 0, finding.excerpt))
-        grouped[key] = (distinct + 1, occurrences + finding.occurrences, excerpt)
+    # A session's jsonl is named after its id, which is already two lines above: spelling
+    # out `a1b2c3d4-1111-….jsonl:2` in every row spends 40 characters saying it again.
+    # Anything else — a tool result — keeps its relative path, because there it is news.
+    own = f"{entry.jsonl.name}:"
+    return [
+        f"    · {exposure.headline(excerpts=verbose)} en {exposure.where().replace(own, 'línea ')}"
+        for exposure in entry.exposures
+    ]
 
-    rows: list[str] = []
-    for (rule, filename, line), (distinct, occurrences, excerpt) in list(grouped.items())[
-        :_FINDINGS_PER_SESSION
-    ]:
-        counts = []
-        if distinct > 1:
-            counts.append(f"{distinct} distintos")
-        if occurrences > distinct:
-            counts.append(f"{occurrences} apariciones")
-        suffix = f" ({', '.join(counts)})" if counts else ""
-        detail = f" · {excerpt}" if verbose else ""
-        rows.append(f"    · {rule} en {filename}:{line}{suffix}{detail}")
-    hidden = len(grouped) - len(rows)
-    if hidden > 0:
-        rows.append(f"    · … y {hidden} más (usa --project para verlas de una en una)")
-    return rows
+
+def _rotation_lines(report: AuditReport) -> list[str]:
+    """The point of the whole sweep: the list of things to revoke, issuer by issuer.
+
+    Aggregated across sessions, because that is the scale the action happens at — one key
+    pasted into six conversations is one token to revoke.
+
+    Deliberately **without a count of distinct values**: within a session the scan
+    deduplicates by value, but across sessions it cannot, so the same key seen in four
+    sessions would add up to "4 distintas" and claim four keys where there is one. The
+    number of sessions is something this can say truthfully; how many keys there are is
+    not, and a report that guesses wrong here sends someone to rotate the wrong thing.
+    """
+    sessions_per_rule: dict[str, set[str]] = {}
+    rotation: dict[str, str] = {}
+    for entry in report.affected:
+        for exposure in entry.exposures:
+            sessions_per_rule.setdefault(exposure.rule, set()).add(entry.session_id)
+            rotation[exposure.rule] = exposure.rotation
+
+    lines = [f"Qué habría que rotar ({len(sessions_per_rule)}):"]
+    for rule in sorted(sessions_per_rule, key=rule_order):
+        count = len(sessions_per_rule[rule])
+        where = "1 sesión" if count == 1 else f"{count} sesiones"
+        lines.append(f"  · {rule} — en {where}")
+        lines.append(f"    ↻ {rotation[rule]}")
+    return lines
 
 
 def _session_files(project_dir: Path, session_id: str) -> list[Path]:
