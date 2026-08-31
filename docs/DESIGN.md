@@ -29,6 +29,7 @@ Las sesiones compartidas entre máquinas y compañeros tienen su propio plan en
 | Marca `⚠` del listado         | escaneo en worker cacheado contra el `mtime`; sin escanear ≠ limpia, y el índice guarda el número de hallazgos, nunca un valor |
 | Estado en vivo                | dos fuentes: registro por PID cada 2 s (rápido) + `claude agents --json` cada 15 s (soportado, ~350 ms), fusionadas |
 | Índice                        | se puebla en segundo plano al arrancar, no al entrar a un proyecto; y se purga de filas cuyo jsonl ya no está |
+| Repo de sesiones declarado en el proyecto | `.multi-claude.json` versionado; solo puede nombrar un `server` que el lector ya tenga configurado, nunca traer `host`/`kind`/`path`: el repo dice **qué repositorio**, la persona **qué servidor** y tiene la credencial. Pierde frente a los enlaces propios, gana al remoto global |
 | Ficheros tocados (`file:`)    | solo las escrituras hechas con las herramientas de edición de Claude, extraídas en la **misma pasada** que el payload FTS; tabla propia y no FTS, porque un path tokeniza mal y la pregunta es una subcadena, no texto libre |
 
 ## Fuente de verdad del cwd

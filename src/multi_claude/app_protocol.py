@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from multi_claude.config import Config
     from multi_claude.discovery import Project
     from multi_claude.names import NamesStore
+    from multi_claude.project_config import ProjectConfig, ProjectConfigReader
     from multi_claude.project_folders import ProjectFoldersStore
     from multi_claude.project_names import ProjectNamesStore
     from multi_claude.project_remotes import ProjectRemotesStore, RemoteLink
@@ -28,9 +29,14 @@ class AppProtocol(Protocol):
     project_folders: ProjectFoldersStore
     tags: TagsStore
     project_remotes: ProjectRemotesStore
+    project_config: ProjectConfigReader
 
     def update_prefs(self, prefs: Config) -> None: ...
 
     def remote_links_for(self, project: Project) -> tuple[RemoteLink, ...]: ...
+
+    def declared_links_for(self, project: Project) -> tuple[RemoteLink, ...]: ...
+
+    def project_config_for(self, project: Project) -> ProjectConfig: ...
 
     def store_for_link(self, link: RemoteLink) -> RemoteStore | None: ...

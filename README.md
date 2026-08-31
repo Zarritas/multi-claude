@@ -29,7 +29,9 @@ multi-claude does not compete there: it reads the same local live-session regist
 
 ## What it does
 
-- **Shared sessions** (`L`, `u`): link each project to one or more sessions repositories (GitLab, GitHub or a plain folder), which show up as tabs; publish with `u` and resume a colleague's session with `Enter`, no export/import round trip. And they are searchable **by their content without downloading them** (see [Shared sessions](#shared-sessions-l-and-u)).
+- **Shared sessions** (`L`, `u`): link each project to one or more sessions repositories — or let the
+  project declare them for the whole team in a committed `.multi-claude.json`, so a colleague who clones
+  it has the tab without configuring anything (GitLab, GitHub or a plain folder), which show up as tabs; publish with `u` and resume a colleague's session with `Enter`, no export/import round trip. And they are searchable **by their content without downloading them** (see [Shared sessions](#shared-sessions-l-and-u)).
 - **Credential scan** before publishing: it checks what is about to be uploaded and, if something looks like a credential, the dialogue changes shape so that publishing it is a deliberate act. Suspicious sessions are marked `⚠` in the listing, and `multi-claude --audit-secrets` sweeps the whole history (see [Credential scan](#credential-scan-before-publishing)).
 - **Full-text search** (`?`) over the content of every session, on a SQLite FTS5 index — finds "that conversation about the X refactor" by what was said in it, and in the same list **the team's**, marked with who published them (see [Global search](#global-full-text-search-)).
 - **MCP server** (`multi-claude-mcp`) over that same index: Claude searches its own past sessions instead of re-deriving what it already solved (see [MCP server](#mcp-server-multi-claude-mcp)).
@@ -322,6 +324,46 @@ It is **off by default**: it has to be set up.
 The link is keyed on the **work repo's `origin`**, not its path, so each person configures it on
 their machine yet *hits the same destination* even with the project in a different folder. And all
 of a repo's **worktrees** share one link: link one and they are all linked.
+
+#### Declaring the repository in the project itself
+
+Step 3 is per person, which makes a team feature with single-player onboarding: the second
+colleague to arrive has to be *told* which repo to link, find `L`, and not mistype it. A project
+can declare it instead, in a `.multi-claude.json` committed at the root of its working tree:
+
+```json
+{
+  "sessions_repos": [
+    { "server": "Empresa", "repo": "equipo/sesiones", "branch": "main", "label": "Equipo" }
+  ]
+}
+```
+
+Clone the repo, run multi-claude, and the tab is already there. Only `server` and `repo` are
+required; `branch` defaults to `main` and `label` to the repository's name.
+
+**The file is versioned, so it is untrusted input** — anyone who can push to the project can change
+it, and what it configures is where sessions get published. One rule keeps that from being a way to
+exfiltrate transcripts:
+
+> The repository says **which repository**. You say **which server**, and you hold the credential.
+
+So an entry may only name a `server` **you have already configured** (step 2), and is refused if it
+tries to bring its own `host`, `kind` or `path`. A declaration naming a server you do not have
+resolves to nothing — visibly inert, never somewhere unexpected. Local folders are refused outright:
+a path is specific to one machine, so versioning it means nothing, and honouring one would turn a
+file in a repository into an arbitrary write on every reader's disk. Refused entries are listed in
+`L`, because a silently dropped declaration looks exactly like a repo that declares nothing.
+
+Precedence, first match wins: `$MULTI_CLAUDE_REMOTE_DIR` → **your own links** (`L`) → the repo's
+declaration → the global remote. Your own links win over the declaration because they are a choice
+you made deliberately, and a file in a repository must not override it; the declaration is the
+default for whoever has not chosen — exactly the colleague who just cloned. Saving in `L` detaches
+the project from the declaration, and the modal says so, because from then on the repo's changes
+stop reaching you.
+
+Publishing is unaffected: `u` still shows what goes up and where. This decides which tabs exist,
+not what leaves the machine.
 
 #### Servers and authentication
 
@@ -816,6 +858,11 @@ Everything multi-claude stores on its own (it never writes inside Claude's jsonl
 Deleting any of them is safe: you lose that state, not the sessions. `remote-tokens.json` is the only
 one holding a secret, which is why it is created owner-only.
 
+One file is **not** multi-claude's own and does not live here: `.multi-claude.json`, at the root of a
+project's working tree, which the project commits to declare its sessions repositories for the whole
+team (see [Declaring the repository in the project itself](#declaring-the-repository-in-the-project-itself)).
+It is read, never written.
+
 ## A project's identity
 
 The `~/.claude/projects/<encoded>/` directory name is the original path with `/` replaced by `-`. That
@@ -837,6 +884,12 @@ Only when no jsonl is parseable does it fall back to the `-` → `/` heuristic.
   sessions comfortably — the longest had 7,555 lines — but an extraordinarily long conversation would
   still be clipped at the end. Only user and assistant text goes in: tool calls and their output are
   never indexed, so they cannot be searched.
+- **A declared sessions repo is invisible until you configure its server**: `.multi-claude.json` names a
+  server, and resolving that name against *your* config is what keeps a versioned file from choosing
+  where your transcripts go. The cost is that a colleague who has not added the server (step 2) sees no
+  tab and no error on the listing — the refusals and the reason are in `L`, which is where the fix is.
+  It is deliberate: the alternative is honouring a host the repo supplies, which is the whole thing the
+  rule exists to prevent.
 - **`file:` only sees edits made through Claude's editing tools**: `Edit`, `Write`, `MultiEdit` and
   `NotebookEdit` carry the path in the tool call, so they are recorded. A file changed by a shell
   command (`sed -i`, a heredoc, `git checkout`, a formatter run over the tree) does not, and

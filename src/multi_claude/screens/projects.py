@@ -561,11 +561,20 @@ class ProjectsScreen(Screen[None]):
             return
         key = project_remote_key(project.path)
         own = self._claude_app.project_remotes.get(key)
+        declared = self._claude_app.project_config_for(project)
         self.app.push_screen(
             ProjectRemotesModal(
                 project_name=project.name,
                 links=list(own or self._claude_app.remote_links_for(project)),
                 inherited=not own,
+                # Which of the two inherited sources is on screen, so the modal can say what
+                # saving would detach from. Only meaningful when nothing is linked here.
+                inherited_from=(
+                    "repo" if not own and self._claude_app.declared_links_for(project) else "global"
+                ),
+                # Always shown, even when links were also found: a repo can declare three and
+                # have one refused, and that one is invisible everywhere else.
+                problems=list(declared.problems),
                 servers=list(self._claude_app.prefs.remote_servers),
             ),
             lambda links: self._apply_links(key, links),
