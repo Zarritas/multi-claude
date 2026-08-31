@@ -29,7 +29,9 @@ multi-claude no compite ahí: lee el mismo registro local de sesiones vivas que 
 
 ## Qué trae
 
-- **Sesiones compartidas** (`L`, `u`): enlaza cada proyecto a uno o varios repositorios de sesiones (GitLab, GitHub o una carpeta), que aparecen como pestañas; publica con `u` y reanuda la sesión de un compañero con `Enter`, sin exportar ni importar nada. Y se buscan **por su contenido sin descargarlas** (ver [Sesiones compartidas](#sesiones-compartidas-l-y-u)).
+- **Sesiones compartidas** (`L`, `u`): enlaza cada proyecto a uno o varios repositorios de sesiones — o deja
+  que el propio proyecto los declare para todo el equipo en un `.multi-claude.json` commiteado, para que quien
+  lo clone tenga la pestaña sin configurar nada (GitLab, GitHub o una carpeta), que aparecen como pestañas; publica con `u` y reanuda la sesión de un compañero con `Enter`, sin exportar ni importar nada. Y se buscan **por su contenido sin descargarlas** (ver [Sesiones compartidas](#sesiones-compartidas-l-y-u)).
 - **Escáner de secretos** antes de publicar: revisa lo que va a subir y, si encuentra algo con pinta de credencial, el diálogo cambia de forma para que publicarlo sea un acto deliberado. Las sesiones sospechosas van marcadas con `⚠` en el listado, y `multi-claude --audit-secrets` revisa el histórico completo (ver [Escáner de secretos](#escáner-de-secretos-al-publicar)).
 - **Búsqueda full-text** (`?`) sobre el contenido de todas las sesiones, con índice FTS5 de SQLite — encuentra "aquella conversación sobre el refactor X" por lo que se dijo dentro, y en la misma lista **las del equipo** que ya has visto publicadas, marcadas con quién las publicó (ver [Búsqueda global](#búsqueda-global-full-text-)).
 - **Servidor MCP** (`multi-claude-mcp`) sobre ese mismo índice: Claude busca en sus propias sesiones pasadas en vez de volver a deducir lo que ya resolvió (ver [Servidor MCP](#servidor-mcp-multi-claude-mcp)).
@@ -323,6 +325,48 @@ El enlace se guarda contra el **`origin` del repo de trabajo**, no contra la rut
 persona lo configura en su máquina pero *acierta el mismo destino* aunque tenga el proyecto en
 otra carpeta. Y todos los **worktrees** de un repo comparten enlace: enlazas uno y quedan
 enlazados todos.
+
+#### Declarar el repositorio en el propio proyecto
+
+El paso 3 es por persona, y eso convierte una función de equipo en algo con alta *de un jugador*: al
+segundo compañero que llega hay que *decirle* qué repo enlazar, que encuentre `L` y que no se
+equivoque al teclearlo. El proyecto puede declararlo él mismo, en un `.multi-claude.json` commiteado
+en la raíz de su árbol de trabajo:
+
+```json
+{
+  "sessions_repos": [
+    { "server": "Empresa", "repo": "equipo/sesiones", "branch": "main", "label": "Equipo" }
+  ]
+}
+```
+
+Clonas el repo, abres multi-claude y la pestaña ya está. Solo `server` y `repo` son obligatorios;
+`branch` vale `main` por defecto y `label` toma el nombre del repositorio.
+
+**El fichero está versionado, así que es entrada no confiable** — cualquiera con permiso de push
+puede cambiarlo, y lo que configura es *dónde se publican las sesiones*. Una sola regla impide que
+eso sea una vía para sacar transcripciones:
+
+> El repositorio dice **qué repositorio**. Tú dices **qué servidor**, y tienes la credencial.
+
+Por eso una entrada solo puede nombrar un `server` **que ya tengas configurado** (paso 2), y se
+rechaza si intenta traer su propio `host`, `kind` o `path`. Una declaración que nombra un servidor
+que no tienes no resuelve a nada — inerte y visible, nunca a un sitio inesperado. Las carpetas
+locales se rechazan de plano: una ruta es específica de una máquina, así que versionarla no
+significa nada, y respetarla convertiría un fichero de un repositorio en una escritura arbitraria en
+el disco de todo el que lo lea. Las entradas rechazadas se listan en `L`, porque una declaración que
+se descarta en silencio se ve exactamente igual que un repo que no declara nada.
+
+Precedencia, gana la primera que aplique: `$MULTI_CLAUDE_REMOTE_DIR` → **tus propios enlaces** (`L`)
+→ la declaración del repo → el remoto global. Tus enlaces ganan a la declaración porque son una
+decisión que tomaste a propósito, y un fichero de un repositorio no puede pisarla; la declaración es
+el valor por defecto para quien no ha elegido, que es justo el compañero que acaba de clonar.
+Guardar en `L` desengancha el proyecto de la declaración, y el diálogo lo dice, porque a partir de
+ahí los cambios del repo dejan de llegarte.
+
+Publicar no cambia: `u` sigue enseñando qué sube y adónde. Esto decide qué pestañas existen, no qué
+sale de la máquina.
 
 #### Servidores y autenticación
 
@@ -725,6 +769,11 @@ Todo lo que multi-claude guarda por su cuenta (nunca escribe dentro de los jsonl
 Borrar cualquiera de ellos es seguro: se pierde ese estado, no las sesiones. `remote-tokens.json`
 es el único que contiene un secreto, y por eso se crea con permisos de solo-propietario.
 
+Hay un fichero que **no** es de multi-claude y no vive aquí: `.multi-claude.json`, en la raíz del árbol
+de trabajo de un proyecto, que el propio proyecto commitea para declarar sus repositorios de sesiones
+para todo el equipo (ver [Declarar el repositorio en el propio proyecto](#declarar-el-repositorio-en-el-propio-proyecto)).
+Se lee, nunca se escribe.
+
 ## Identidad de un proyecto
 
 El nombre de la carpeta `~/.claude/projects/<encoded>/` es la ruta original con `/` reemplazado por `-`. Esta codificación es ambigua si el path original contenía guiones (`/foo-bar/baz` y `/foo/bar/baz` colisionan).
@@ -737,6 +786,7 @@ El nombre de la carpeta `~/.claude/projects/<encoded>/` es la ruta original con 
 
 - **El índice se puebla en segundo plano al arrancar**, no al entrar a cada proyecto: la primera vez tras actualizar cuesta un momento (0,8 s para 35 sesiones donde se midió) y desde entonces son unos `stat`. Mientras ese primer barrido corre, `?` puede devolver menos de lo que hay.
 - **Payload FTS acotado por sesión**: como máximo las primeras 20.000 líneas del jsonl y 512 KB de texto (`FTS_REINDEX_SCAN_LINES` / `FTS_CONTENT_MAX_CHARS` en `session.py`). Cubre de sobra las sesiones medidas —la más larga tenía 7.555 líneas—, pero una conversación extraordinariamente larga seguiría cortándose por el final. Solo entra el texto de usuario y asistente: las llamadas a herramientas y su salida nunca se indexan, así que no se pueden buscar.
+- **Un repo de sesiones declarado no se ve hasta que configuras su servidor**: `.multi-claude.json` nombra un servidor, y resolver ese nombre contra *tu* configuración es lo que impide que un fichero versionado elija adónde van tus transcripciones. El precio es que un compañero que no haya dado de alta el servidor (paso 2) no ve pestaña ni error en el listado — los rechazos y el motivo están en `L`, que es donde se arregla. Es deliberado: la alternativa es respetar un host que ponga el repo, que es justo lo que la regla existe para evitar.
 - **`file:` solo ve las ediciones hechas con las herramientas de edición de Claude**: `Edit`, `Write`, `MultiEdit` y `NotebookEdit` llevan el path en la llamada, así que quedan registradas. Un fichero cambiado por un comando de shell (`sed -i`, un heredoc, `git checkout`, un formateador pasado por encima del árbol) no, y recuperarlo exigiría parsear shell. Un fichero que solo se **leyó** tampoco cuenta, a propósito. Así que un resultado vacío significa "ninguna edición registrada", no "nadie lo tocó". Se guardan como mucho 2.000 paths distintos por sesión (`TOUCHED_FILES_MAX`): a partir de ahí una fila deja de responder "en qué conversación fue" y pasa a ser una segunda copia del listado del repo.
 - **Proyecto movido de path**: si renombras la carpeta de un proyecto, las sesiones viejas y nuevas siguen siendo dos entradas distintas en `~/.claude/projects/`. No se reconcilian solas — la vieja queda como huérfana y la unes a mano con `m` (merge).
 - **No todos los emuladores saben abrir pestañas desde la CLI**: Ghostty (sus únicas acciones IPC son `new_window` y `toggle_quick_terminal`; upstream cerró la petición de pestañas por CLI como *not planned*), Alacritty, foot y Terminal.app solo pueden abrir ventanas, así que en modo `tab` la sesión acaba en una ventana nueva y la TUI te lo dice. Si quieres paneles o pestañas dentro de Ghostty, mete tmux o zellij por debajo. En kitty y WezTerm la pestaña exige tener el control remoto activado (`allow_remote_control` en `kitty.conf`); si está apagado, mismo fallback.

@@ -1434,6 +1434,134 @@ async def test_project_links_win_over_the_global_remote(
         assert own.path == str(world / "propio")
 
 
+async def test_a_repo_declaration_is_used_when_nothing_is_linked(
+    world: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The point of the whole feature: clone the repo, and the team's tab is already there."""
+    import json
+    from dataclasses import replace
+
+    from multi_claude.project_config import PROJECT_CONFIG_NAME
+    from multi_claude.project_remotes import RemoteServer
+
+    monkeypatch.delenv(REMOTE_DIR_ENV, raising=False)
+    (world / "repo" / PROJECT_CONFIG_NAME).write_text(
+        json.dumps({"sessions_repos": [{"server": "Empresa", "repo": "equipo/sesiones"}]}),
+        encoding="utf-8",
+    )
+    app = ClaudeBrowserApp()
+    async with app.run_test() as pilot:
+        screen = await _open_sessions(pilot)
+        app.update_prefs(
+            replace(
+                app.prefs,
+                remote_servers=[RemoteServer(name="Empresa", kind="gitlab", host="https://git.x")],
+            )
+        )
+        app.project_config.clear()
+        (link,) = app.remote_links_for(screen.project)
+        assert link.repo == "equipo/sesiones"
+        assert link.kind == "gitlab"
+
+
+async def test_a_declaration_naming_an_unconfigured_server_is_inert(
+    world: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The safety property, end to end: the repo says which repository, you say which
+    server. Without the server configured here, the declaration reaches nothing."""
+    import json
+
+    from multi_claude.project_config import PROJECT_CONFIG_NAME
+
+    monkeypatch.delenv(REMOTE_DIR_ENV, raising=False)
+    (world / "repo" / PROJECT_CONFIG_NAME).write_text(
+        json.dumps({"sessions_repos": [{"server": "Desconocido", "repo": "equipo/sesiones"}]}),
+        encoding="utf-8",
+    )
+    app = ClaudeBrowserApp()
+    async with app.run_test() as pilot:
+        screen = await _open_sessions(pilot)
+        app.project_config.clear()
+        assert app.declared_links_for(screen.project) == ()
+        assert app.remote_links_for(screen.project) == ()
+
+
+async def test_own_links_win_over_the_repo_declaration(
+    world: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A file in a repository must not override a choice this person made deliberately."""
+    import json
+
+    from multi_claude.project_config import PROJECT_CONFIG_NAME
+    from multi_claude.project_remotes import RemoteLink
+
+    monkeypatch.delenv(REMOTE_DIR_ENV, raising=False)
+    (world / "repo" / PROJECT_CONFIG_NAME).write_text(
+        json.dumps({"sessions_repos": [{"server": "Empresa", "repo": "equipo/sesiones"}]}),
+        encoding="utf-8",
+    )
+    app = ClaudeBrowserApp()
+    async with app.run_test() as pilot:
+        screen = await _open_sessions(pilot)
+        app.project_config.clear()
+        app.project_remotes.set_all(
+            screen._remote_key(), [RemoteLink(kind="directory", path=str(world / "propio"))]
+        )
+        (own,) = app.remote_links_for(screen.project)
+        assert own.path == str(world / "propio")
+
+
+async def test_the_repo_declaration_wins_over_the_global_remote(
+    world: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """More specific than a machine-wide default, and it is what the team agreed on."""
+    import json
+    from dataclasses import replace
+
+    from multi_claude.project_config import PROJECT_CONFIG_NAME
+    from multi_claude.project_remotes import RemoteServer
+
+    monkeypatch.delenv(REMOTE_DIR_ENV, raising=False)
+    (world / "repo" / PROJECT_CONFIG_NAME).write_text(
+        json.dumps({"sessions_repos": [{"server": "Empresa", "repo": "equipo/sesiones"}]}),
+        encoding="utf-8",
+    )
+    app = ClaudeBrowserApp()
+    async with app.run_test() as pilot:
+        screen = await _open_sessions(pilot)
+        app.update_prefs(
+            replace(
+                app.prefs,
+                remote_kind="directory",
+                remote_path=str(world / "global"),
+                remote_servers=[RemoteServer(name="Empresa", kind="gitlab", host="https://git.x")],
+            )
+        )
+        app.project_config.clear()
+        (link,) = app.remote_links_for(screen.project)
+        assert link.repo == "equipo/sesiones"
+
+
+async def test_the_env_override_beats_a_repo_declaration(
+    world: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """It is a total override, so a throwaway run never touches a real repo."""
+    import json
+
+    from multi_claude.project_config import PROJECT_CONFIG_NAME
+
+    (world / "repo" / PROJECT_CONFIG_NAME).write_text(
+        json.dumps({"sessions_repos": [{"server": "Empresa", "repo": "equipo/sesiones"}]}),
+        encoding="utf-8",
+    )
+    app = ClaudeBrowserApp()
+    async with app.run_test() as pilot:
+        screen = await _open_sessions(pilot)
+        app.project_config.clear()
+        (link,) = app.remote_links_for(screen.project)
+        assert link.kind == "directory"
+
+
 async def test_settings_has_a_tab_per_configuration_area(world: Path) -> None:
     from textual.widgets import TabbedContent
 
