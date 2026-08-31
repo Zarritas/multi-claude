@@ -46,7 +46,10 @@ _KNOWN_PROTOCOL_VERSIONS = frozenset({"2024-11-05", "2025-03-26", "2025-06-18", 
 INSTRUCTIONS = (
     "Searches this machine's Claude Code session history (all projects) by content. "
     "Use search_sessions before re-deriving something the user may have already "
-    "solved with you in another session, then get_session to read that conversation."
+    "solved with you in another session, then get_session to read that conversation. "
+    "When the question is about a file rather than a topic — why is this written the "
+    "way it is, when did we last touch it — sessions_touching_file finds the "
+    "conversation behind the change, which git history does not record."
 )
 
 # JSON-RPC error codes used here (the negative ones are the standard set).
@@ -188,6 +191,57 @@ class SessionTools:
                 f"{f' (branch {session.branch})' if session.branch else ''}\n"
                 f"  {session.message_count} msgs · {format_size(session.size_bytes)} · "
                 f"last activity {format_relative_time(session.mtime)} ago"
+            )
+        lines.append("")
+        lines.append("Read one with get_session, or resume it with `claude --resume <id>`.")
+        return _join(note, "\n".join(lines))
+
+    def sessions_touching_file(self, arguments: dict[str, Any]) -> str:
+        """Which past conversations edited a given file.
+
+        A separate tool rather than a flag on ``search_sessions`` because it is a different
+        question with a different answer set: this one is not full-text at all, and a model
+        that could pass both would treat "matched the words" and "edited the file" as one
+        relevance order when they are not comparable.
+        """
+        wanted = arguments.get("file")
+        if not isinstance(wanted, str) or not wanted.strip():
+            raise ToolArgumentError("`file` is required and must be a non-empty string")
+        limit = _clamp_limit(arguments.get("limit"))
+        query = arguments.get("query")
+        if query is not None and not isinstance(query, str):
+            raise ToolArgumentError("`query` must be a string")
+
+        note = self._ensure_indexed()
+        matched = self.index.sessions_touching(wanted, limit=limit)
+        if query and query.strip():
+            narrowed = {s.session_id for s in self.index.fts_search(query, limit=_MAX_LIMIT)}
+            matched = [s for s in matched if s.session_id in narrowed]
+        results = [s for s in matched if self._find_jsonl(s.session_id, s) is not None]
+
+        if not results:
+            lines = [f"No indexed session edited a file matching {wanted!r}."]
+            if query:
+                lines.append(f"(Narrowed by {query!r} — try without it.)")
+            lines.append(
+                "Only edits made through Claude's own editing tools (Edit, Write, "
+                "MultiEdit, NotebookEdit) are recorded. A file changed by a shell command "
+                "-- `sed -i`, a heredoc, `git checkout` -- leaves no trace here, and "
+                "neither does a file that was only read."
+            )
+            return _join(note, "\n".join(lines))
+
+        lines = [
+            f"{len(results)} session(s) edited a file matching {wanted!r}, most recent first:",
+            "",
+        ]
+        for session in results:
+            lines.append(
+                f"- {self._display_name(session)}\n"
+                f"  id: {session.session_id}\n"
+                f"  project: {session.cwd or '?'}"
+                f"{f' (branch {session.branch})' if session.branch else ''}\n"
+                f"  last activity {format_relative_time(session.mtime)} ago"
             )
         lines.append("")
         lines.append("Read one with get_session, or resume it with `claude --resume <id>`.")
@@ -341,6 +395,42 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "sessions_touching_file",
+        "title": "Find the sessions that edited a file",
+        "description": (
+            "Which past Claude Code conversations edited a given file. Answers 'when did "
+            "we last touch this file, and what were we doing' — the conversation behind a "
+            "change, which git history does not record. Only edits made through Claude's "
+            "editing tools count; a file changed by a shell command leaves no trace, and a "
+            "file that was only read is not a match."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "file": {
+                    "type": "string",
+                    "description": (
+                        "File to look for. A bare name is matched against the basename "
+                        "('index.py'), a term with a separator against the whole path "
+                        "('multi_claude/index.py'). Substrings work."
+                    ),
+                },
+                "query": {
+                    "type": "string",
+                    "description": (
+                        "Optional: narrow the result to sessions whose text also matches "
+                        "these words."
+                    ),
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": f"Max results (1-{_MAX_LIMIT}, default {_DEFAULT_LIMIT}).",
+                },
+            },
+            "required": ["file"],
+        },
+    },
+    {
         "name": "search_team_sessions",
         "title": "Search sessions published by the team",
         "description": (
@@ -431,6 +521,7 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
 def _tool_handlers(tools: SessionTools) -> dict[str, Callable[[dict[str, Any]], str]]:
     return {
         "search_sessions": tools.search_sessions,
+        "sessions_touching_file": tools.sessions_touching_file,
         "search_team_sessions": tools.search_team_sessions,
         "get_session": tools.get_session,
         "list_projects": tools.list_projects,

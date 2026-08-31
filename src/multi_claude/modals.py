@@ -1779,14 +1779,23 @@ class ProjectRemotesModal(ModalScreen["list[RemoteLink] | None"]):
         links: list[RemoteLink],
         inherited: bool = False,
         servers: list[RemoteServer] | None = None,
+        inherited_from: str = "global",
+        problems: list[str] | None = None,
     ) -> None:
         super().__init__()
         self.project_name = project_name
         self._links = list(links)
         self.servers = list(servers or [])
-        # ``inherited`` means what is listed came from the global setting, not from a link of
-        # this project's own. Saving turns it into an explicit link, which is worth saying.
+        # ``inherited`` means what is listed is not a link of this project's own. Saving turns
+        # it into an explicit one, which is worth saying — and *where* it came from changes
+        # what saving means: detaching from a team-wide declaration is a bigger step than
+        # pinning down the global default, because the repo's will keep moving without you.
         self._inherited = inherited
+        self._inherited_from = inherited_from
+        # Declarations the repo made that were refused. Shown here because a dropped entry
+        # looks exactly like a repo that declares nothing, and whoever has to fix the file is
+        # usually not the person reading this screen.
+        self._problems = list(problems or [])
 
     def compose(self) -> ComposeResult:
         from textual.containers import Horizontal
@@ -1798,11 +1807,19 @@ class ProjectRemotesModal(ModalScreen["list[RemoteLink] | None"]):
                 "del repo, así que vale para todos sus worktrees.",
                 classes="hint",
             )
-            if self._inherited:
+            if self._inherited and self._inherited_from == "repo":
+                yield Label(
+                    "Vienen de .multi-claude.json, declarados en el propio repo para todo "
+                    "el equipo. Al guardar dejarán de seguir al repo y pasarán a ser tuyos.",
+                    classes="hint",
+                )
+            elif self._inherited:
                 yield Label(
                     "Ahora usa el remoto global; al guardar tendrá enlaces propios.",
                     classes="hint",
                 )
+            for problem in self._problems:
+                yield Label(f"⚠ .multi-claude.json: {problem}", classes="hint")
 
             yield Label("Enlazados", classes="section")
             yield Label("", id="links-empty", classes="hint")

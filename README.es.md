@@ -29,7 +29,9 @@ multi-claude no compite ahí: lee el mismo registro local de sesiones vivas que 
 
 ## Qué trae
 
-- **Sesiones compartidas** (`L`, `u`): enlaza cada proyecto a uno o varios repositorios de sesiones (GitLab, GitHub o una carpeta), que aparecen como pestañas; publica con `u` y reanuda la sesión de un compañero con `Enter`, sin exportar ni importar nada. Y se buscan **por su contenido sin descargarlas** (ver [Sesiones compartidas](#sesiones-compartidas-l-y-u)).
+- **Sesiones compartidas** (`L`, `u`): enlaza cada proyecto a uno o varios repositorios de sesiones — o deja
+  que el propio proyecto los declare para todo el equipo en un `.multi-claude.json` commiteado, para que quien
+  lo clone tenga la pestaña sin configurar nada (GitLab, GitHub o una carpeta), que aparecen como pestañas; publica con `u` y reanuda la sesión de un compañero con `Enter`, sin exportar ni importar nada. Y se buscan **por su contenido sin descargarlas** (ver [Sesiones compartidas](#sesiones-compartidas-l-y-u)).
 - **Escáner de secretos** antes de publicar: revisa lo que va a subir y, si encuentra algo con pinta de credencial, el diálogo cambia de forma para que publicarlo sea un acto deliberado. Las sesiones sospechosas van marcadas con `⚠` en el listado, y `multi-claude --audit-secrets` revisa el histórico completo (ver [Escáner de secretos](#escáner-de-secretos-al-publicar)).
 - **Búsqueda full-text** (`?`) sobre el contenido de todas las sesiones, con índice FTS5 de SQLite — encuentra "aquella conversación sobre el refactor X" por lo que se dijo dentro, y en la misma lista **las del equipo** que ya has visto publicadas, marcadas con quién las publicó (ver [Búsqueda global](#búsqueda-global-full-text-)).
 - **Servidor MCP** (`multi-claude-mcp`) sobre ese mismo índice: Claude busca en sus propias sesiones pasadas en vez de volver a deducir lo que ya resolvió (ver [Servidor MCP](#servidor-mcp-multi-claude-mcp)).
@@ -37,7 +39,7 @@ multi-claude no compite ahí: lee el mismo registro local de sesiones vivas que 
 - **Carpetas de usuario** (`f`) para organizar proyectos en un árbol propio.
 - **Etiquetas** (`t`) y **colores** por sesión (`c`), con reglas automáticas por branch, antigüedad o actividad (`C`).
 - **Nombres persistentes** (`e`) para sesiones y proyectos, con el `/rename` de Claude y el título que Claude genera solo como fallbacks (ver [Nombres](#nombres-e)).
-- **Filtro incremental** (`/`) con `branch:`, `path:`, `id:`, `tag:`, `author:`, `secrets:` y texto libre fuzzy.
+- **Filtro incremental** (`/`) con `branch:`, `path:`, `id:`, `tag:`, `file:`, `author:`, `secrets:` y texto libre fuzzy.
 - **Preview** (`p`) de los últimos turnos de una sesión sin reanudarla.
 - **Mover, exportar e importar** sesiones entre worktrees o hacia un `.zip` compartible (`m`, `x`, `i`).
 - **Estado en vivo** de cada sesión, leído del registro de Claude Code: con varias corriendo a la vez, ves en la misma tabla cuál trabaja y cuál te está esperando (ver [Estado en vivo](#estado-en-vivo)).
@@ -234,6 +236,7 @@ El tokenizer es `unicode61 remove_diacritics 2`, así que `refactor` encuentra `
 | `path:`   | subcadena sobre el path del proyecto                                |
 | `id:`     | subcadena sobre el id de la sesión                                  |
 | `tag:`    | lista separada por comas; **todas** las etiquetas deben coincidir   |
+| `file:`   | un fichero que la sesión **editó** (`file:index.py`, `file:src/index.py`) |
 | `author:` | subcadena sobre quién publicó la sesión (`author:ana`, o el correo completo) |
 | `secrets:` | veredicto del [escáner de credenciales](#escáner-de-secretos-al-publicar): `yes` / `no` / `unknown` |
 
@@ -244,11 +247,21 @@ Todo lo que no sea `clave:valor` se trata como texto libre y se puntúa con `rap
 - en la pestaña de un **repositorio compartido**, cada fila tiene publicador, así que `author:ana` es "de lo que hay publicado aquí, lo de Ana";
 - en la pestaña **local**, es "de las sesiones que tengo en disco, cuáles vinieron de otra persona" — el caso de una que hidrataste de un compañero. El autor sale del índice de publicadas, que se carga en segundo plano, así que igual que la marca `✓` tarda un instante en aparecer.
 
+`file:` hace la pregunta que el historial de git no puede: **en qué conversación tocamos este fichero**.
+Se responde con las ediciones que hizo Claude a través de sus propias herramientas de edición (`Edit`,
+`Write`, `MultiEdit`, `NotebookEdit`), registradas por sesión cuando el índice la parsea. Un nombre a
+secas casa contra el basename (`file:index.py`), un término con `/` contra el path entero
+(`file:multi_claude/index.py`), y los dos son subcadenas, así que vale un fragmento. Dos cosas que
+**no** ve, y conviene saberlo antes de leer un resultado vacío como "no lo tocó nadie": un fichero
+cambiado por un comando de shell (`sed -i`, un heredoc, `git checkout`) no deja ninguna llamada a
+herramienta que encontrar, y un fichero que solo se **leyó** no cuenta — una sesión que va grepeando
+abre muchísimos más ficheros de los que cambia, e indexar las lecturas ahogaría la señal.
+
 `secrets:` responde con lo que dejó el escáner en el índice, así que en un proyecto recién abierto tarda un momento en tener respuesta. Acepta `yes`/`si`/`true`/`1`, `no`/`false`/`0`/`limpias` y `unknown`/`desconocido`/`?`. Los tres son respuestas distintas y **`unknown` no es un sinónimo de `no`**: una sesión que nadie ha escaneado todavía no es una sesión que salió limpia, y juntarlas convertiría el filtro en una afirmación que no puede hacer. Un valor que no reconoce (`secrets:quizá`) no deja pasar nada, por lo mismo.
 
-> Ojo: `/` filtra las filas que ya están en pantalla. Para buscar **dentro del contenido** de las conversaciones, usa `?` — donde el autor también funciona como texto libre, porque el nombre de quien publicó entra en el índice de las sesiones del equipo.
+> Ojo: `/` filtra las filas que ya están en pantalla. Para buscar **dentro del contenido** de las conversaciones, usa `?` — donde el autor también funciona como texto libre, porque el nombre de quien publicó entra en el índice de las sesiones del equipo, y donde `file:` rinde más, porque cruza todos los proyectos en vez del que tienes en pantalla.
 
-Una clave que la tabla en pantalla no puede responder **no deja pasar nada**, en vez de ignorarse: `author:`, `tag:`, `id:`, `branch:` y `secrets:` son propiedades de una sesión, así que en la lista de **proyectos** filtran a cero. Y `secrets:` tampoco aplica en la pestaña de un repositorio compartido: un manifest no dice nada de credenciales, así que solo las filas ya descargadas tendrían veredicto — media lista respondiendo y media no es peor que decir que la pregunta no aplica. Devolver todos los proyectos se leería como "ninguno tiene ese autor" cuando lo que ocurre es que la pregunta no aplica a ese nivel.
+Una clave que la tabla en pantalla no puede responder **no deja pasar nada**, en vez de ignorarse: `author:`, `tag:`, `id:`, `branch:`, `file:` y `secrets:` son propiedades de una sesión, así que en la lista de **proyectos** filtran a cero. Y ni `secrets:` ni `file:` aplican en la pestaña de un repositorio compartido: un manifest no dice nada de credenciales, así que solo las filas ya descargadas tendrían veredicto — media lista respondiendo y media no es peor que decir que la pregunta no aplica. Devolver todos los proyectos se leería como "ninguno tiene ese autor" cuando lo que ocurre es que la pregunta no aplica a ese nivel.
 
 ### Etiquetas (`t`)
 
@@ -312,6 +325,48 @@ El enlace se guarda contra el **`origin` del repo de trabajo**, no contra la rut
 persona lo configura en su máquina pero *acierta el mismo destino* aunque tenga el proyecto en
 otra carpeta. Y todos los **worktrees** de un repo comparten enlace: enlazas uno y quedan
 enlazados todos.
+
+#### Declarar el repositorio en el propio proyecto
+
+El paso 3 es por persona, y eso convierte una función de equipo en algo con alta *de un jugador*: al
+segundo compañero que llega hay que *decirle* qué repo enlazar, que encuentre `L` y que no se
+equivoque al teclearlo. El proyecto puede declararlo él mismo, en un `.multi-claude.json` commiteado
+en la raíz de su árbol de trabajo:
+
+```json
+{
+  "sessions_repos": [
+    { "server": "Empresa", "repo": "equipo/sesiones", "branch": "main", "label": "Equipo" }
+  ]
+}
+```
+
+Clonas el repo, abres multi-claude y la pestaña ya está. Solo `server` y `repo` son obligatorios;
+`branch` vale `main` por defecto y `label` toma el nombre del repositorio.
+
+**El fichero está versionado, así que es entrada no confiable** — cualquiera con permiso de push
+puede cambiarlo, y lo que configura es *dónde se publican las sesiones*. Una sola regla impide que
+eso sea una vía para sacar transcripciones:
+
+> El repositorio dice **qué repositorio**. Tú dices **qué servidor**, y tienes la credencial.
+
+Por eso una entrada solo puede nombrar un `server` **que ya tengas configurado** (paso 2), y se
+rechaza si intenta traer su propio `host`, `kind` o `path`. Una declaración que nombra un servidor
+que no tienes no resuelve a nada — inerte y visible, nunca a un sitio inesperado. Las carpetas
+locales se rechazan de plano: una ruta es específica de una máquina, así que versionarla no
+significa nada, y respetarla convertiría un fichero de un repositorio en una escritura arbitraria en
+el disco de todo el que lo lea. Las entradas rechazadas se listan en `L`, porque una declaración que
+se descarta en silencio se ve exactamente igual que un repo que no declara nada.
+
+Precedencia, gana la primera que aplique: `$MULTI_CLAUDE_REMOTE_DIR` → **tus propios enlaces** (`L`)
+→ la declaración del repo → el remoto global. Tus enlaces ganan a la declaración porque son una
+decisión que tomaste a propósito, y un fichero de un repositorio no puede pisarla; la declaración es
+el valor por defecto para quien no ha elegido, que es justo el compañero que acaba de clonar.
+Guardar en `L` desengancha el proyecto de la declaración, y el diálogo lo dice, porque a partir de
+ahí los cambios del repo dejan de llegarte.
+
+Publicar no cambia: `u` sigue enseñando qué sube y adónde. Esto decide qué pestañas existen, no qué
+sale de la máquina.
 
 #### Servidores y autenticación
 
@@ -677,6 +732,7 @@ Y a partir de ahí, dentro de cualquier sesión: *"¿habíamos peleado ya con la
 | Herramienta       | Qué hace                                                                       |
 |-------------------|--------------------------------------------------------------------------------|
 | `search_sessions` | búsqueda full-text sobre el **contenido** de todas tus sesiones indexadas; opcionalmente acotada a un `project_path` |
+| `sessions_touching_file` | qué sesiones **editaron** un fichero dado — la conversación detrás de un cambio, que el historial de git no guarda |
 | `search_team_sessions` | las sesiones que publicó el equipo: por su **contenido** cuando su payload de búsqueda ya está descargado, y por los metadatos del manifest mientras no |
 | `get_session`     | metadatos de una sesión y sus últimos N turnos, para leerla sin reanudarla       |
 | `list_projects`   | los proyectos con historial en esta máquina, con su path real y nº de sesiones   |
@@ -713,6 +769,11 @@ Todo lo que multi-claude guarda por su cuenta (nunca escribe dentro de los jsonl
 Borrar cualquiera de ellos es seguro: se pierde ese estado, no las sesiones. `remote-tokens.json`
 es el único que contiene un secreto, y por eso se crea con permisos de solo-propietario.
 
+Hay un fichero que **no** es de multi-claude y no vive aquí: `.multi-claude.json`, en la raíz del árbol
+de trabajo de un proyecto, que el propio proyecto commitea para declarar sus repositorios de sesiones
+para todo el equipo (ver [Declarar el repositorio en el propio proyecto](#declarar-el-repositorio-en-el-propio-proyecto)).
+Se lee, nunca se escribe.
+
 ## Identidad de un proyecto
 
 El nombre de la carpeta `~/.claude/projects/<encoded>/` es la ruta original con `/` reemplazado por `-`. Esta codificación es ambigua si el path original contenía guiones (`/foo-bar/baz` y `/foo/bar/baz` colisionan).
@@ -725,6 +786,8 @@ El nombre de la carpeta `~/.claude/projects/<encoded>/` es la ruta original con 
 
 - **El índice se puebla en segundo plano al arrancar**, no al entrar a cada proyecto: la primera vez tras actualizar cuesta un momento (0,8 s para 35 sesiones donde se midió) y desde entonces son unos `stat`. Mientras ese primer barrido corre, `?` puede devolver menos de lo que hay.
 - **Payload FTS acotado por sesión**: como máximo las primeras 20.000 líneas del jsonl y 512 KB de texto (`FTS_REINDEX_SCAN_LINES` / `FTS_CONTENT_MAX_CHARS` en `session.py`). Cubre de sobra las sesiones medidas —la más larga tenía 7.555 líneas—, pero una conversación extraordinariamente larga seguiría cortándose por el final. Solo entra el texto de usuario y asistente: las llamadas a herramientas y su salida nunca se indexan, así que no se pueden buscar.
+- **Un repo de sesiones declarado no se ve hasta que configuras su servidor**: `.multi-claude.json` nombra un servidor, y resolver ese nombre contra *tu* configuración es lo que impide que un fichero versionado elija adónde van tus transcripciones. El precio es que un compañero que no haya dado de alta el servidor (paso 2) no ve pestaña ni error en el listado — los rechazos y el motivo están en `L`, que es donde se arregla. Es deliberado: la alternativa es respetar un host que ponga el repo, que es justo lo que la regla existe para evitar.
+- **`file:` solo ve las ediciones hechas con las herramientas de edición de Claude**: `Edit`, `Write`, `MultiEdit` y `NotebookEdit` llevan el path en la llamada, así que quedan registradas. Un fichero cambiado por un comando de shell (`sed -i`, un heredoc, `git checkout`, un formateador pasado por encima del árbol) no, y recuperarlo exigiría parsear shell. Un fichero que solo se **leyó** tampoco cuenta, a propósito. Así que un resultado vacío significa "ninguna edición registrada", no "nadie lo tocó". Se guardan como mucho 2.000 paths distintos por sesión (`TOUCHED_FILES_MAX`): a partir de ahí una fila deja de responder "en qué conversación fue" y pasa a ser una segunda copia del listado del repo.
 - **Proyecto movido de path**: si renombras la carpeta de un proyecto, las sesiones viejas y nuevas siguen siendo dos entradas distintas en `~/.claude/projects/`. No se reconcilian solas — la vieja queda como huérfana y la unes a mano con `m` (merge).
 - **No todos los emuladores saben abrir pestañas desde la CLI**: Ghostty (sus únicas acciones IPC son `new_window` y `toggle_quick_terminal`; upstream cerró la petición de pestañas por CLI como *not planned*), Alacritty, foot y Terminal.app solo pueden abrir ventanas, así que en modo `tab` la sesión acaba en una ventana nueva y la TUI te lo dice. Si quieres paneles o pestañas dentro de Ghostty, mete tmux o zellij por debajo. En kitty y WezTerm la pestaña exige tener el control remoto activado (`allow_remote_control` en `kitty.conf`); si está apagado, mismo fallback.
 - **zellij no puede lanzar un comando en una pestaña nueva**: `zellij action new-tab` solo acepta un layout, no un comando, así que el modo `tab` dentro de zellij abre un panel.

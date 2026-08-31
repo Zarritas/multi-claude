@@ -50,6 +50,7 @@ def synthetic_world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         branch="main",
         first_prompt="another beta prompt",
         mtime=2500.0,
+        edited_files=(str(beta_real / "src" / "widget.py"),),
     )
 
     monkeypatch.setattr(discovery_module, "CLAUDE_PROJECTS_DIR", projects_root)
@@ -218,7 +219,7 @@ async def test_the_background_pass_purges_rows_whose_file_is_gone(
 async def test_session_only_filter_keys_match_nothing_in_projects(
     synthetic_world: Path,
 ) -> None:
-    """`author:`/`tag:`/`id:`/`secrets:` ask about a session; over projects, nothing.
+    """`author:`/`tag:`/`id:`/`secrets:`/`file:` ask about a session; over projects, nothing.
 
     Showing every project would read as "none of these has that author" instead of "the
     question does not apply at this level".
@@ -231,10 +232,48 @@ async def test_session_only_filter_keys_match_nothing_in_projects(
         await pilot.press("slash")
         await pilot.pause()
         filter_input = app.screen.query_one("#filter", Input)
-        for query in ("author:ana", "tag:infra", "id:abc", "branch:main", "secrets:yes"):
+        keys = ("author:ana", "tag:infra", "id:abc", "branch:main", "secrets:yes", "file:a.py")
+        for query in keys:
             filter_input.value = query
             await pilot.pause()
             assert app.screen._visible_indices == [], query
+
+
+async def test_file_filter_finds_the_session_that_edited_it(synthetic_world: Path) -> None:
+    """The listing's half of `file:`, end to end: scan, index, filter, rows on screen.
+
+    ``ses-beta-2`` is the only synthetic session with an edit in it, so a correct filter
+    leaves exactly one row and a broken one leaves either zero or both.
+    """
+    from textual.widgets import Input
+
+    app = ClaudeBrowserApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("enter")  # -beta sorts first, and has the two sessions
+        await pilot.pause()
+        await pilot.pause()
+        screen = app.screen
+        assert len(screen._sessions) == 2
+
+        await pilot.press("slash")
+        await pilot.pause()
+        filter_input = screen.query_one("#filter", Input)
+
+        def shown() -> list[str]:
+            return [screen._sessions[i].id for is_remote, i in screen._rows if not is_remote]
+
+        filter_input.value = "file:widget.py"
+        await pilot.pause()
+        assert shown() == ["ses-beta-2"]
+
+        filter_input.value = "file:src/widget.py"
+        await pilot.pause()
+        assert shown() == ["ses-beta-2"]
+
+        filter_input.value = "file:nothing.py"
+        await pilot.pause()
+        assert shown() == []
 
 
 async def test_filter_keeps_focus_on_input_while_typing(synthetic_world: Path) -> None:

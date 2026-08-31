@@ -117,11 +117,12 @@ session manifest (see `remote.py`'s `_READABLE_VERSIONS`).
 - `src/multi_claude/discovery.py` — scans `~/.claude/projects/`, resolves real cwds.
 - `src/multi_claude/session.py` — parses headers from `.jsonl` files cheaply.
 - `src/multi_claude/launcher.py` — dispatches `claude --resume` into a multiplexer pane, a tab of the current window, a new emulator window, or the suspended TUI. Adding an emulator = one entry in `EMULATORS`.
-- `src/multi_claude/index.py` — SQLite cache + FTS5 search.
+- `src/multi_claude/index.py` — SQLite cache + FTS5 search, plus `session_files` behind `file:`. Anything new pulled out of a jsonl means bumping `EXTRACT_VERSION`, or rows written by the older build stay stale forever behind an unchanged mtime — and a filter that silently misses the whole history is worse than one that is not there.
 - `src/multi_claude/screens/` — Textual screens (projects, sessions, search, worktrees).
 - `src/multi_claude/widgets/` — reusable widgets (preview panel).
 - `src/multi_claude/modals.py` — modal dialogs (rename, add project, confirm delete, settings, merge).
 - `src/multi_claude/mcp.py` — MCP server over the index (JSON-RPC 2.0 on stdio, no SDK).
+- `src/multi_claude/project_config.py` — the sessions repos a project declares for its team in a committed `.multi-claude.json`. **Untrusted input**: it is versioned, so anyone who can push can change where sessions get published. An entry may only name a `server` the reader already configured, never carry its own `host`/`kind`/`path`. If you loosen that, you have turned a file in a repository into a way to redirect other people's transcripts.
 - `src/multi_claude/remote.py` — the shared-session transport, and the manifest format. Bumping `VERSION` means adding the new version to `_READABLE_VERSIONS` too: an old manifest must stay readable, or a colleague's published sessions vanish from everyone else's listing on upgrade.
 - `src/multi_claude/publish_guard.py` — decides whether a publish would overwrite someone else's version. Pure: no UI, no network, and it never writes. If you touch it, remember the error directions are not symmetric — failing to warn loses a colleague's turns.
 - `src/multi_claude/secret_scan.py` — pre-publish credential scan. If you add or loosen a rule, re-measure against real transcripts before believing the tests: the rules were calibrated that way, and `tests/test_secret_scan.py` guards both directions (what must be caught, and the ordinary conversation that must not be). Anywhere you print transcript text back at the user, put it through `redact()` first.
