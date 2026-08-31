@@ -37,7 +37,7 @@ multi-claude does not compete there: it reads the same local live-session regist
 - **User folders** (`f`) to organise projects into a tree of your own.
 - **Tags** (`t`) and per-session **colours** (`c`), with automatic rules by branch, age or activity (`C`).
 - **Persistent names** (`e`) for sessions and projects, with Claude's `/rename` and Claude's own generated title as fallbacks (see [Names](#names-e)).
-- **Incremental filter** (`/`) with `branch:`, `path:`, `id:`, `tag:`, `author:`, `secrets:` and fuzzy free text.
+- **Incremental filter** (`/`) with `branch:`, `path:`, `id:`, `tag:`, `file:`, `author:`, `secrets:` and fuzzy free text.
 - **Preview** (`p`) of a session's last turns without resuming it.
 - **Move, export and import** sessions between worktrees or into a shareable `.zip` (`m`, `x`, `i`).
 - **Live status** for each session, read from Claude Code's registry: with several running at once you see in the same table which one is working and which is waiting on you (see [Live status](#live-status)).
@@ -234,6 +234,7 @@ The tokenizer is `unicode61 remove_diacritics 2`, so `refactor` finds `refactori
 | `path:`    | substring against the project path                                  |
 | `id:`      | substring against the session id                                    |
 | `tag:`     | comma-separated list; **every** tag must match                      |
+| `file:`    | a file the session **edited** (`file:index.py`, `file:src/index.py`) |
 | `author:`  | substring against who published the session (`author:ana`, or the full address) |
 | `secrets:` | the [credential scan](#credential-scan-before-publishing)'s verdict: `yes` / `no` / `unknown` |
 
@@ -244,11 +245,21 @@ Anything that is not `key:value` is treated as free text and scored with `rapidf
 - on a **shared repository's** tab every row has a publisher, so `author:ana` means "of what is published here, Ana's";
 - on the **local** tab it means "of the sessions I have on disk, which came from someone else" — the case of one you hydrated from a colleague. The author comes from the published index, loaded in the background, so like the `✓` mark it takes a moment to appear.
 
+`file:` asks the question git history cannot: **in which conversation did we touch this file**. It is
+answered from the edits Claude made through its own editing tools (`Edit`, `Write`, `MultiEdit`,
+`NotebookEdit`), recorded per session when the index parses it. A bare name matches the basename
+(`file:index.py`), a term with a `/` matches the whole path (`file:multi_claude/index.py`), and both
+are substrings, so a fragment works. Two things it does **not** see, and they matter before reading
+an empty result as "nobody touched it": a file changed by a shell command (`sed -i`, a heredoc,
+`git checkout`) leaves no tool call to find, and a file that was only **read** is not a match — a
+session that greps around opens far more files than it changes, and indexing reads would drown the
+signal.
+
 `secrets:` answers from what the scan left in the index, so in a freshly opened project it takes a moment to have an answer. It accepts `yes`/`si`/`true`/`1`, `no`/`false`/`0`/`limpias` and `unknown`/`desconocido`/`?`. The three are distinct answers and **`unknown` is not a synonym for `no`**: a session nobody has scanned yet is not a session that came back clean, and folding them together would turn the filter into a claim it cannot make. A value it does not recognise (`secrets:maybe`) lets nothing through, for the same reason.
 
-> Note: `/` filters the rows already on screen. To search **inside the content** of the conversations, use `?` — where the author also works as free text, because the publisher's name goes into the index of the team's sessions.
+> Note: `/` filters the rows already on screen. To search **inside the content** of the conversations, use `?` — where the author also works as free text, because the publisher's name goes into the index of the team's sessions, and where `file:` is at its most useful, since it crosses every project instead of the one on screen.
 
-A key the table on screen cannot answer **lets nothing through**, rather than being ignored: `author:`, `tag:`, `id:`, `branch:` and `secrets:` are properties of a session, so over the **projects** list they filter to zero. And `secrets:` does not apply on a shared repository's tab either: a manifest says nothing about credentials, so only the already-fetched rows would have a verdict — half a list answering and half not is worse than saying the question does not apply. Returning every project would read as "none of these has that author" when what is happening is that the question does not apply at that level.
+A key the table on screen cannot answer **lets nothing through**, rather than being ignored: `author:`, `tag:`, `id:`, `branch:`, `file:` and `secrets:` are properties of a session, so over the **projects** list they filter to zero. And neither `secrets:` nor `file:` applies on a shared repository's tab: a manifest says nothing about credentials, so only the already-fetched rows would have a verdict — half a list answering and half not is worse than saying the question does not apply. Returning every project would read as "none of these has that author" when what is happening is that the question does not apply at that level.
 
 ### Tags (`t`)
 
@@ -749,6 +760,7 @@ And from then on, inside any session: *"had we already fought this repo's SSH au
 | Tool | What it does |
 |------|--------------|
 | `search_sessions` | full-text search over the **content** of all your indexed sessions; optionally scoped to a `project_path` |
+| `sessions_touching_file` | which sessions **edited** a given file — the conversation behind a change, which git history does not record |
 | `search_team_sessions` | the sessions the team published: by **content** once their search payload is downloaded, and by the manifest's metadata until then |
 | `get_session` | a session's metadata and its last N turns, to read it without resuming |
 | `list_projects` | the projects with history on this machine, with their real path and session count |
@@ -825,6 +837,13 @@ Only when no jsonl is parseable does it fall back to the `-` → `/` heuristic.
   sessions comfortably — the longest had 7,555 lines — but an extraordinarily long conversation would
   still be clipped at the end. Only user and assistant text goes in: tool calls and their output are
   never indexed, so they cannot be searched.
+- **`file:` only sees edits made through Claude's editing tools**: `Edit`, `Write`, `MultiEdit` and
+  `NotebookEdit` carry the path in the tool call, so they are recorded. A file changed by a shell
+  command (`sed -i`, a heredoc, `git checkout`, a formatter run over the tree) does not, and
+  recovering it would mean parsing shell. A file that was only **read** is deliberately not a match
+  either. So an empty result means "no recorded edit", not "nobody touched it". At most 2.000 distinct
+  paths are kept per session (`TOUCHED_FILES_MAX`): past that a row stops being an answer to "which
+  conversation was it" and becomes a second copy of the repo listing.
 - **A project moved to a different path**: renaming a project's folder leaves the old and new sessions
   as two separate entries in `~/.claude/projects/`. They are not reconciled automatically — the old one
   stays orphaned and you merge it by hand with `m`.

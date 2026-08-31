@@ -248,11 +248,11 @@ class ProjectsScreen(Screen[None]):
             if key == "path":
                 if value not in haystack.lower():
                     return False
-            elif key in ("branch", "author", "tag", "id", "secrets"):
+            elif key in ("branch", "author", "tag", "id", "secrets", "file"):
                 # None of these exist at the project level: a branch, an author, tags,
-                # session ids and a credential verdict all belong to a session.
-                # Filtering to nothing says the question does not apply here; ignoring
-                # the key would answer it wrongly.
+                # session ids, a credential verdict and the files a session edited all
+                # belong to a session. Filtering to nothing says the question does not
+                # apply here; ignoring the key would answer it wrongly.
                 return False
         return matches_fuzzy(haystack, query.free_text)
 

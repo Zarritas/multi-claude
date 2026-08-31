@@ -143,6 +143,11 @@ def test_secrets_is_not_answerable_on_a_remote_tab() -> None:
     assert not _remote_matches(_published(), parse_query("secrets:no"))
 
 
+def test_file_is_not_answerable_on_a_remote_tab() -> None:
+    """Same reason as secrets: a manifest does not carry the files its session edited."""
+    assert not _remote_matches(_published(), parse_query("file:index.py"))
+
+
 # --- the Estado column's two vocabularies --------------------------------------------
 
 

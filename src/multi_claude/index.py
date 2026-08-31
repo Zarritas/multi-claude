@@ -1,11 +1,12 @@
 """SQLite-backed index of sessions.
 
 This is a *cache* on top of the `.jsonl` files, not a source of truth. If the DB
-gets corrupted, the next scan rebuilds it from disk. Two tables:
+gets corrupted, the next scan rebuilds it from disk. The tables that matter:
 
 - ``sessions``        — one row per session with header metadata + mtime/size.
 - ``sessions_fts``    — FTS5 virtual table over a concatenation of user prompts
                         and assistant text, used by the global search screen.
+- ``session_files``   — the files each session edited, behind the ``file:`` filter.
 
 The index lives at ``$XDG_DATA_HOME/multi-claude/index.sqlite3``.
 """
@@ -24,6 +25,16 @@ from typing import Any
 def default_index_path() -> Path:
     base = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
     return Path(base) / "multi-claude" / "index.sqlite3"
+
+
+def basename(path: str) -> str:
+    """The last segment of a path, lowercased, whichever separator it uses.
+
+    Not ``Path(path).name``: the index is read on the machine that wrote it, but a session
+    published by a colleague can carry Windows paths onto a Linux box, where ``Path`` would
+    hand back ``C:\\src\\app.py`` whole and hide the basename `file:` is meant to match.
+    """
+    return path.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1].lower()
 
 
 @dataclass(frozen=True)
@@ -149,6 +160,20 @@ CREATE TABLE IF NOT EXISTS session_secrets (
     finding_count INTEGER NOT NULL DEFAULT 0,
     scanned_at   REAL    NOT NULL DEFAULT 0
 );
+
+-- Which files each session edited, so `file:` can answer "in which conversation did we
+-- touch this". It is not in the FTS table on purpose: paths tokenise badly (a tokenizer
+-- splits `src/multi_claude/index.py` into words and then `index` matches prose about an
+-- index), and the question here is not full-text at all — it is a substring over a short
+-- list. `name` is the lowercased basename, indexed, because that is what people type:
+-- `file:index.py` far more often than the whole path.
+CREATE TABLE IF NOT EXISTS session_files (
+    session_id TEXT NOT NULL,
+    path       TEXT NOT NULL,
+    name       TEXT NOT NULL,
+    PRIMARY KEY (session_id, path)
+);
+CREATE INDEX IF NOT EXISTS idx_session_files_name ON session_files(name);
 """
 
 
@@ -158,7 +183,10 @@ CREATE TABLE IF NOT EXISTS session_secrets (
 #
 # 2: the FTS payload caps went from 64 KB / 2.000 lines to 512 KB / 20.000, so every row
 #    written before that is missing the tail of its conversation and has to be reparsed.
-EXTRACT_VERSION = 2
+# 3: the files each session edited are extracted now (``session_files``), and a row written
+#    before that has none — which would read as "this conversation touched nothing" and
+#    make `file:` quietly miss most of the history.
+EXTRACT_VERSION = 3
 
 
 def _ensure_columns(conn: sqlite3.Connection) -> None:
@@ -198,7 +226,12 @@ class SessionIndex:
 
     # -- writes ------------------------------------------------------------- #
 
-    def upsert_session(self, session: IndexedSession, fts_content: str | None = None) -> None:
+    def upsert_session(
+        self,
+        session: IndexedSession,
+        fts_content: str | None = None,
+        touched_files: tuple[str, ...] | None = None,
+    ) -> None:
         with self._lock:
             conn = self._connection()
             conn.execute(
@@ -239,6 +272,18 @@ class SessionIndex:
                     "INSERT INTO sessions_fts(session_id, content) VALUES (?, ?)",
                     (session.session_id, fts_content),
                 )
+            if touched_files is not None:
+                # Replaced wholesale rather than merged: a reparse sees the whole session,
+                # so what it did not find is not there any more (an edit undone by a
+                # rewritten transcript, a file the cap cut off). Merging would accumulate
+                # paths that no version of the conversation touches.
+                conn.execute(
+                    "DELETE FROM session_files WHERE session_id = ?", (session.session_id,)
+                )
+                conn.executemany(
+                    "INSERT OR IGNORE INTO session_files(session_id, path, name) VALUES (?, ?, ?)",
+                    [(session.session_id, path, basename(path)) for path in touched_files],
+                )
 
     def delete_session(self, session_id: str) -> None:
         """Drop every trace of a session, the scan result included.
@@ -251,6 +296,7 @@ class SessionIndex:
             conn.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
             conn.execute("DELETE FROM sessions_fts WHERE session_id = ?", (session_id,))
             conn.execute("DELETE FROM session_secrets WHERE session_id = ?", (session_id,))
+            conn.execute("DELETE FROM session_files WHERE session_id = ?", (session_id,))
 
     # -- reads -------------------------------------------------------------- #
 
@@ -508,6 +554,7 @@ class SessionIndex:
                     conn.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
                     conn.execute("DELETE FROM sessions_fts WHERE session_id = ?", (session_id,))
                     conn.execute("DELETE FROM session_secrets WHERE session_id = ?", (session_id,))
+                    conn.execute("DELETE FROM session_files WHERE session_id = ?", (session_id,))
                 conn.execute("COMMIT")
             except Exception:
                 conn.execute("ROLLBACK")
@@ -593,6 +640,59 @@ class SessionIndex:
                 "SELECT mtime FROM session_secrets WHERE session_id = ?", (session_id,)
             ).fetchone()
         return bool(row) and float(row[0]) == mtime
+
+    def files_for_sessions(self, session_ids: list[str]) -> dict[str, tuple[str, ...]]:
+        """``session_id -> the paths it edited``, for the ids that have any.
+
+        A missing id means "this session edited nothing we could see", which includes a row
+        the current build has not reparsed yet. The listing treats both the same way,
+        because from the filter's side they are the same answer: no match.
+        """
+        if not session_ids:
+            return {}
+        placeholders = ",".join("?" * len(session_ids))
+        with self._lock:
+            conn = self._connection()
+            rows = conn.execute(
+                f"SELECT session_id, path FROM session_files WHERE session_id IN ({placeholders})",
+                session_ids,
+            ).fetchall()
+        found: dict[str, list[str]] = {}
+        for sid, path in rows:
+            found.setdefault(str(sid), []).append(str(path))
+        return {sid: tuple(paths) for sid, paths in found.items()}
+
+    def sessions_touching(self, term: str, limit: int = 200) -> list[IndexedSession]:
+        """Sessions that edited a file matching ``term``, most recent first.
+
+        A term with a separator in it is matched against the whole path, one without
+        against the basename — which is how people ask: `index.py` when they mean the file,
+        `multi_claude/index.py` when they mean *that* one and not some other index.py.
+
+        ``LIKE`` needs its wildcards escaped: a path is exactly the kind of string that
+        contains ``_``, and unescaped that matches any character — `file:test_x.py` would
+        quietly also return `test-x.py`.
+        """
+        term = term.strip()
+        if not term:
+            return []
+        column = "path" if ("/" in term or "\\" in term) else "name"
+        pattern = f"%{_escape_like(term.lower())}%"
+        with self._lock:
+            conn = self._connection()
+            rows = conn.execute(
+                f"""
+                SELECT DISTINCT s.session_id, s.project_dir, s.cwd, s.branch, s.first_prompt,
+                       s.message_count, s.size_bytes, s.mtime, s.jsonl_path, s.embedded_name
+                FROM session_files sf
+                JOIN sessions s ON s.session_id = sf.session_id
+                WHERE lower(sf.{column}) LIKE :pattern ESCAPE '\\'
+                ORDER BY s.mtime DESC
+                LIMIT :limit
+                """,
+                {"pattern": pattern, "limit": limit},
+            ).fetchall()
+        return [_row_to_session(r) for r in rows]
 
     def forget_secret_scan(self, session_id: str) -> None:
         with self._lock:
@@ -710,6 +810,15 @@ def _row_to_remote_session(row: Any) -> IndexedRemoteSession:
         message_count=int(message_count),
         size_bytes=int(size_bytes),
     )
+
+
+def _escape_like(term: str) -> str:
+    """Neutralise LIKE's wildcards in a literal term, for use with ``ESCAPE '\\'``.
+
+    Paths are full of ``_``, which LIKE reads as "any character": unescaped,
+    `file:test_x.py` would also match `test-x.py` and nobody would notice it lying.
+    """
+    return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def _sanitise_fts_query(query: str) -> str:

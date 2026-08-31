@@ -31,6 +31,26 @@ FTS_CONTENT_MAX_CHARS = 512_000
 FTS_REINDEX_SCAN_LINES = 20_000
 RENAME_SCAN_LINES = 50_000  # cap when scanning for the latest /rename in long sessions
 
+# The tool calls that count as having *touched* a file, and which key of their input
+# carries the path. Only writes are here: `file:` answers "in which conversation did we
+# touch this file", and a Read is not touching it — indexing reads would also drown the
+# signal, since a session that greps around opens far more files than it changes.
+#
+# Edits made by running a shell command (`sed -i`, a heredoc, `git checkout`) cannot be
+# recovered from a Bash tool call without parsing shell, so they are not here either. This
+# is a map of what Claude edited *through its own editing tools*, and the README says so.
+TOUCH_TOOLS: dict[str, str] = {
+    "Edit": "file_path",
+    "Write": "file_path",
+    "MultiEdit": "file_path",
+    "NotebookEdit": "notebook_path",
+}
+
+# Ceiling on distinct paths kept per session. A session that rewrites a tree can touch
+# thousands of files, and past a point the row stops being an answer to "which conversation
+# was it" and becomes a second copy of the repo listing.
+TOUCHED_FILES_MAX = 2_000
+
 _RENAME_RE = re.compile(
     r"<local-command-stdout>\s*Session renamed to:\s*(?P<name>.+?)\s*</local-command-stdout>",
     re.DOTALL,
@@ -101,7 +121,7 @@ def _build_session(
 
     header = parse_session_header(jsonl_path)
     line_count = count_lines(jsonl_path)
-    fts_content = extract_fts_content(jsonl_path)
+    indexables = extract_indexables(jsonl_path)
     embedded_name = extract_embedded_name(jsonl_path)
 
     indexed = IndexedSession(
@@ -116,7 +136,11 @@ def _build_session(
         jsonl_path=str(jsonl_path),
         embedded_name=embedded_name,
     )
-    index.upsert_session(indexed, fts_content=fts_content)
+    index.upsert_session(
+        indexed,
+        fts_content=indexables.fts_content,
+        touched_files=indexables.touched_files,
+    )
 
     return Session(
         id=sid,
@@ -229,14 +253,31 @@ def extract_embedded_name(jsonl_path: Path) -> str | None:
     return renamed or ai_title
 
 
-def extract_fts_content(jsonl_path: Path) -> str:
-    """Concatenate user prompts and assistant text into one string for FTS5.
+@dataclass(frozen=True)
+class Indexables:
+    """Everything one pass over a jsonl yields for the index.
 
-    Skips tool_use/tool_result payloads to keep the index small. Caps at
-    ``FTS_CONTENT_MAX_CHARS`` so a runaway session doesn't blow up the DB.
+    The two are extracted together because they are two questions about the same bytes,
+    and a session's jsonl runs to megabytes: reading it twice to answer them separately
+    would double the cost of the very scan that has to stay cheap.
+    """
+
+    fts_content: str
+    touched_files: tuple[str, ...]
+
+
+def extract_indexables(jsonl_path: Path) -> Indexables:
+    """Read a session once and pull out its searchable text and the files it touched.
+
+    The text skips tool_use/tool_result payloads to keep the index small, and caps at
+    ``FTS_CONTENT_MAX_CHARS`` so a runaway session doesn't blow up the DB. Reaching that
+    cap stops the text from growing but **not** the scan: paths cost a few bytes each and
+    the useful answer to "did this conversation touch that file" is about the whole
+    conversation, not its first half. The line cap still applies to both.
     """
     parts: list[str] = []
     total = 0
+    files: dict[str, None] = {}  # insertion-ordered set: first touch wins, dedup is free
     try:
         with jsonl_path.open("r", encoding="utf-8", errors="replace") as f:
             for _ in range(FTS_REINDEX_SCAN_LINES):
@@ -247,16 +288,65 @@ def extract_fts_content(jsonl_path: Path) -> str:
                     event = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+                if len(files) < TOUCHED_FILES_MAX:
+                    for path in _extract_touched_files(event):
+                        files.setdefault(path, None)
+                        if len(files) >= TOUCHED_FILES_MAX:
+                            break
+                if total >= FTS_CONTENT_MAX_CHARS:
+                    continue
                 text = _extract_text_for_fts(event)
                 if not text:
                     continue
                 parts.append(text)
                 total += len(text)
-                if total >= FTS_CONTENT_MAX_CHARS:
-                    break
     except OSError:
-        return ""
-    return "\n".join(parts)[:FTS_CONTENT_MAX_CHARS]
+        return Indexables(fts_content="", touched_files=())
+    return Indexables(
+        fts_content="\n".join(parts)[:FTS_CONTENT_MAX_CHARS],
+        touched_files=tuple(files),
+    )
+
+
+def extract_fts_content(jsonl_path: Path) -> str:
+    """Just the searchable text of a session. See :func:`extract_indexables`."""
+    return extract_indexables(jsonl_path).fts_content
+
+
+def extract_touched_files(jsonl_path: Path) -> tuple[str, ...]:
+    """Just the files a session edited, in the order it first touched them."""
+    return extract_indexables(jsonl_path).touched_files
+
+
+def _extract_touched_files(event: dict[str, object]) -> list[str]:
+    """The paths this event's tool calls wrote to, if any.
+
+    Paths come out exactly as the tool call carried them — absolute, since that is what
+    Claude Code writes — because normalising here would mean guessing a cwd that the event
+    does not necessarily have.
+    """
+    if event.get("type") != "assistant":
+        return []
+    message = event.get("message")
+    if not isinstance(message, dict):
+        return []
+    content = message.get("content")
+    if not isinstance(content, list):
+        return []
+    found: list[str] = []
+    for block in content:
+        if not isinstance(block, dict) or block.get("type") != "tool_use":
+            continue
+        key = TOUCH_TOOLS.get(str(block.get("name")))
+        if key is None:
+            continue
+        payload = block.get("input")
+        if not isinstance(payload, dict):
+            continue
+        path = payload.get(key)
+        if isinstance(path, str) and path.strip():
+            found.append(path.strip())
+    return found
 
 
 def _extract_text_for_fts(event: dict[str, object]) -> str | None:

@@ -29,6 +29,26 @@ from multi_claude.index import IndexedRemoteSession, IndexedSession, default_ind
 _LIMIT_PER_SOURCE = 200
 
 
+def _split_file_term(raw: str) -> tuple[str | None, str]:
+    """Pull a ``file:`` token out of a raw query, returning it and what is left.
+
+    Only ``file:`` is lifted out, not every ``key:`` the listing's filter understands: the
+    rest of the query goes to FTS5 verbatim, exactly as it did before this existed, so a
+    session whose transcript literally says ``branch:main`` keeps being findable that way.
+    The last ``file:`` wins if someone types two, which is what an input box that is
+    re-searched on every keystroke tends to produce.
+    """
+    term: str | None = None
+    rest: list[str] = []
+    for token in raw.split():
+        head, sep, value = token.partition(":")
+        if sep and head.lower() == "file" and value:
+            term = value
+            continue
+        rest.append(token)
+    return term, " ".join(rest)
+
+
 @dataclass(frozen=True)
 class _Hit:
     """One painted row: either a local session or a team-published one."""
@@ -51,7 +71,9 @@ class SearchScreen(Screen[None]):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        yield Input(placeholder="busca en todas las sesiones (FTS5)", id="fts-query")
+        yield Input(
+            placeholder="busca en todas las sesiones · file:x.py por fichero", id="fts-query"
+        )
         yield DataTable(id="fts-results", cursor_type="row", zebra_stripes=True)
         yield Footer()
 
@@ -73,9 +95,24 @@ class SearchScreen(Screen[None]):
     @work(thread=True, exclusive=True, group="fts-search")
     def _search_worker(self, query: str) -> None:
         index = default_index()
-        local = index.fts_search(query, limit=_LIMIT_PER_SOURCE)
-        remote = index.fts_search_remote(query, limit=_LIMIT_PER_SOURCE)
-        self.app.call_from_thread(self._on_search_complete, local, remote)
+        wanted_file, rest = _split_file_term(query)
+        if wanted_file is None:
+            local = index.fts_search(query, limit=_LIMIT_PER_SOURCE)
+            remote = index.fts_search_remote(query, limit=_LIMIT_PER_SOURCE)
+            self.app.call_from_thread(self._on_search_complete, local, remote)
+            return
+
+        # `file:` is a different question from the FTS one — which conversations edited
+        # this file — so it is answered from ``session_files`` and then narrowed by the
+        # text, rather than folded into the MATCH. Ordering follows the files table
+        # (most recent first): FTS rank means nothing for rows that never matched it.
+        local = index.sessions_touching(wanted_file, limit=_LIMIT_PER_SOURCE)
+        if rest:
+            matching = {s.session_id for s in index.fts_search(rest, limit=_LIMIT_PER_SOURCE)}
+            local = [s for s in local if s.session_id in matching]
+        # No team rows: a manifest does not carry the files its session edited, so the
+        # honest answer is none rather than a half-list that looks like the whole one.
+        self.app.call_from_thread(self._on_search_complete, local, [])
 
     def _on_search_complete(
         self, local: list[IndexedSession], remote: list[IndexedRemoteSession]

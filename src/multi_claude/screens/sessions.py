@@ -40,6 +40,7 @@ from multi_claude.discovery import (
 )
 from multi_claude.filtering import (
     FilterQuery,
+    file_matches,
     matches_fuzzy,
     parse_query,
     secrets_verdict,
@@ -224,6 +225,10 @@ class SessionsScreen(Screen[None]):
         # Una sesión ausente del dict es "sin escanear", que no es lo mismo que "limpia":
         # la marca ⚠ solo aparece cuando de verdad se ha mirado.
         self._secret_counts: dict[str, int] = {}
+        # session_id -> the files it edited, from ``session_files`` in the index. Behind
+        # `file:`. An id missing here edited nothing the extractor could see, which is not
+        # the same as "edited nothing" — a shell `sed -i` leaves no tool call to find.
+        self._touched_files: dict[str, tuple[str, ...]] = {}
         self._own_email: str | None = None
         # None while the local tab is selected; otherwise the index into ``_remote_links``.
         self._active_remote: int | None = None
@@ -300,10 +305,20 @@ class SessionsScreen(Screen[None]):
             names_store=self._claude_app.names,
             tags_store=self._claude_app.tags,
         )
-        self.app.call_from_thread(self._on_scan_complete, results)
+        # Read here and not in ``_on_scan_complete``: the scan has just written these rows,
+        # so they are complete, and this keeps the query off the UI thread like every other
+        # index read on this screen.
+        try:
+            touched = default_index().files_for_sessions([s.id for s in results])
+        except sqlite3.Error:
+            touched = {}
+        self.app.call_from_thread(self._on_scan_complete, results, touched)
 
-    def _on_scan_complete(self, sessions: list[Session]) -> None:
+    def _on_scan_complete(
+        self, sessions: list[Session], touched: dict[str, tuple[str, ...]] | None = None
+    ) -> None:
         self._sessions = sessions
+        self._touched_files = touched or {}
         self._marked &= {s.id for s in sessions}
         self._set_live(live_sessions())
         self.sub_title = f"{self.project.name} — {self.project.path}"
@@ -557,6 +572,8 @@ class SessionsScreen(Screen[None]):
             if key == "id" and value not in session.id.lower():
                 return False
             if key == "author" and value not in self._author_of(session).lower():
+                return False
+            if key == "file" and not file_matches(value, self._touched_files.get(session.id, ())):
                 return False
             if key == "secrets":
                 wanted = secrets_wanted(value)
@@ -1722,11 +1739,12 @@ def _remote_matches(remote: RemoteSession, query: FilterQuery) -> bool:
             return False
         if key == "author" and value not in (remote.published_by or "").lower():
             return False
-        if key == "secrets":
-            # Not answerable here. A manifest says nothing about credentials, so only the
-            # rows already fetched would have a verdict — half the list answering and half
-            # not is worse than saying the question does not apply, which is what filtering
-            # to nothing means everywhere else in this filter.
+        if key in ("secrets", "file"):
+            # Not answerable here. A manifest carries neither a credential verdict nor the
+            # files the session edited, so only the rows already fetched would have an
+            # answer — half the list answering and half not is worse than saying the
+            # question does not apply, which is what filtering to nothing means everywhere
+            # else in this filter.
             return False
         if key == "tag":
             needed = [t for t in (s.strip() for s in value.split(",")) if t]

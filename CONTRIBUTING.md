@@ -117,7 +117,7 @@ session manifest (see `remote.py`'s `_READABLE_VERSIONS`).
 - `src/multi_claude/discovery.py` — scans `~/.claude/projects/`, resolves real cwds.
 - `src/multi_claude/session.py` — parses headers from `.jsonl` files cheaply.
 - `src/multi_claude/launcher.py` — dispatches `claude --resume` into a multiplexer pane, a tab of the current window, a new emulator window, or the suspended TUI. Adding an emulator = one entry in `EMULATORS`.
-- `src/multi_claude/index.py` — SQLite cache + FTS5 search.
+- `src/multi_claude/index.py` — SQLite cache + FTS5 search, plus `session_files` behind `file:`. Anything new pulled out of a jsonl means bumping `EXTRACT_VERSION`, or rows written by the older build stay stale forever behind an unchanged mtime — and a filter that silently misses the whole history is worse than one that is not there.
 - `src/multi_claude/screens/` — Textual screens (projects, sessions, search, worktrees).
 - `src/multi_claude/widgets/` — reusable widgets (preview panel).
 - `src/multi_claude/modals.py` — modal dialogs (rename, add project, confirm delete, settings, merge).

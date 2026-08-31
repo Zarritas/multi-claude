@@ -37,7 +37,7 @@ multi-claude no compite ahí: lee el mismo registro local de sesiones vivas que 
 - **Carpetas de usuario** (`f`) para organizar proyectos en un árbol propio.
 - **Etiquetas** (`t`) y **colores** por sesión (`c`), con reglas automáticas por branch, antigüedad o actividad (`C`).
 - **Nombres persistentes** (`e`) para sesiones y proyectos, con el `/rename` de Claude y el título que Claude genera solo como fallbacks (ver [Nombres](#nombres-e)).
-- **Filtro incremental** (`/`) con `branch:`, `path:`, `id:`, `tag:`, `author:`, `secrets:` y texto libre fuzzy.
+- **Filtro incremental** (`/`) con `branch:`, `path:`, `id:`, `tag:`, `file:`, `author:`, `secrets:` y texto libre fuzzy.
 - **Preview** (`p`) de los últimos turnos de una sesión sin reanudarla.
 - **Mover, exportar e importar** sesiones entre worktrees o hacia un `.zip` compartible (`m`, `x`, `i`).
 - **Estado en vivo** de cada sesión, leído del registro de Claude Code: con varias corriendo a la vez, ves en la misma tabla cuál trabaja y cuál te está esperando (ver [Estado en vivo](#estado-en-vivo)).
@@ -234,6 +234,7 @@ El tokenizer es `unicode61 remove_diacritics 2`, así que `refactor` encuentra `
 | `path:`   | subcadena sobre el path del proyecto                                |
 | `id:`     | subcadena sobre el id de la sesión                                  |
 | `tag:`    | lista separada por comas; **todas** las etiquetas deben coincidir   |
+| `file:`   | un fichero que la sesión **editó** (`file:index.py`, `file:src/index.py`) |
 | `author:` | subcadena sobre quién publicó la sesión (`author:ana`, o el correo completo) |
 | `secrets:` | veredicto del [escáner de credenciales](#escáner-de-secretos-al-publicar): `yes` / `no` / `unknown` |
 
@@ -244,11 +245,21 @@ Todo lo que no sea `clave:valor` se trata como texto libre y se puntúa con `rap
 - en la pestaña de un **repositorio compartido**, cada fila tiene publicador, así que `author:ana` es "de lo que hay publicado aquí, lo de Ana";
 - en la pestaña **local**, es "de las sesiones que tengo en disco, cuáles vinieron de otra persona" — el caso de una que hidrataste de un compañero. El autor sale del índice de publicadas, que se carga en segundo plano, así que igual que la marca `✓` tarda un instante en aparecer.
 
+`file:` hace la pregunta que el historial de git no puede: **en qué conversación tocamos este fichero**.
+Se responde con las ediciones que hizo Claude a través de sus propias herramientas de edición (`Edit`,
+`Write`, `MultiEdit`, `NotebookEdit`), registradas por sesión cuando el índice la parsea. Un nombre a
+secas casa contra el basename (`file:index.py`), un término con `/` contra el path entero
+(`file:multi_claude/index.py`), y los dos son subcadenas, así que vale un fragmento. Dos cosas que
+**no** ve, y conviene saberlo antes de leer un resultado vacío como "no lo tocó nadie": un fichero
+cambiado por un comando de shell (`sed -i`, un heredoc, `git checkout`) no deja ninguna llamada a
+herramienta que encontrar, y un fichero que solo se **leyó** no cuenta — una sesión que va grepeando
+abre muchísimos más ficheros de los que cambia, e indexar las lecturas ahogaría la señal.
+
 `secrets:` responde con lo que dejó el escáner en el índice, así que en un proyecto recién abierto tarda un momento en tener respuesta. Acepta `yes`/`si`/`true`/`1`, `no`/`false`/`0`/`limpias` y `unknown`/`desconocido`/`?`. Los tres son respuestas distintas y **`unknown` no es un sinónimo de `no`**: una sesión que nadie ha escaneado todavía no es una sesión que salió limpia, y juntarlas convertiría el filtro en una afirmación que no puede hacer. Un valor que no reconoce (`secrets:quizá`) no deja pasar nada, por lo mismo.
 
-> Ojo: `/` filtra las filas que ya están en pantalla. Para buscar **dentro del contenido** de las conversaciones, usa `?` — donde el autor también funciona como texto libre, porque el nombre de quien publicó entra en el índice de las sesiones del equipo.
+> Ojo: `/` filtra las filas que ya están en pantalla. Para buscar **dentro del contenido** de las conversaciones, usa `?` — donde el autor también funciona como texto libre, porque el nombre de quien publicó entra en el índice de las sesiones del equipo, y donde `file:` rinde más, porque cruza todos los proyectos en vez del que tienes en pantalla.
 
-Una clave que la tabla en pantalla no puede responder **no deja pasar nada**, en vez de ignorarse: `author:`, `tag:`, `id:`, `branch:` y `secrets:` son propiedades de una sesión, así que en la lista de **proyectos** filtran a cero. Y `secrets:` tampoco aplica en la pestaña de un repositorio compartido: un manifest no dice nada de credenciales, así que solo las filas ya descargadas tendrían veredicto — media lista respondiendo y media no es peor que decir que la pregunta no aplica. Devolver todos los proyectos se leería como "ninguno tiene ese autor" cuando lo que ocurre es que la pregunta no aplica a ese nivel.
+Una clave que la tabla en pantalla no puede responder **no deja pasar nada**, en vez de ignorarse: `author:`, `tag:`, `id:`, `branch:`, `file:` y `secrets:` son propiedades de una sesión, así que en la lista de **proyectos** filtran a cero. Y ni `secrets:` ni `file:` aplican en la pestaña de un repositorio compartido: un manifest no dice nada de credenciales, así que solo las filas ya descargadas tendrían veredicto — media lista respondiendo y media no es peor que decir que la pregunta no aplica. Devolver todos los proyectos se leería como "ninguno tiene ese autor" cuando lo que ocurre es que la pregunta no aplica a ese nivel.
 
 ### Etiquetas (`t`)
 
@@ -677,6 +688,7 @@ Y a partir de ahí, dentro de cualquier sesión: *"¿habíamos peleado ya con la
 | Herramienta       | Qué hace                                                                       |
 |-------------------|--------------------------------------------------------------------------------|
 | `search_sessions` | búsqueda full-text sobre el **contenido** de todas tus sesiones indexadas; opcionalmente acotada a un `project_path` |
+| `sessions_touching_file` | qué sesiones **editaron** un fichero dado — la conversación detrás de un cambio, que el historial de git no guarda |
 | `search_team_sessions` | las sesiones que publicó el equipo: por su **contenido** cuando su payload de búsqueda ya está descargado, y por los metadatos del manifest mientras no |
 | `get_session`     | metadatos de una sesión y sus últimos N turnos, para leerla sin reanudarla       |
 | `list_projects`   | los proyectos con historial en esta máquina, con su path real y nº de sesiones   |
@@ -725,6 +737,7 @@ El nombre de la carpeta `~/.claude/projects/<encoded>/` es la ruta original con 
 
 - **El índice se puebla en segundo plano al arrancar**, no al entrar a cada proyecto: la primera vez tras actualizar cuesta un momento (0,8 s para 35 sesiones donde se midió) y desde entonces son unos `stat`. Mientras ese primer barrido corre, `?` puede devolver menos de lo que hay.
 - **Payload FTS acotado por sesión**: como máximo las primeras 20.000 líneas del jsonl y 512 KB de texto (`FTS_REINDEX_SCAN_LINES` / `FTS_CONTENT_MAX_CHARS` en `session.py`). Cubre de sobra las sesiones medidas —la más larga tenía 7.555 líneas—, pero una conversación extraordinariamente larga seguiría cortándose por el final. Solo entra el texto de usuario y asistente: las llamadas a herramientas y su salida nunca se indexan, así que no se pueden buscar.
+- **`file:` solo ve las ediciones hechas con las herramientas de edición de Claude**: `Edit`, `Write`, `MultiEdit` y `NotebookEdit` llevan el path en la llamada, así que quedan registradas. Un fichero cambiado por un comando de shell (`sed -i`, un heredoc, `git checkout`, un formateador pasado por encima del árbol) no, y recuperarlo exigiría parsear shell. Un fichero que solo se **leyó** tampoco cuenta, a propósito. Así que un resultado vacío significa "ninguna edición registrada", no "nadie lo tocó". Se guardan como mucho 2.000 paths distintos por sesión (`TOUCHED_FILES_MAX`): a partir de ahí una fila deja de responder "en qué conversación fue" y pasa a ser una segunda copia del listado del repo.
 - **Proyecto movido de path**: si renombras la carpeta de un proyecto, las sesiones viejas y nuevas siguen siendo dos entradas distintas en `~/.claude/projects/`. No se reconcilian solas — la vieja queda como huérfana y la unes a mano con `m` (merge).
 - **No todos los emuladores saben abrir pestañas desde la CLI**: Ghostty (sus únicas acciones IPC son `new_window` y `toggle_quick_terminal`; upstream cerró la petición de pestañas por CLI como *not planned*), Alacritty, foot y Terminal.app solo pueden abrir ventanas, así que en modo `tab` la sesión acaba en una ventana nueva y la TUI te lo dice. Si quieres paneles o pestañas dentro de Ghostty, mete tmux o zellij por debajo. En kitty y WezTerm la pestaña exige tener el control remoto activado (`allow_remote_control` en `kitty.conf`); si está apagado, mismo fallback.
 - **zellij no puede lanzar un comando en una pestaña nueva**: `zellij action new-tab` solo acepta un layout, no un comando, así que el modo `tab` dentro de zellij abre un panel.

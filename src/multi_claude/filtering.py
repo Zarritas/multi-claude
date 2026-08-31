@@ -10,6 +10,7 @@ Supported keys (where present):
 - ``path:``   — substring match against the project path
 - ``id:``     — substring match against the session id
 - ``tag:``    — comma-separated list, every item must match a session tag
+- ``file:``   — a file the session edited (basename, or the path if it has a separator)
 - ``author:`` — substring match against who published a session
 - ``secrets:`` — ``yes`` / ``no`` / ``unknown``, against the credential scan's verdict
 
@@ -27,9 +28,11 @@ from dataclasses import dataclass, field
 
 from rapidfuzz import fuzz
 
+from multi_claude.index import basename
+
 FUZZY_THRESHOLD = 70
 
-KNOWN_KEYS: frozenset[str] = frozenset({"branch", "path", "id", "tag", "author", "secrets"})
+KNOWN_KEYS: frozenset[str] = frozenset({"branch", "path", "id", "tag", "file", "author", "secrets"})
 
 # What ``secrets:`` accepts, in both languages, mapped onto the three answers the scan can
 # give. "unknown" is a real answer and not a synonym of "no": a session nobody has scanned
@@ -50,6 +53,26 @@ SECRETS_VALUES: dict[str, str] = {
     "desconocido": "unknown",
     "?": "unknown",
 }
+
+
+def file_matches(term: str, paths: tuple[str, ...]) -> bool:
+    """Whether any of ``paths`` is the file ``term`` is asking about.
+
+    A term with a separator in it is compared against the whole path, one without against
+    the basename. That is how the question gets asked: `index.py` when you mean the file,
+    `multi_claude/index.py` when you mean *that* one and not another index.py in the tree.
+    Both are substring matches, so a fragment works and a trailing `.py` is not required.
+
+    Mirrors :meth:`SessionIndex.sessions_touching`, which asks the same question in SQL.
+    Any divergence between the two shows up as the listing and the global search
+    disagreeing about the same session, so they are tested against each other.
+    """
+    term = term.strip().lower().replace("\\", "/")
+    if not term:
+        return False
+    if "/" in term:
+        return any(term in path.replace("\\", "/").lower() for path in paths)
+    return any(term in basename(path) for path in paths)
 
 
 def secrets_wanted(value: str) -> str | None:

@@ -47,8 +47,15 @@ def write_session(
     first_prompt: str = "hola",
     extra_events: int = 5,
     mtime: float | None = None,
+    edited_files: tuple[str, ...] = (),
+    edit_tool: str = "Edit",
 ) -> Path:
-    """Build a minimal jsonl that looks like a real Claude session."""
+    """Build a minimal jsonl that looks like a real Claude session.
+
+    ``edited_files`` appends one assistant turn per path carrying a ``tool_use`` block, the
+    shape ``session_files`` is extracted from. ``edit_tool`` picks which tool made the edit,
+    for the cases that turn on the tool's name (a ``Read`` must not count as a touch).
+    """
     project_dir.mkdir(parents=True, exist_ok=True)
     sid = session_id or str(uuid.uuid4())
     jsonl = project_dir / f"{sid}.jsonl"
@@ -71,6 +78,20 @@ def write_session(
             "sessionId": sid,
         }
     )
+    for path in edited_files:
+        key = "notebook_path" if edit_tool == "NotebookEdit" else "file_path"
+        events.append(
+            {
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "tool_use", "name": edit_tool, "input": {key: path}},
+                    ],
+                },
+                "sessionId": sid,
+            }
+        )
     for i in range(extra_events):
         events.append({"type": "assistant", "seq": i, "sessionId": sid})
     with jsonl.open("w", encoding="utf-8") as f:

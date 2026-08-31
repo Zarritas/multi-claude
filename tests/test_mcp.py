@@ -139,6 +139,7 @@ def test_tools_list_exposes_every_tool_with_a_schema(tools: SessionTools) -> Non
     listed = response["result"]["tools"]
     assert {t["name"] for t in listed} == {
         "search_sessions",
+        "sessions_touching_file",
         "search_team_sessions",
         "get_session",
         "list_projects",
