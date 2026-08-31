@@ -1,5 +1,8 @@
 # multi-claude
 
+[![CI](https://github.com/Zarritas/multi-claude/actions/workflows/ci.yml/badge.svg)](https://github.com/Zarritas/multi-claude/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/Zarritas/multi-claude?label=release)](https://github.com/Zarritas/multi-claude/releases/latest)
+
 El archivo compartido de las sesiones de Claude Code de un equipo: navega los cientos de conversaciones acumuladas de todos tus proyectos —y las de tus compañeros— y reanuda cualquiera desde un punto central.
 
 *[Read this in English](README.md) · esta es la versión en castellano, y la que usa el mismo idioma que la interfaz.*
@@ -789,6 +792,16 @@ uv tool install git+https://github.com/Zarritas/multi-claude.git
 pipx install git+https://github.com/Zarritas/multi-claude.git
 ```
 
+Eso sigue `main`. Para fijar una versión publicada —que es lo que quieres si lo estás poniendo en la
+máquina de un compañero, para que todos habléis del mismo comportamiento— añade el tag:
+
+```bash
+uv tool install git+https://github.com/Zarritas/multi-claude.git@v1.0.0
+```
+
+Cada tag tiene su [release](https://github.com/Zarritas/multi-claude/releases) con las notas y el wheel
+ya construido adjunto. No hay paquete en PyPI.
+
 ### Paso 3 — Lanzarlo
 
 ```bash
@@ -797,12 +810,16 @@ multi-claude
 
 Deberías ver la lista de tus proyectos de Claude. Pulsa `Enter` para entrar en uno, `Enter` otra vez para reanudar una sesión.
 
-Sin argumentos abre la TUI; hay dos cosas que tienen más sentido como informe de una sola vez:
+Sin argumentos abre la TUI; hay cosas que tienen más sentido en la línea de comandos:
 
 ```bash
 multi-claude --audit-secrets    # revisa el histórico buscando credenciales (sale 1 si hay)
+multi-claude --version          # qué tienes instalado — cítalo si reportas un fallo
 multi-claude --help
 ```
+
+`--version` dice `1.0.0` en una instalación desde el tag, y algo como `1.0.0.dev3+gabcdef0` en una
+desde un checkout intermedio, así que las dos nunca se confunden.
 
 > **macOS**: si es la primera vez que multi-claude lanza una sesión en una ventana nueva de iTerm2 / Terminal.app, macOS te pedirá permiso para que `osascript` controle esas apps (System Settings → Privacy & Security → Automation). Acepta una vez y queda persistido.
 >
@@ -815,6 +832,10 @@ uv tool upgrade multi-claude
 # o
 pipx upgrade multi-claude
 ```
+
+Los dos vuelven a resolver desde la fuente con la que instalaste: una instalación que sigue `main` pasa
+al `main` de hoy, y una fijada a un tag se queda donde está — para moverla, reinstala con el tag nuevo.
+Compruébalo con `multi-claude --version`.
 
 ### Desinstalar
 

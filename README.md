@@ -1,5 +1,8 @@
 # multi-claude
 
+[![CI](https://github.com/Zarritas/multi-claude/actions/workflows/ci.yml/badge.svg)](https://github.com/Zarritas/multi-claude/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/Zarritas/multi-claude?label=release)](https://github.com/Zarritas/multi-claude/releases/latest)
+
 A team's shared archive of Claude Code sessions: browse the hundreds of conversations piled up across all your projects — and your colleagues' — and resume any of them from one place.
 
 *[Léeme en español](README.es.md) · the terminal UI itself is in Spanish, as the screenshots show.*
@@ -925,6 +928,16 @@ uv tool install git+https://github.com/Zarritas/multi-claude.git
 pipx install git+https://github.com/Zarritas/multi-claude.git
 ```
 
+That tracks `main`. To pin a released version instead — which is what you want when you are putting it
+on a teammate's machine, so everyone is talking about the same behaviour — add the tag:
+
+```bash
+uv tool install git+https://github.com/Zarritas/multi-claude.git@v1.0.0
+```
+
+Every tag has a [release](https://github.com/Zarritas/multi-claude/releases) with its notes and a
+built wheel attached. There is no PyPI package.
+
 ### Step 3 — Run it
 
 ```bash
@@ -934,12 +947,16 @@ multi-claude
 You should see the list of your Claude projects. `Enter` steps into one, `Enter` again resumes a
 session.
 
-With no arguments it opens the TUI; two things make more sense as a one-shot report:
+With no arguments it opens the TUI; a few things make more sense on the command line:
 
 ```bash
 multi-claude --audit-secrets    # sweep the history for credentials (exits 1 if any)
+multi-claude --version          # what you have installed — quote it in any bug report
 multi-claude --help
 ```
+
+`--version` prints `1.0.0` for an install from a tag, and something like `1.0.0.dev3+gabcdef0` for one
+from a checkout between tags, so the two are never confused.
 
 > **macOS**: the first time multi-claude launches a session in a new iTerm2 / Terminal.app window,
 > macOS asks for permission for `osascript` to control those apps (System Settings → Privacy &
@@ -956,6 +973,10 @@ uv tool upgrade multi-claude
 # or
 pipx upgrade multi-claude
 ```
+
+Both re-resolve from the source you installed from, so an install tracking `main` moves to today's
+`main`, and one pinned to a tag stays where it is — move it by reinstalling with the new tag. Check
+with `multi-claude --version`.
 
 ### Uninstalling
 

@@ -60,7 +60,7 @@ that raise one need spacing or they stack up and cover the table.
 
 ## Two READMEs
 
-`README.md` is English and is what PyPI and GitHub show; `README.es.md` is Spanish and matches the
+`README.md` is English and is what GitHub shows; `README.es.md` is Spanish and matches the
 language of the interface itself. They are the same document, and they drift the moment one is edited
 alone — most of the stale claims found while translating had been true once. **If a change is
 user-visible, update both**, and cross-check the anchors: the two files have different heading slugs,
@@ -78,16 +78,38 @@ If your change is user-visible, add an entry under `## [Unreleased]` in `CHANGEL
 
 ## Cutting a release
 
-Versions come from git tags via `hatch-vcs`. To cut `0.2.0`:
+Versions come from git tags via `hatch-vcs`, and the tag is the only trigger: pushing `v*`
+runs `.github/workflows/release.yml`, which builds the wheel and the sdist and publishes a
+GitHub release with the CHANGELOG's notes attached. To cut `1.1.0`:
 
 ```bash
-# 1. Move the entries under [Unreleased] in CHANGELOG.md into a new [0.2.0] section.
-# 2. Commit.
-git tag v0.2.0
+# 1. Move the entries under [Unreleased] in CHANGELOG.md into a new [1.1.0] section,
+#    dated, and update the link definitions at the foot of the file.
+# 2. Check what the release will say — same script the workflow runs, so this is the
+#    real thing and not an approximation:
+python tools/release_notes.py 1.1.0
+# 3. Commit, tag, push.
+git tag v1.1.0
 git push origin main --tags
 ```
 
-A wheel installed from the tagged commit will report `0.2.0`. An install from a checkout between tags reports something like `0.2.0.dev3+gabcdef0`.
+The workflow reads the notes **before** building anything, so a tag whose version has no
+CHANGELOG section fails there instead of publishing a release with the previous version's
+notes. It also refuses to publish if the built artefact's version does not match the tag,
+which is what a shallow checkout or a tag pushed without its commit looks like.
+
+A wheel installed from the tagged commit reports `1.1.0`; an install from a checkout
+between tags reports something like `1.1.0.dev3+gabcdef0`. `multi-claude --version` prints
+whichever it is — ask for it in any bug report.
+
+There is no PyPI package: installation is from a git URL, which can be pinned to a tag
+(`uv tool install git+https://github.com/Zarritas/multi-claude.git@v1.0.0`). Publishing to
+PyPI would only mean adding a `pypa/gh-action-pypi-publish` step with trusted publishing to
+the same workflow.
+
+**Since 1.0.0, three things are public surface** and cannot break without a major: the key
+bindings, the format of the state files under `~/.config/multi-claude/`, and the published
+session manifest (see `remote.py`'s `_READABLE_VERSIONS`).
 
 ## Architecture cheatsheet
 
@@ -108,6 +130,7 @@ A wheel installed from the tagged commit will report `0.2.0`. An install from a 
 > **Credential-shaped test fixtures must be assembled at runtime** (`"sk" + "_live_…"`), never written out. GitHub's push protection scans the test files too and cannot tell a fixture from the real thing, so a literal one blocks the push of the very test that proves we detect it — which is how this rule was learned. `tests/test_secret_scan.py::_like` is the helper.
 - `tests/conftest.py::write_session` — builder for synthetic Claude project trees on `tmp_path`. Reuse it.
 - `tests/conftest.py::isolated_index` — autouse; points `XDG_DATA_HOME` at `tmp_path` so tests never write into your own index. Don't disable it.
+- `tools/release_notes.py` — pulls one version's body out of the CHANGELOG for the release workflow. Exits 1 when the section is missing, which is what stops a tag from shipping without notes.
 - `tools/demo_world.py` — the synthetic machine the docs images are recorded on.
 - `tools/screenshots.py` — regenerates the README stills from the real screens.
 - `tools/demo.tape` + `tools/demo_app.py` — the README's demo GIF, recorded with vhs.
@@ -116,4 +139,4 @@ A wheel installed from the tagged commit will report `0.2.0`. An install from a 
 
 - The `.jsonl` files are the source of truth. SQLite is a cache; if it diverges, blow it away.
 - Avoid heavy dependencies. `textual` and `rapidfuzz` are the only runtime deps; question anything else.
-- Linux-only for now. macOS detection (iTerm2, Terminal.app) is welcome — pair it with manual testing on a real Mac.
+- Linux is where it is developed and where CI runs, but macOS (iTerm2, Terminal.app via `osascript`) and Windows (Windows Terminal) are implemented and shipped — the classifiers promise all three. Anything touching `launcher.py` or `focus.py` is platform code that CI cannot really exercise: pair it with manual testing on the real OS, and say in the PR which one you tested on.
