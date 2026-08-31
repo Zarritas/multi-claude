@@ -10,11 +10,23 @@ from __future__ import annotations
 import argparse
 import sys
 
+from multi_claude import __version__
+
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="multi-claude",
         description="Navega y reanuda las sesiones de Claude Code. Sin argumentos, abre la TUI.",
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"multi-claude {__version__}",
+        help=(
+            "imprime la versión instalada y sale. La necesita cualquiera que reporte un "
+            "fallo, y distingue una release de un checkout (que se identifica como "
+            "'1.0.0.dev3+g<commit>')"
+        ),
     )
     parser.add_argument(
         "--audit-secrets",
