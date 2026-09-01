@@ -31,4 +31,14 @@ jobs:
       - name: Mypy
         run: mypy src/multi_claude
       - name: Pytest
-        run: pytest -q
+        run: |
+          set -o pipefail
+          if ! pytest -q 2>&1 | tee "${RUNNER_TEMP}/pytest.log"; then
+            # Surface the failures as annotations. Downloading a job log needs admin rights
+            # on the repo, so without this a contributor — or anyone debugging from outside —
+            # can see that CI went red but not what broke, which is most of the information.
+            grep -E "^(FAILED|ERROR)" "${RUNNER_TEMP}/pytest.log" | head -20 | while read -r l; do
+              echo "::error::${l}"
+            done
+            exit 1
+          fi

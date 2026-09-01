@@ -40,7 +40,15 @@ jobs:
           ruff check .
           ruff format --check .
           mypy src/multi_claude
-          pytest -q
+          set -o pipefail
+          if ! pytest -q 2>&1 | tee "${RUNNER_TEMP}/pytest.log"; then
+            # Same reason as in ci.yml: a job log needs admin rights to download, and a
+            # release that stops here is exactly when knowing why matters most.
+            grep -E "^(FAILED|ERROR)" "${RUNNER_TEMP}/pytest.log" | head -20 | while read -r l; do
+              echo "::error::${l}"
+            done
+            exit 1
+          fi
 
       - name: Build the wheel and the sdist
         run: |
