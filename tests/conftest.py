@@ -102,7 +102,7 @@ def write_session(
     return jsonl
 
 
-async def settle(pilot: object, rounds: int = 4) -> None:
+async def settle(pilot: object, rounds: int = 12) -> None:
     """Let every pending worker finish and the UI catch up.
 
     Most waits in the UI tests are a fixed number of ``pause()`` calls, which is a bet on how
@@ -114,7 +114,13 @@ async def settle(pilot: object, rounds: int = 4) -> None:
     Textual can be asked directly, so this waits for the workers instead of guessing at them.
     Several rounds because they chain: scanning a project starts the credential scan, which
     starts the published-sessions lookup, and each new worker only exists once the previous
-    one has handed back.
+    one has handed back — and because a worker that has not started yet is not one
+    ``wait_for_complete`` can see, so the pauses still have to carry that gap.
+
+    The round count is deliberately higher than the longest fixed wait this replaced: a
+    helper meant to remove flakiness must not be weaker than what it took out. When there is
+    an actual condition to wait for — a modal appearing, a file arriving — wait for *that*
+    instead; this is for "let everything in flight land".
     """
     for _ in range(rounds):
         await pilot.app.workers.wait_for_complete()  # type: ignore[attr-defined]

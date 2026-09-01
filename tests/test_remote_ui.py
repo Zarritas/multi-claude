@@ -122,6 +122,23 @@ async def _until(pilot: object, condition: object, tries: int = 200) -> bool:
     return bool(condition())  # type: ignore[operator]
 
 
+async def _wait_for_modal(pilot: object, cls: type, tries: int = 200) -> object:
+    """Wait until a modal of ``cls`` is really on screen, and hand it back.
+
+    Pressing the key that opens it is not the same as it being there: the screen is pushed on
+    a later frame, and what fills it can depend on a worker that has not started yet — so
+    waiting for workers is not enough either, and a fixed count of pauses is the bet that
+    keeps losing on CI. Returns whatever is on screen when it gives up, so the assertion that
+    follows reports what was there instead of a timeout with no context.
+    """
+    for _ in range(tries):
+        screen = pilot.app.screen  # type: ignore[attr-defined]
+        if isinstance(screen, cls):
+            return screen
+        await settle(pilot, rounds=1)
+    return pilot.app.screen  # type: ignore[attr-defined]
+
+
 async def _publish(pilot: object, *, dest_index: int | None = None) -> None:
     """Press u, optionally pick a destination, and confirm."""
     from textual.widgets import RadioButton
@@ -129,16 +146,13 @@ async def _publish(pilot: object, *, dest_index: int | None = None) -> None:
     from multi_claude.modals import PublishModal
 
     await pilot.press("u")  # type: ignore[attr-defined]
-    for _ in range(6):
-        await pilot.pause()  # type: ignore[attr-defined]
-    modal = pilot.app.screen  # type: ignore[attr-defined]
+    modal = await _wait_for_modal(pilot, PublishModal)
     assert isinstance(modal, PublishModal), f"no se abrió el diálogo: {modal}"
     if dest_index is not None:
         modal.query_one(f"#dest-{dest_index}", RadioButton).value = True
         await pilot.pause()  # type: ignore[attr-defined]
     modal.query_one("#publish").press()
-    for _ in range(6):
-        await pilot.pause()  # type: ignore[attr-defined]
+    await settle(pilot)
 
 
 async def _open_remote_tab(pilot: object, screen: SessionsScreen, index: int = 0) -> None:
@@ -147,8 +161,7 @@ async def _open_remote_tab(pilot: object, screen: SessionsScreen, index: int = 0
 
     tabs = screen.query_one("#session-tabs", Tabs)
     tabs.active = f"tab-remote-{index}"
-    for _ in range(30):
-        await pilot.pause()  # type: ignore[attr-defined]
+    await settle(pilot)
 
 
 async def test_publish_writes_the_session_to_the_remote(world: Path) -> None:
