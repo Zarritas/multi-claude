@@ -40,6 +40,7 @@ multi-claude does not compete there: it reads the same local live-session regist
 - **Tags** (`t`) and per-session **colours** (`c`), with automatic rules by branch, age or activity (`C`).
 - **Persistent names** (`e`) for sessions and projects, with Claude's `/rename` and Claude's own generated title as fallbacks (see [Names](#names-e)).
 - **Incremental filter** (`/`) with `branch:`, `path:`, `id:`, `tag:`, `file:`, `author:`, `secrets:` and fuzzy free text.
+- **Read a whole session** (`v`) without resuming it: search inside it, export it to Markdown or copy it — the conversation behind a change, ready to paste into the MR that makes it.
 - **Preview** (`p`) of a session's last turns without resuming it.
 - **Move, export and import** sessions between worktrees or into a shareable `.zip` (`m`, `x`, `i`).
 - **Live status** for each session, read from Claude Code's registry: with several running at once you see in the same table which one is working and which is waiting on you (see [Live status](#live-status)).
@@ -120,6 +121,7 @@ Keys:
 > **Sessions already open**: if the session is running in another terminal (registered as live in `~/.claude/sessions/`), `Enter`/`Shift+Enter` will **not** open a duplicate — multi-claude tries to bring the existing terminal to the front (tmux → X11/XWayland via `xdotool`/`wmctrl` → GNOME Wayland via the [Window Calls](https://github.com/ickyicky/window-calls) extension → macOS via System Events). If no strategy applies in your environment (GNOME Wayland without that extension, say), the launch is blocked with a warning instead of opening a second terminal over the same jsonl.
 - `n` — new session in this project (default mode).
 - `Space` — mark/unmark the current session (multi-selection).
+- `v` — **read the whole conversation** without resuming it: scroll, search inside it, export it to Markdown or copy it (see [Reading a session](#reading-a-session-v)).
 - `p` — show/hide the **preview panel** (see [Preview](#preview-p)).
 - `e` — rename the session (a persistent name of multi-claude's own).
 - `t` — edit the session's **tags**.
@@ -219,6 +221,34 @@ Results are ordered by relevance within each source, yours first: the `rank` of 
 **None of this touches the network.** The team's rows are whatever the last visit to each repository's tab cached: the search screen talks to no remote. Which is why a session a colleague published *after* your last visit to that tab does not show up until you open it again.
 
 The tokenizer is `unicode61 remove_diacritics 2`, so `refactor` finds `refactorización` and accents are irrelevant. The index is a **cache, not the source of truth**: it lives at `$XDG_DATA_HOME/multi-claude/index.sqlite3` (`~/.local/share/...` by default) and if it gets corrupted it is rebuilt on the next scan. Re-listing a remote **replaces** its rows rather than accumulating them, so what someone unpublishes stops being a result.
+
+### Reading a session (`v`)
+
+`v` opens the whole conversation for reading — **without resuming it**. That distinction is
+the point: `Enter` starts a Claude process, puts the transcript into a context that is not
+yours and leaves you sitting inside a conversation you only meant to read. For a colleague's
+session, which is what the shared archive is for, reading is usually all you wanted.
+
+The reader shows every user and assistant turn, oldest first. Tool calls and their output
+stay out, same as everywhere else in this project: what you get is the conversation, not the
+trace.
+
+| Key | What it does |
+|-----|--------------|
+| `/` | search inside the conversation — it **filters to the turns that mention it**, because a long conversation with a colour highlight in it is still a long conversation to scroll |
+| `x` | export to `<session-id>.md` in the current directory |
+| `y` | copy the same Markdown to the clipboard |
+| `Esc` | close the search, or leave the reader |
+
+Exporting exists for one reason: a conversation that explains *why* something is the way it
+is belongs in the merge request that changes it, not in a terminal only you can see. The
+Markdown carries a header with the session id, the checkout and the branch, so it can be
+placed by someone reading it out of context, and each turn goes in as a blockquote rather
+than a fenced block — a transcript is mostly code, and nesting fences would break at the
+first triple backtick.
+
+On a shared repository's tab a row is a manifest until it is fetched, so there is nothing on
+disk to read yet; the reader says so, and `Enter` is what brings it down.
 
 ### Preview (`p`)
 

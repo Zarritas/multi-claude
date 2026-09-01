@@ -83,3 +83,83 @@ def extract_role_and_text(event: dict[str, object]) -> tuple[str, str] | None:
         if chunks:
             return (role, "\n".join(chunks))
     return None
+
+
+# Reading a whole conversation is a different job from previewing its tail, and the caps say
+# so. A session runs to megabytes and the reader has to stay responsive, but truncating a
+# turn at 800 characters — right for a three-line preview panel — would make the reader
+# useless for the thing it exists for: understanding what a colleague actually did.
+FULL_TURN_LIMIT = 2_000
+FULL_TEXT_LIMIT = 20_000
+
+
+def read_all_turns(
+    jsonl_path: Path,
+    *,
+    turn_limit: int = FULL_TURN_LIMIT,
+    text_limit: int = FULL_TEXT_LIMIT,
+) -> list[tuple[str, str]]:
+    """Every user/assistant turn of a session, oldest first.
+
+    Streams the file rather than slurping it: this is called on whole transcripts, and the
+    preview's "read it all into memory and slice the tail" does not scale to the ones that
+    matter here. Tool calls and their output stay out, same as everywhere else — what comes
+    back is the conversation, not the trace.
+    """
+    turns: list[tuple[str, str]] = []
+    try:
+        with jsonl_path.open("r", encoding="utf-8", errors="replace") as f:
+            for raw in f:
+                if len(turns) >= turn_limit:
+                    break
+                try:
+                    event = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                role_and_text = extract_role_and_text(event)
+                if role_and_text is None:
+                    continue
+                role, text = role_and_text
+                text = strip_command_wrappers(text).strip()
+                if not text:
+                    continue
+                if len(text) > text_limit:
+                    text = text[:text_limit].rstrip() + "…"
+                turns.append((role, text))
+    except OSError:
+        return turns
+    return turns
+
+
+def to_markdown(
+    turns: list[tuple[str, str]],
+    *,
+    title: str,
+    session_id: str,
+    cwd: str | None = None,
+    branch: str | None = None,
+) -> str:
+    """Render a conversation as Markdown, ready to paste into an MR or an issue.
+
+    The header carries what someone reading it out of context needs to place it — which
+    session, which checkout, which branch — because the whole point of exporting is that it
+    is read somewhere other than here.
+
+    Turn text goes in as a blockquote rather than fenced: a transcript is full of code
+    blocks, and nesting fences inside a fence breaks at the first triple backtick. Quoting
+    survives anything the conversation contains.
+    """
+    lines = [f"# {title}", ""]
+    meta = [f"`{session_id}`"]
+    if cwd:
+        meta.append(f"en `{cwd}`")
+    if branch:
+        meta.append(f"rama `{branch}`")
+    lines.append(" · ".join(meta))
+    lines.append("")
+    for role, text in turns:
+        lines.append(f"### {'Tú' if role == 'user' else 'Claude'}")
+        lines.append("")
+        lines.extend(f"> {line}" if line.strip() else ">" for line in text.splitlines())
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"

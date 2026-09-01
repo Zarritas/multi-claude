@@ -178,6 +178,7 @@ class SessionsScreen(Screen[None]):
         Binding("d", "delete", "Delete"),
         Binding("D", "cleanup", "Limpieza"),
         Binding("y", "yank_id", "Copiar id"),
+        Binding("v", "read_transcript", "Leer"),
         Binding("p", "toggle_preview", "Preview"),
         Binding("s", "settings", "Settings"),
         Binding("slash", "show_filter", "Filter"),
@@ -1661,6 +1662,35 @@ class SessionsScreen(Screen[None]):
     def action_refresh(self) -> None:
         self._populate()
         self.notify("Sesiones re-escaneadas")
+
+    def action_read_transcript(self) -> None:
+        """Open the whole conversation for reading, without resuming it.
+
+        A row on a remote tab is a manifest until it is fetched, so there is nothing on disk
+        to read: saying so beats opening an empty reader, and `Enter` is the way to get it.
+        """
+        session = self._selected_session()
+        if session is None:
+            if self._selected_remote() is not None:
+                self.notify(
+                    "Esa sesión todavía no está aquí: Enter la descarga",
+                    severity="warning",
+                )
+            return
+        if not session.path.is_file():
+            self.notify("No encuentro el fichero de la sesión", severity="warning")
+            return
+        from multi_claude.screens.transcript import TranscriptScreen
+
+        self.app.push_screen(
+            TranscriptScreen(
+                jsonl_path=session.path,
+                title=session.display_name or session.first_prompt or session.id,
+                session_id=session.id,
+                cwd=session.cwd,
+                branch=session.branch,
+            )
+        )
 
     def action_toggle_preview(self) -> None:
         prefs = self._claude_app.prefs

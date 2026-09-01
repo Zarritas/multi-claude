@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`v` lee la conversación entera sin reanudarla, y se la puede llevar.** El panel de preview (`p`) responde en tres líneas a «¿es esta la sesión que digo?»; faltaba la otra pregunta, la que da sentido al archivo compartido: **qué hicieron ahí**. Hasta ahora la única forma de saberlo era `Enter`, que arranca un proceso de Claude, mete la transcripción en un contexto que no es el tuyo y te deja dentro de una conversación que solo querías leer — un intercambio malo cuando la sesión es de otra persona, que es justo el caso. Ahora `v` abre un lector con todos los turnos, `/` busca dentro y `x` / `y` la exportan a Markdown o la copian.
+
+  La búsqueda **filtra a los turnos que mencionan el término** en vez de resaltarlo: la pregunta es «en qué parte de esta conversación hablamos de X», y una conversación larga con un resaltado dentro sigue siendo una conversación larga por la que hacer scroll. Exportar existe por una razón concreta: una conversación que explica *por qué* algo es como es pertenece al merge request que lo cambia, no a una terminal que solo ves tú. Por eso el Markdown lleva cabecera con id de sesión, checkout y rama —quien lo lea fuera de contexto tiene que poder situarlo— y cada turno va **como cita y no como bloque cercado**: una transcripción es sobre todo código, y anidar cercados se rompe en el primer triple backtick.
+
+  Los topes son distintos a los del preview a propósito: 800 caracteres por turno están bien para tres líneas en un panel y dejan inservible un lector. Y las llamadas a herramientas siguen fuera, igual que en el resto del proyecto: lo que se lee es la conversación, no la traza. En la pestaña de un repositorio compartido una fila es un manifest hasta que se descarga, así que no hay nada que leer todavía y el lector lo dice en vez de abrirse vacío.
+
 ## [1.0.0] - 2026-08-31
 
 Primera versión etiquetada. Casi todo lo que va debajo llevaba meses en `main`; lo que hace el salto a 1.0 no es la lista, sino el compromiso sobre lo que ya hay: **la superficie de teclas, el formato de los ficheros de estado (`~/.config/multi-claude/`) y el del manifest de una sesión publicada son públicos**, y romperlos exige un major. Un manifest escrito por una versión anterior tiene que seguir siendo legible, o las sesiones que un compañero publicó desaparecen del listado de todos los demás al actualizar.

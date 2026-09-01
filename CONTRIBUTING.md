@@ -118,7 +118,8 @@ session manifest (see `remote.py`'s `_READABLE_VERSIONS`).
 - `src/multi_claude/session.py` — parses headers from `.jsonl` files cheaply.
 - `src/multi_claude/launcher.py` — dispatches `claude --resume` into a multiplexer pane, a tab of the current window, a new emulator window, or the suspended TUI. Adding an emulator = one entry in `EMULATORS`.
 - `src/multi_claude/index.py` — SQLite cache + FTS5 search, plus `session_files` behind `file:`. Anything new pulled out of a jsonl means bumping `EXTRACT_VERSION`, or rows written by the older build stay stale forever behind an unchanged mtime — and a filter that silently misses the whole history is worse than one that is not there.
-- `src/multi_claude/screens/` — Textual screens (projects, sessions, search, worktrees).
+- `src/multi_claude/screens/` — Textual screens (projects, sessions, search, worktrees, transcript).
+- `src/multi_claude/transcript.py` — reads turns out of a jsonl and renders them as Markdown. No Textual, so the MCP server and the reader share it.
 - `src/multi_claude/widgets/` — reusable widgets (preview panel).
 - `src/multi_claude/modals.py` — modal dialogs (rename, add project, confirm delete, settings, merge).
 - `src/multi_claude/mcp.py` — MCP server over the index (JSON-RPC 2.0 on stdio, no SDK).

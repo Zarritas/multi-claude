@@ -1433,6 +1433,7 @@ async def test_project_links_win_over_the_global_remote(
         )
         (own,) = app.remote_links_for(screen.project)
         assert own.path == str(world / "propio")
+        await settle(pilot)
 
 
 async def test_a_repo_declaration_is_used_when_nothing_is_linked(
@@ -1463,6 +1464,7 @@ async def test_a_repo_declaration_is_used_when_nothing_is_linked(
         (link,) = app.remote_links_for(screen.project)
         assert link.repo == "equipo/sesiones"
         assert link.kind == "gitlab"
+        await settle(pilot)  # let the screen's workers finish inside the test, not at teardown
 
 
 async def test_a_declaration_naming_an_unconfigured_server_is_inert(
@@ -1485,6 +1487,7 @@ async def test_a_declaration_naming_an_unconfigured_server_is_inert(
         app.project_config.clear()
         assert app.declared_links_for(screen.project) == ()
         assert app.remote_links_for(screen.project) == ()
+        await settle(pilot)
 
 
 async def test_own_links_win_over_the_repo_declaration(
@@ -1510,6 +1513,7 @@ async def test_own_links_win_over_the_repo_declaration(
         )
         (own,) = app.remote_links_for(screen.project)
         assert own.path == str(world / "propio")
+        await settle(pilot)
 
 
 async def test_the_repo_declaration_wins_over_the_global_remote(
@@ -1541,6 +1545,7 @@ async def test_the_repo_declaration_wins_over_the_global_remote(
         app.project_config.clear()
         (link,) = app.remote_links_for(screen.project)
         assert link.repo == "equipo/sesiones"
+        await settle(pilot)
 
 
 async def test_the_env_override_beats_a_repo_declaration(
@@ -1561,6 +1566,7 @@ async def test_the_env_override_beats_a_repo_declaration(
         app.project_config.clear()
         (link,) = app.remote_links_for(screen.project)
         assert link.kind == "directory"
+        await settle(pilot)
 
 
 async def test_settings_has_a_tab_per_configuration_area(world: Path) -> None:

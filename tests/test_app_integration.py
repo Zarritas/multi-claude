@@ -345,6 +345,94 @@ async def test_marking_a_row_leaves_the_cursor_on_it(synthetic_world: Path) -> N
         assert len(screen._marked) == 1
 
 
+async def test_v_opens_the_whole_conversation(synthetic_world: Path) -> None:
+    """Reading a session must not mean resuming it: `Enter` starts a Claude process and
+    drops you inside a conversation you only wanted to read."""
+    from multi_claude.screens.transcript import TranscriptScreen
+
+    app = ClaudeBrowserApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _enter_project(pilot)
+        await pilot.press("v")
+        await settle(pilot)
+
+        screen = app.screen
+        assert isinstance(screen, TranscriptScreen)
+        assert screen._turns, "no se leyó ningún turno"
+
+
+async def test_the_reader_filters_to_the_turns_that_mention_it(synthetic_world: Path) -> None:
+    """A conversation is long: showing only the turns that mention it *is* the answer."""
+    from textual.widgets import Input
+
+    from multi_claude.screens.transcript import TranscriptScreen
+
+    app = ClaudeBrowserApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _enter_project(pilot)
+        await pilot.press("v")
+        await settle(pilot)
+        screen = app.screen
+        assert isinstance(screen, TranscriptScreen)
+
+        await pilot.press("slash")
+        await settle(pilot)
+        screen.query_one("#transcript-filter", Input).value = "no-aparece-en-ningun-turno"
+        await settle(pilot)
+        assert screen._matching("no-aparece-en-ningun-turno") == []
+        assert screen._matching("") == screen._turns
+
+
+async def test_escape_leaves_the_reader(synthetic_world: Path) -> None:
+    from multi_claude.screens.sessions import SessionsScreen
+    from multi_claude.screens.transcript import TranscriptScreen
+
+    app = ClaudeBrowserApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _enter_project(pilot)
+        await pilot.press("v")
+        await settle(pilot)
+        assert isinstance(app.screen, TranscriptScreen)
+        await pilot.press("escape")
+        await settle(pilot)
+        assert isinstance(app.screen, SessionsScreen)
+
+
+async def test_exporting_writes_a_markdown_file(synthetic_world: Path, tmp_path: Path) -> None:
+    """The point of exporting is that it gets read somewhere this app is not."""
+    import os
+
+    from multi_claude.screens.transcript import TranscriptScreen
+
+    out = tmp_path / "salida"
+    out.mkdir()
+    previous = Path.cwd()
+    os.chdir(out)
+    try:
+        app = ClaudeBrowserApp()
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await _enter_project(pilot)
+            await pilot.press("v")
+            await settle(pilot)
+            screen = app.screen
+            assert isinstance(screen, TranscriptScreen)
+            assert screen._turns, "el lector no llegó a cargar la conversación"
+            await pilot.press("x")
+            await settle(pilot)
+    finally:
+        os.chdir(previous)
+
+    written = list(out.glob("*.md"))
+    assert written, "no se escribió ningún .md"
+    body = written[0].read_text(encoding="utf-8")
+    assert body.startswith("# ")
+    assert "### " in body
+
+
 async def test_filter_keeps_focus_on_input_while_typing(synthetic_world: Path) -> None:
     """Regression: filtering on each keystroke must not steal focus from the input."""
     app = ClaudeBrowserApp()

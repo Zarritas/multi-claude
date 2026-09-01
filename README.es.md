@@ -40,6 +40,7 @@ multi-claude no compite ahí: lee el mismo registro local de sesiones vivas que 
 - **Etiquetas** (`t`) y **colores** por sesión (`c`), con reglas automáticas por branch, antigüedad o actividad (`C`).
 - **Nombres persistentes** (`e`) para sesiones y proyectos, con el `/rename` de Claude y el título que Claude genera solo como fallbacks (ver [Nombres](#nombres-e)).
 - **Filtro incremental** (`/`) con `branch:`, `path:`, `id:`, `tag:`, `file:`, `author:`, `secrets:` y texto libre fuzzy.
+- **Leer una sesión entera** (`v`) sin reanudarla: buscar dentro, exportarla a Markdown o copiarla — la conversación detrás de un cambio, lista para pegar en el MR que lo hace.
 - **Preview** (`p`) de los últimos turnos de una sesión sin reanudarla.
 - **Mover, exportar e importar** sesiones entre worktrees o hacia un `.zip` compartible (`m`, `x`, `i`).
 - **Estado en vivo** de cada sesión, leído del registro de Claude Code: con varias corriendo a la vez, ves en la misma tabla cuál trabaja y cuál te está esperando (ver [Estado en vivo](#estado-en-vivo)).
@@ -120,6 +121,7 @@ Atajos:
 > **Sesiones ya abiertas**: si la sesión ya está corriendo en otra terminal (registrada como viva en `~/.claude/sessions/`), `Enter`/`Shift+Enter` **no abren un duplicado** — multi-claude intenta traer al frente la terminal existente (tmux → X11/XWayland vía `xdotool`/`wmctrl` → GNOME Wayland vía la extensión [Window Calls](https://github.com/ickyicky/window-calls) → macOS vía System Events). Si ninguna estrategia aplica en tu entorno (p.ej. GNOME Wayland sin esa extensión), se bloquea el lanzamiento con un aviso en lugar de abrir una segunda terminal sobre el mismo jsonl.
 - `n` — nueva sesión en este proyecto (modo predeterminado).
 - `Espacio` — marcar/desmarcar la sesión actual (multi-selección).
+- `v` — **leer la conversación entera** sin reanudarla: scroll, búsqueda dentro, exportar a Markdown o copiar (ver [Leer una sesión](#leer-una-sesión-v)).
 - `p` — mostrar/ocultar el **panel de preview** (ver [Preview](#preview-p)).
 - `e` — renombrar la sesión (nombre persistente propio de multi-claude).
 - `t` — editar las **etiquetas** de la sesión.
@@ -219,6 +221,35 @@ Los resultados se ordenan por relevancia dentro de cada origen, los tuyos primer
 **Nada de esto toca la red.** Las filas del equipo son las que dejó cacheadas la última visita a la pestaña de cada repositorio: la pantalla de búsqueda no habla con ningún remoto. Por eso una sesión publicada por un compañero *después* de tu última visita a esa pestaña no aparece hasta que la abras de nuevo.
 
 El tokenizer es `unicode61 remove_diacritics 2`, así que `refactor` encuentra `refactorización` y los acentos son indiferentes. El índice es una **caché, no la fuente de verdad**: vive en `$XDG_DATA_HOME/multi-claude/index.sqlite3` (por defecto `~/.local/share/...`) y si se corrompe se reconstruye en el siguiente escaneo. Re-listar un remoto **reemplaza** sus filas en lugar de acumularlas, de modo que lo que alguien despublica deja de ser un resultado.
+
+### Leer una sesión (`v`)
+
+`v` abre la conversación entera para leerla — **sin reanudarla**. La distinción es justo el
+motivo: `Enter` arranca un proceso de Claude, mete la transcripción en un contexto que no es
+el tuyo y te deja dentro de una conversación que solo querías leer. Para la sesión de un
+compañero, que es para lo que existe el archivo compartido, leerla suele ser todo lo que
+querías.
+
+El lector muestra todos los turnos de usuario y de Claude, del más antiguo al más reciente.
+Las llamadas a herramientas y su salida se quedan fuera, igual que en el resto del proyecto:
+lo que ves es la conversación, no la traza.
+
+| Tecla | Qué hace |
+|-------|----------|
+| `/` | busca dentro de la conversación — **filtra a los turnos que la mencionan**, porque una conversación larga con un resaltado de color dentro sigue siendo una conversación larga por la que hacer scroll |
+| `x` | exporta a `<id-de-sesión>.md` en el directorio actual |
+| `y` | copia ese mismo Markdown al portapapeles |
+| `Esc` | cierra la búsqueda, o sale del lector |
+
+Exportar existe por una razón: una conversación que explica *por qué* algo es como es
+pertenece al merge request que lo cambia, no a una terminal que solo ves tú. El Markdown
+lleva una cabecera con el id de sesión, el checkout y la rama, para que quien lo lea fuera de
+contexto pueda situarlo, y cada turno va como cita en vez de como bloque cercado — una
+transcripción es sobre todo código, y anidar cercados se rompería en el primer triple
+backtick.
+
+En la pestaña de un repositorio compartido, una fila es un manifest hasta que se descarga, así
+que todavía no hay nada en disco que leer; el lector lo dice, y `Enter` es lo que la trae.
 
 ### Preview (`p`)
 
