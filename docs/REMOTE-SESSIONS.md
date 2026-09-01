@@ -96,7 +96,7 @@ blobs/<uuid>/tool-results/*.txt.gz
   "published_by": "<email>",
   "cwd": "/home/quien-la-grabo/WS/repo",
   "branch": "fl-v16-9269",
-  "git_remote": "git@git.factorlibre.com:odoo-16/fl-v16.git",
+  "git_remote": "git@git.empresa.com:grupo/proyecto.git",
   "git_head": "abc1234",
   "display_name": "...",
   "tags": ["..."],

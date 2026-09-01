@@ -38,9 +38,24 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--stats",
+        action="store_true",
+        help=(
+            "resume tiempo activo y tokens por proyecto y sale. El tiempo descuenta los "
+            "huecos de más de 5 minutos; los tokens van separados porque los de caché son "
+            "de otro orden. No da una cifra en euros a propósito: depende del modelo y del "
+            "plan, y una que no cuadre con la factura es peor que ninguna."
+        ),
+    )
+    parser.add_argument(
+        "--since",
+        metavar="AAAA-MM-DD",
+        help="con --stats, cuenta solo las sesiones con actividad desde esa fecha",
+    )
+    parser.add_argument(
         "--project",
         metavar="RUTA",
-        help="con --audit-secrets, limita la revisión a ese proyecto y lo que hay debajo",
+        help=("con --audit-secrets o --stats, limita a ese proyecto y lo que hay debajo"),
     )
     parser.add_argument(
         "--verbose",
@@ -61,8 +76,20 @@ def main(argv: list[str] | None = None) -> int:
         # Exit 1 when something was found, so a shell or a hook can act on it.
         return 1 if report.affected else 0
 
+    if args.stats:
+        # Aliased: audit.py exports a format_report too, and both land in this function.
+        from multi_claude.usage_report import build_report
+        from multi_claude.usage_report import format_report as format_usage
+
+        print(format_usage(build_report(since=args.since or "", only_path=args.project)))
+        return 0
+
+    if args.since:
+        print("--since solo vale con --stats", file=sys.stderr)
+        return 2
+
     if args.project or args.verbose:
-        print("--project y --verbose solo valen con --audit-secrets", file=sys.stderr)
+        print("--project y --verbose solo valen con --audit-secrets o --stats", file=sys.stderr)
         return 2
 
     from multi_claude.app import ClaudeBrowserApp

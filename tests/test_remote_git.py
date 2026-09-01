@@ -68,7 +68,7 @@ def test_the_api_host_is_reduced_to_a_git_host() -> None:
 
 
 def test_an_ssh_server_needs_no_api_url_to_be_usable() -> None:
-    server = RemoteServer(name="FactorLibre", host="https://git.empresa.com", auth="ssh")
+    server = RemoteServer(name="Empresa", host="https://git.empresa.com", auth="ssh")
     assert server.uses_ssh
     assert server.is_configured
     assert "ssh" in server.summary()
@@ -324,10 +324,8 @@ def test_github_greeting_is_read_as_success(monkeypatch: pytest.MonkeyPatch) -> 
 def test_gitlab_greeting_is_read_as_success(monkeypatch: pytest.MonkeyPatch) -> None:
     from multi_claude.remote_git import probe_ssh_access
 
-    _fake_ssh(monkeypatch, stderr="Welcome to GitLab, @jesus.lorenzo!", code=0)
-    assert probe_ssh_access("git.factorlibre.com") == (
-        "autenticado en git.factorlibre.com como jesus.lorenzo"
-    )
+    _fake_ssh(monkeypatch, stderr="Welcome to GitLab, @ana!", code=0)
+    assert probe_ssh_access("git.empresa.com") == ("autenticado en git.empresa.com como ana")
 
 
 def test_a_wrong_ssh_user_is_named_in_the_error(monkeypatch: pytest.MonkeyPatch) -> None:

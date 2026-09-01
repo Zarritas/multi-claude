@@ -1163,7 +1163,7 @@ async def test_linking_a_repo_only_asks_what_is_repo_specific(world: Path) -> No
     from multi_claude.modals import RepoLinkModal
     from multi_claude.project_remotes import RemoteLink, RemoteServer
 
-    servers = [RemoteServer(name="FactorLibre", kind="gitlab", host="https://git.empresa.com")]
+    servers = [RemoteServer(name="Empresa", kind="gitlab", host="https://git.empresa.com")]
     app = ClaudeBrowserApp()
     async with app.run_test() as pilot:
         await pilot.pause()
@@ -1177,7 +1177,7 @@ async def test_linking_a_repo_only_asks_what_is_repo_specific(world: Path) -> No
         await pilot.pause()
 
         result = modal.collect()
-        assert result.server == "FactorLibre"
+        assert result.server == "Empresa"
         assert result.kind == "gitlab"
         assert result.host == "https://git.empresa.com"
         assert result.repo == "grupo/sesiones"  # trailing slashes stripped
@@ -1201,7 +1201,7 @@ async def test_a_configured_server_appears_when_linking_a_repo(world: Path) -> N
             replace(
                 app.prefs,
                 remote_servers=[
-                    RemoteServer(name="FactorLibre", host="https://git.factorlibre.com"),
+                    RemoteServer(name="Empresa", host="https://git.empresa.com"),
                     RemoteServer(name="GitHub propio", kind="github"),
                 ],
             )
@@ -1217,7 +1217,7 @@ async def test_a_configured_server_appears_when_linking_a_repo(world: Path) -> N
         link_modal = app.screen
         assert isinstance(link_modal, RepoLinkModal)
         offered = [str(button.label) for button in link_modal.query(RadioButton)]
-        assert any("FactorLibre" in text for text in offered)
+        assert any("Empresa" in text for text in offered)
         assert any("GitHub propio" in text for text in offered)
         assert any("Carpeta compartida" in text for text in offered)
 
@@ -1239,7 +1239,7 @@ async def test_the_token_never_reaches_the_config_file(
     app = ClaudeBrowserApp()
     async with app.run_test() as pilot:
         await pilot.pause()
-        modal = ServerEditModal(RemoteServer(name="FactorLibre"))
+        modal = ServerEditModal(RemoteServer(name="Empresa"))
         app.push_screen(modal)
         await settle(pilot)
         modal.query_one("#server-token", Input).value = "glpat-muy-secreto"
@@ -1259,7 +1259,7 @@ async def test_the_token_never_reaches_the_config_file(
         await pilot.pause()
 
         assert "glpat-muy-secreto" not in config_path().read_text(encoding="utf-8")
-        assert TokenStore().get("FactorLibre") == "glpat-muy-secreto"
+        assert TokenStore().get("Empresa") == "glpat-muy-secreto"
         assert stat.S_IMODE(token_path().stat().st_mode) == 0o600
 
 
@@ -1271,7 +1271,7 @@ async def test_an_empty_token_field_keeps_the_stored_one(world: Path) -> None:
     app = ClaudeBrowserApp()
     async with app.run_test() as pilot:
         await pilot.pause()
-        modal = ServerEditModal(RemoteServer(name="FactorLibre"), has_token=True)
+        modal = ServerEditModal(RemoteServer(name="Empresa"), has_token=True)
         app.push_screen(modal)
         await settle(pilot)
         assert modal.typed_token() is None  # None means "leave it alone"
@@ -1699,7 +1699,7 @@ async def test_a_local_row_says_when_it_came_from_someone_else(world: Path) -> N
         RemoteSession(
             session_id="de-ana",
             published_at="2026-07-28T09:00:00+00:00",
-            published_by="ana@factorlibre.com",
+            published_by="ana@example.com",
             size_bytes=(other / "de-ana.jsonl").stat().st_size,
         ),
         other,

@@ -186,7 +186,9 @@ CREATE INDEX IF NOT EXISTS idx_session_files_name ON session_files(name);
 # 3: the files each session edited are extracted now (``session_files``), and a row written
 #    before that has none — which would read as "this conversation touched nothing" and
 #    make `file:` quietly miss most of the history.
-EXTRACT_VERSION = 3
+# 4: token counts and active time are pulled out too, and a row from before reports zero —
+#    which in a total would silently under-report the work instead of admitting it is unknown.
+EXTRACT_VERSION = 4
 
 
 def _ensure_columns(conn: sqlite3.Connection) -> None:
@@ -198,6 +200,20 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
         # Default 0 = "extracted before this was tracked", so every pre-existing row
         # looks stale and gets reparsed on its next scan.
         conn.execute("ALTER TABLE sessions ADD COLUMN extract_version INTEGER NOT NULL DEFAULT 0")
+    # What a session spent, as its own events reported it. Four token counts and not one
+    # total: cache reads run three orders of magnitude above everything else, so a single
+    # number would be a cache-read count under a misleading name.
+    for column, kind in (
+        ("input_tokens", "INTEGER NOT NULL DEFAULT 0"),
+        ("output_tokens", "INTEGER NOT NULL DEFAULT 0"),
+        ("cache_read_tokens", "INTEGER NOT NULL DEFAULT 0"),
+        ("cache_creation_tokens", "INTEGER NOT NULL DEFAULT 0"),
+        ("active_seconds", "INTEGER NOT NULL DEFAULT 0"),
+        ("first_at", "TEXT NOT NULL DEFAULT ''"),
+        ("last_at", "TEXT NOT NULL DEFAULT ''"),
+    ):
+        if column not in existing:
+            conn.execute(f"ALTER TABLE sessions ADD COLUMN {column} {kind}")
 
 
 class SessionIndex:
@@ -231,6 +247,7 @@ class SessionIndex:
         session: IndexedSession,
         fts_content: str | None = None,
         touched_files: tuple[str, ...] | None = None,
+        usage: object | None = None,
     ) -> None:
         with self._lock:
             conn = self._connection()
@@ -271,6 +288,26 @@ class SessionIndex:
                 conn.execute(
                     "INSERT INTO sessions_fts(session_id, content) VALUES (?, ?)",
                     (session.session_id, fts_content),
+                )
+            if usage is not None:
+                # Duck-typed rather than imported: session.py imports this module, so taking
+                # its Usage as a type here would close the loop.
+                conn.execute(
+                    """
+                    UPDATE sessions SET input_tokens=?, output_tokens=?, cache_read_tokens=?,
+                        cache_creation_tokens=?, active_seconds=?, first_at=?, last_at=?
+                    WHERE session_id=?
+                    """,
+                    (
+                        getattr(usage, "input_tokens", 0),
+                        getattr(usage, "output_tokens", 0),
+                        getattr(usage, "cache_read_tokens", 0),
+                        getattr(usage, "cache_creation_tokens", 0),
+                        getattr(usage, "active_seconds", 0),
+                        getattr(usage, "first_at", ""),
+                        getattr(usage, "last_at", ""),
+                        session.session_id,
+                    ),
                 )
             if touched_files is not None:
                 # Replaced wholesale rather than merged: a reparse sees the whole session,
@@ -693,6 +730,27 @@ class SessionIndex:
                 {"pattern": pattern, "limit": limit},
             ).fetchall()
         return [_row_to_session(r) for r in rows]
+
+    def usage_rows(self) -> list[tuple[str, str, int, int, int, int, int, str]]:
+        """``(session_id, project_dir, in, out, cache_read, cache_creation, active_s, last_at)``.
+
+        Raw rows for the report to group however it likes. Sessions the current build has not
+        reparsed yet report zeros, which is why the report says how many of those there are
+        instead of quietly adding nothing to the totals.
+        """
+        with self._lock:
+            conn = self._connection()
+            rows = conn.execute(
+                """
+                SELECT session_id, project_dir, input_tokens, output_tokens, cache_read_tokens,
+                       cache_creation_tokens, active_seconds, last_at
+                FROM sessions
+                """
+            ).fetchall()
+        return [
+            (str(a), str(b), int(c), int(d), int(e), int(f), int(g), str(h or ""))
+            for a, b, c, d, e, f, g, h in rows
+        ]
 
     def forget_secret_scan(self, session_id: str) -> None:
         with self._lock:

@@ -7,11 +7,28 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    # bash everywhere, Windows included (it has Git Bash): the Pytest step below is a shell
+    # pipeline with `tee`, `grep` and `pipefail`, and the default shell on Windows runners is
+    # PowerShell, where none of that parses.
+    defaults:
+      run:
+        shell: bash
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.11", "3.12"]
+        # The classifiers promise Linux, macOS and Windows, and launcher.py and focus.py are
+        # ~1.200 lines of platform-specific code — osascript, wt.exe, xdotool — that only
+        # Linux was ever exercising. Not the full grid: every Python on Linux, because that
+        # is where the version differences showed up, plus one job per other OS, because
+        # what those catch is "does it import and does the platform code hold", not a
+        # version difference. A full 3x3 would triple the bill for the same information.
+        include:
+          - {os: ubuntu-latest, python-version: "3.10"}
+          - {os: ubuntu-latest, python-version: "3.11"}
+          - {os: ubuntu-latest, python-version: "3.12"}
+          - {os: macos-latest, python-version: "3.12"}
+          - {os: windows-latest, python-version: "3.12"}
     steps:
       - uses: actions/checkout@v4
         with:

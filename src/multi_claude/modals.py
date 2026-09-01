@@ -1165,7 +1165,7 @@ class ServerEditModal(ModalScreen["RemoteServer | None"]):
             with VerticalScroll(id="server-body"):
                 yield Label("Nombre", classes="section")
                 yield Input(
-                    value=self._initial.name, placeholder="FactorLibre GitLab", id="server-name"
+                    value=self._initial.name, placeholder="Empresa GitLab", id="server-name"
                 )
 
                 yield Label("Proveedor", classes="section")

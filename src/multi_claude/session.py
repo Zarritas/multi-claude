@@ -12,7 +12,8 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 from multi_claude.index import IndexedSession, SessionIndex, default_index
@@ -50,6 +51,12 @@ TOUCH_TOOLS: dict[str, str] = {
 # thousands of files, and past a point the row stops being an answer to "which conversation
 # was it" and becomes a second copy of the repo listing.
 TOUCHED_FILES_MAX = 2_000
+
+# A gap longer than this between two events is not thinking, it is the person having left.
+# Five minutes is the same threshold the timesheet skill settled on, and the point of
+# subtracting the gaps at all is that "first event to last event" on a session someone picks
+# up after lunch reports nine hours of work that nobody did.
+IDLE_GAP_SECONDS = 300
 
 _RENAME_RE = re.compile(
     r"<local-command-stdout>\s*Session renamed to:\s*(?P<name>.+?)\s*</local-command-stdout>",
@@ -140,6 +147,7 @@ def _build_session(
         indexed,
         fts_content=indexables.fts_content,
         touched_files=indexables.touched_files,
+        usage=indexables.usage,
     )
 
     return Session(
@@ -254,16 +262,51 @@ def extract_embedded_name(jsonl_path: Path) -> str | None:
 
 
 @dataclass(frozen=True)
+class Usage:
+    """What a session spent, as its own events report it.
+
+    Tokens and wall-clock only — **no money**. A price depends on the model and the plan,
+    both change, and a Max or Pro subscription includes usage that no per-token figure
+    describes. A number in euros that does not match the bill is worse than no number, the
+    same reason the credential scan says "unknown" instead of guessing "no".
+    """
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_creation_tokens: int = 0
+    #: First and last event timestamps (ISO-8601 strings, as written). Empty when absent.
+    first_at: str = ""
+    last_at: str = ""
+    #: Seconds of actual work: the gaps between consecutive events, minus the ones longer
+    #: than ``IDLE_GAP_SECONDS``, which are lunch and not thinking.
+    active_seconds: int = 0
+
+    @property
+    def fresh_tokens(self) -> int:
+        """Input plus output — what was actually sent and generated.
+
+        Deliberately **not** a grand total with the cache folded in. Measured on real
+        sessions, ``cache_read`` runs to hundreds of millions and dwarfs everything else by
+        three orders of magnitude, so a single "total" is a cache-read count wearing a
+        misleading label: it would read as an enormous spend when cache reads are the
+        cheapest thing on the bill. The four numbers are reported side by side instead.
+        """
+        return self.input_tokens + self.output_tokens
+
+
+@dataclass(frozen=True)
 class Indexables:
     """Everything one pass over a jsonl yields for the index.
 
-    The two are extracted together because they are two questions about the same bytes,
-    and a session's jsonl runs to megabytes: reading it twice to answer them separately
-    would double the cost of the very scan that has to stay cheap.
+    They are extracted together because they are questions about the same bytes, and a
+    session's jsonl runs to megabytes: reading it once per question would multiply the cost
+    of the very scan that has to stay cheap.
     """
 
     fts_content: str
     touched_files: tuple[str, ...]
+    usage: Usage = field(default_factory=Usage)
 
 
 def extract_indexables(jsonl_path: Path) -> Indexables:
@@ -278,6 +321,10 @@ def extract_indexables(jsonl_path: Path) -> Indexables:
     parts: list[str] = []
     total = 0
     files: dict[str, None] = {}  # insertion-ordered set: first touch wins, dedup is free
+    tokens = [0, 0, 0, 0]  # input, output, cache read, cache creation
+    first_at = last_at = ""
+    active = 0.0
+    previous: float | None = None
     try:
         with jsonl_path.open("r", encoding="utf-8", errors="replace") as f:
             for _ in range(FTS_REINDEX_SCAN_LINES):
@@ -288,6 +335,23 @@ def extract_indexables(jsonl_path: Path) -> Indexables:
                     event = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+                stamp = event.get("timestamp")
+                if isinstance(stamp, str) and stamp:
+                    # ISO-8601 with a fixed offset sorts lexicographically, which is all the
+                    # ordering that is needed here — and avoids parsing 20.000 datetimes to
+                    # find two of them.
+                    if not first_at or stamp < first_at:
+                        first_at = stamp
+                    if stamp > last_at:
+                        last_at = stamp
+                    seconds = _epoch(stamp)
+                    if seconds is not None:
+                        if previous is not None:
+                            gap = seconds - previous
+                            if 0 < gap <= IDLE_GAP_SECONDS:
+                                active += gap
+                        previous = seconds
+                _add_usage(event, tokens)
                 if len(files) < TOUCHED_FILES_MAX:
                     for path in _extract_touched_files(event):
                         files.setdefault(path, None)
@@ -305,7 +369,49 @@ def extract_indexables(jsonl_path: Path) -> Indexables:
     return Indexables(
         fts_content="\n".join(parts)[:FTS_CONTENT_MAX_CHARS],
         touched_files=tuple(files),
+        usage=Usage(
+            input_tokens=tokens[0],
+            output_tokens=tokens[1],
+            cache_read_tokens=tokens[2],
+            cache_creation_tokens=tokens[3],
+            first_at=first_at,
+            last_at=last_at,
+            active_seconds=int(active),
+        ),
     )
+
+
+def _epoch(stamp: str) -> float | None:
+    """Seconds since the epoch for an ISO-8601 stamp, or None if it is not one.
+
+    ``Z`` is spelled out because ``fromisoformat`` did not accept it before 3.11, and this
+    package supports 3.10.
+    """
+    try:
+        return datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def _add_usage(event: dict[str, object], into: list[int]) -> None:
+    """Fold one event's reported token usage into ``into``.
+
+    Read from the events rather than recomputed: these are the numbers the API actually
+    billed, and re-counting tokens locally would produce a different figure that looks
+    authoritative and is not.
+    """
+    message = event.get("message")
+    if not isinstance(message, dict):
+        return
+    usage = message.get("usage")
+    if not isinstance(usage, dict):
+        return
+    for slot, key in enumerate(
+        ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+    ):
+        value = usage.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            into[slot] += value
 
 
 def extract_fts_content(jsonl_path: Path) -> str:

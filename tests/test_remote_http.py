@@ -42,9 +42,9 @@ def _store(tmp_path: Path) -> TokenStore:
 def test_tokens_are_stored_readable_only_by_their_owner(tmp_path: Path) -> None:
     """They are credentials on disk; group/other must not be able to read them."""
     store = _store(tmp_path)
-    store.set("glpat-secreto", "FactorLibre")
+    store.set("glpat-secreto", "Empresa")
 
-    assert store.get("FactorLibre") == "glpat-secreto"
+    assert store.get("Empresa") == "glpat-secreto"
     mode = stat.S_IMODE((tmp_path / "remote-tokens.json").stat().st_mode)
     assert mode == 0o600
 
@@ -52,10 +52,10 @@ def test_tokens_are_stored_readable_only_by_their_owner(tmp_path: Path) -> None:
 def test_each_server_keeps_its_own_token(tmp_path: Path) -> None:
     """Two hosts do not share credentials, so one token per server."""
     store = _store(tmp_path)
-    store.set("glpat-empresa", "FactorLibre")
+    store.set("glpat-empresa", "Empresa")
     store.set("github_pat_x", "GitHub")
 
-    assert store.get("FactorLibre") == "glpat-empresa"
+    assert store.get("Empresa") == "glpat-empresa"
     assert store.get("GitHub") == "github_pat_x"
     assert store.get("NoConfigurado") is None
 
@@ -86,9 +86,9 @@ def test_a_server_token_wins_over_the_legacy_one(tmp_path: Path) -> None:
     legacy = tmp_path / "remote-token"
     legacy.write_text("viejo\n", encoding="utf-8")
     store = TokenStore(tmp_path / "remote-tokens.json", legacy=legacy)
-    store.set("nuevo", "FactorLibre")
+    store.set("nuevo", "Empresa")
 
-    assert store.get("FactorLibre") == "nuevo"
+    assert store.get("Empresa") == "nuevo"
     assert store.get("OtroServidor") == "viejo"
 
 
@@ -97,18 +97,18 @@ def test_env_var_overrides_every_stored_token(
 ) -> None:
     """So CI never has to write a secret to disk."""
     store = _store(tmp_path)
-    store.set("el-de-disco", "FactorLibre")
+    store.set("el-de-disco", "Empresa")
     monkeypatch.setenv(REMOTE_TOKEN_ENV, "el-del-entorno")
-    assert store.get("FactorLibre") == "el-del-entorno"
+    assert store.get("Empresa") == "el-del-entorno"
 
 
 def test_a_token_can_be_deleted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(REMOTE_TOKEN_ENV, raising=False)
     store = _store(tmp_path)
-    store.set("x", "FactorLibre")
-    store.delete("FactorLibre")
-    assert store.get("FactorLibre") is None
-    store.delete("FactorLibre")  # idempotent
+    store.set("x", "Empresa")
+    store.delete("Empresa")
+    assert store.get("Empresa") is None
+    store.delete("Empresa")  # idempotent
 
 
 def test_tokens_live_beside_the_config_not_inside_it(

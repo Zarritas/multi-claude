@@ -417,7 +417,7 @@ every repository pointing at that server at once.
 > checking it.
 >
 > `Ctrl+T` on an SSH server runs `ssh -T` and tells you who you authenticate as
-> (`autenticado en git.yourcompany.com:2211 como jesus.lorenzo`), without needing any repository.
+> (`autenticado en git.yourcompany.com:2211 como ana`), without needing any repository.
 
 You can also publish to a **shared folder** (a network mount, Syncthing) instead of a repository:
 there the permissions are the filesystem's, and there is no per-client access control or authorship.
@@ -783,7 +783,7 @@ Besides the mode, the file stores the UI state remembered between runs:
   "group_worktrees": true,
   "color_rules": [],
   "remote_servers": [
-    { "name": "FactorLibre", "kind": "gitlab", "host": "https://git.factorlibre.com",
+    { "name": "Empresa", "kind": "gitlab", "host": "https://git.empresa.com",
       "auth": "ssh", "ssh_user": "git", "ssh_port": 2211 }
   ],
   "remote_kind": "none",
@@ -1053,6 +1053,8 @@ With no arguments it opens the TUI; a few things make more sense on the command 
 
 ```bash
 multi-claude --audit-secrets    # sweep the history for credentials (exits 1 if any)
+multi-claude --stats            # active time and tokens per project
+multi-claude --stats --since 2026-09-01   # …only what has moved since that date
 multi-claude --version          # what you have installed — quote it in any bug report
 multi-claude --help
 ```

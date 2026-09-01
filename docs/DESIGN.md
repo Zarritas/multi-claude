@@ -65,10 +65,10 @@ Una sesión arrancada con un slash-command tiene como primer user message:
 ```
 <command-message>refine-task</command-message>
 <command-name>/refine-task</command-name>
-<command-args>https://git.factorlibre.com/odoo-16/fl-v16/-/issues/8758</command-args>
+<command-args>https://git.empresa.com/grupo/proyecto/-/issues/8758</command-args>
 ```
 
-`strip_command_wrappers` debe convertirlo en algo como `/refine-task https://git.factorlibre.com/...`.
+`strip_command_wrappers` debe convertirlo en algo como `/refine-task https://git.empresa.com/...`.
 
 Si el primer user message es texto plano (no comando), se muestra recortado a ~80 chars con `…`.
 

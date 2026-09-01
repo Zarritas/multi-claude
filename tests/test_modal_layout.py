@@ -54,13 +54,13 @@ CASES: dict[str, tuple[Callable[[], ModalScreen], list[str], list[str]]] = {
         ["Enter (predeterminado)", "Argumentos para"],
     ),
     "server-edit-token": (
-        lambda: M.ServerEditModal(RemoteServer(name="FactorLibre", kind="gitlab")),
+        lambda: M.ServerEditModal(RemoteServer(name="Empresa", kind="gitlab")),
         ["Servidor de sesiones", "Ctrl+T prueba la conexión", "Guardar", "Probar", "Cancelar"],
         ["Nombre", "Autenticación", "permisos 0600"],
     ),
     "server-edit-ssh": (
         lambda: M.ServerEditModal(
-            RemoteServer(name="FactorLibre", host="https://git.empresa.com", auth="ssh")
+            RemoteServer(name="Empresa", host="https://git.empresa.com", auth="ssh")
         ),
         ["Servidor de sesiones", "Guardar", "Probar", "Cancelar"],
         ["Usuario SSH", "las claves SSH que ya tengas"],
@@ -68,17 +68,17 @@ CASES: dict[str, tuple[Callable[[], ModalScreen], list[str], list[str]]] = {
     "servers-list": (
         lambda: M.ServersModal(
             [
-                RemoteServer(name="FactorLibre", host="https://git.factorlibre.com"),
+                RemoteServer(name="Empresa", host="https://git.empresa.com"),
                 RemoteServer(name="GitHub", kind="github"),
             ]
         ),
         ["Servidores de sesiones", "Añadir", "Editar", "Quitar", "Guardar", "Cancelar"],
-        ["FactorLibre", "GitHub"],
+        ["Empresa", "GitHub"],
     ),
     "repo-link": (
         lambda: M.RepoLinkModal(
             RemoteLink(),
-            servers=[RemoteServer(name="FactorLibre", host="https://git.factorlibre.com")],
+            servers=[RemoteServer(name="Empresa", host="https://git.empresa.com")],
         ),
         ["Repositorio de sesiones", "Guardar", "Cancelar"],
         ["Dónde", "Carpeta compartida", "Nombre de la pestaña"],

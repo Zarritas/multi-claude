@@ -22,7 +22,7 @@ from tests.conftest import write_session
 
 
 def test_decode_path_fallback_handles_naive_dash_to_slash() -> None:
-    assert decode_path_fallback("-home-jesus-WS-project") == Path("/home/jesus/WS/project")
+    assert decode_path_fallback("-home-ana-WS-project") == Path("/home/ana/WS/project")
 
 
 def test_resolve_real_cwd_reads_first_jsonl_cwd(tmp_path: Path) -> None:

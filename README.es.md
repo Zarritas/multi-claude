@@ -421,7 +421,7 @@ un token arregla de golpe todos los repositorios que apuntan a ese servidor.
 > sugiere revisarlo.
 >
 > `Ctrl+T` sobre un servidor SSH ejecuta `ssh -T` y te dice como quién te autentica
-> (`autenticado en git.tuempresa.com:2211 como jesus.lorenzo`), sin necesitar ningún repositorio.
+> (`autenticado en git.tuempresa.com:2211 como ana`), sin necesitar ningún repositorio.
 
 También se puede publicar a una **carpeta compartida** (montaje de red, Syncthing) en lugar de un
 repositorio: ahí los permisos son los del sistema de ficheros, y no hay control de acceso por
@@ -721,7 +721,7 @@ El fichero guarda, además del modo, el estado de la UI que se recuerda entre ar
   "group_worktrees": true,
   "color_rules": [],
   "remote_servers": [
-    { "name": "FactorLibre", "kind": "gitlab", "host": "https://git.factorlibre.com",
+    { "name": "Empresa", "kind": "gitlab", "host": "https://git.empresa.com",
       "auth": "ssh", "ssh_user": "git", "ssh_port": 2211 }
   ],
   "remote_kind": "none",
@@ -908,6 +908,8 @@ Sin argumentos abre la TUI; hay cosas que tienen más sentido en la línea de co
 
 ```bash
 multi-claude --audit-secrets    # revisa el histórico buscando credenciales (sale 1 si hay)
+multi-claude --stats            # tiempo activo y tokens por proyecto
+multi-claude --stats --since 2026-09-01   # …solo lo que se ha movido desde esa fecha
 multi-claude --version          # qué tienes instalado — cítalo si reportas un fallo
 multi-claude --help
 ```

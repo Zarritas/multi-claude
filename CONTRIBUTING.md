@@ -13,7 +13,11 @@ pip install -e ".[dev]"
 
 ## Running the checks
 
-The CI matrix runs Python 3.10, 3.11 and 3.12 on Ubuntu. Locally, the four commands you need are:
+CI runs Python 3.10, 3.11 and 3.12 on Ubuntu, plus one job each on macOS and Windows. Not the
+full grid on purpose: version differences show up on Linux, and what the other two catch is
+whether the platform code holds — a 3x3 would triple the bill for the same information.
+
+Locally, the four commands you need are:
 
 ```bash
 ruff check .            # lint
@@ -141,4 +145,4 @@ session manifest (see `remote.py`'s `_READABLE_VERSIONS`).
 
 - The `.jsonl` files are the source of truth. SQLite is a cache; if it diverges, blow it away.
 - Avoid heavy dependencies. `textual` and `rapidfuzz` are the only runtime deps; question anything else.
-- Linux is where it is developed and where CI runs, but macOS (iTerm2, Terminal.app via `osascript`) and Windows (Windows Terminal) are implemented and shipped — the classifiers promise all three. Anything touching `launcher.py` or `focus.py` is platform code that CI cannot really exercise: pair it with manual testing on the real OS, and say in the PR which one you tested on.
+- Linux is where it is developed, but macOS (iTerm2, Terminal.app via `osascript`) and Windows (Windows Terminal) are implemented, shipped and now covered by CI. That covers imports and anything the suite can assert; it does **not** cover actually spawning a terminal, which no runner can do. So `launcher.py` and `focus.py` still want manual testing on the real OS — say in the PR which one you tested on.
