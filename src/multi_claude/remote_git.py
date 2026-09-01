@@ -210,7 +210,11 @@ class GitSshRemote:
             target = blob_dir / name
             target.parent.mkdir(parents=True, exist_ok=True)
             payload = path.read_bytes()
-            target.write_bytes(gzip.compress(payload) if is_compressed_blob(name) else payload)
+            # mtime=0 matters most here: this is the backend that commits, so a
+            # timestamp in the header would turn every republish into a commit.
+            target.write_bytes(
+                gzip.compress(payload, mtime=0) if is_compressed_blob(name) else payload
+            )
 
         # One small blob so colleagues can search this session's content without cloning
         # its transcript.

@@ -22,7 +22,7 @@ from multi_claude.index import default_index
 from multi_claude.launcher import LaunchOutcome
 from multi_claude.remote import REMOTE_DIR_ENV, DirectoryRemote, RemoteSession
 from multi_claude.screens.sessions import SessionsScreen
-from tests.conftest import write_session
+from tests.conftest import settle, write_session
 
 
 @pytest.fixture
@@ -118,7 +118,7 @@ async def _until(pilot: object, condition: object, tries: int = 200) -> bool:
     for _ in range(tries):
         if condition():  # type: ignore[operator]
             return True
-        await pilot.pause()  # type: ignore[attr-defined]
+        await settle(pilot, rounds=1)
     return bool(condition())  # type: ignore[operator]
 
 
@@ -175,11 +175,9 @@ async def test_publish_can_be_cancelled(world: Path) -> None:
         store = await _remote_store(app)
 
         await pilot.press("u")
-        for _ in range(6):
-            await pilot.pause()
+        await settle(pilot)
         await pilot.press("escape")
-        for _ in range(6):
-            await pilot.pause()
+        await settle(pilot)
 
         assert store.list_sessions() == ()
 
@@ -254,8 +252,7 @@ async def test_a_colleagues_session_shows_up_and_hydrates_on_enter(world: Path) 
 
         with patch("multi_claude.screens.sessions.launch_claude", side_effect=fake_launch):
             table.action_select_cursor()
-            for _ in range(30):
-                await pilot.pause()
+            await settle(pilot)
 
         # Hydrated into *this* project's dir, under the original uuid...
         assert (world / "projects" / "-repo" / "ses-de-carlos.jsonl").is_file()
@@ -333,14 +330,12 @@ async def test_global_search_lists_a_teammates_session_and_opens_its_tab(world: 
         await pilot.pause()
 
         await pilot.press("question_mark")
-        for _ in range(10):
-            await pilot.pause()
+        await settle(pilot)
         search = pilot.app.screen
         assert isinstance(search, SearchScreen), f"no se abrió la búsqueda: {search}"
 
         search.query_one("#fts-query", Input).value = "exporter"
-        for _ in range(20):
-            await pilot.pause()
+        await settle(pilot)
 
         table = search.query_one("#fts-results", DataTable)
         rows = [[str(cell) for cell in table.get_row_at(i)] for i in range(table.row_count)]
@@ -354,8 +349,7 @@ async def test_global_search_lists_a_teammates_session_and_opens_its_tab(world: 
 
         table.move_cursor(row=team[0])
         table.action_select_cursor()
-        for _ in range(30):
-            await pilot.pause()
+        await settle(pilot)
 
         landed = pilot.app.screen
         assert isinstance(landed, SessionsScreen)
@@ -391,8 +385,7 @@ async def test_secrets_filter_isolates_the_sensitive_sessions(world: Path) -> No
 
         async def shown(query: str) -> list[str]:
             screen.query_one("#filter", Input).value = query
-            for _ in range(10):
-                await pilot.pause()
+            await settle(pilot)
             return [screen._sessions[i].id for is_remote, i in screen._rows if not is_remote]
 
         await pilot.press("slash")
@@ -559,8 +552,7 @@ async def test_publishing_a_session_with_a_credential_warns_and_defends_itself(
 
         # Enter must not publish: it presses the focused Cancelar instead.
         await pilot.press("enter")
-        for _ in range(10):
-            await pilot.pause()
+        await settle(pilot)
         store = await _remote_store(app)
         assert store.list_sessions() == ()
 
@@ -586,8 +578,7 @@ async def test_publishing_a_clean_session_keeps_the_fast_path(world: Path) -> No
         assert modal.focused is modal.query_one("#publish", Button)
 
         await pilot.press("enter")
-        for _ in range(30):
-            await pilot.pause()
+        await settle(pilot)
         store = await _remote_store(app)
         assert [s.session_id for s in store.list_sessions()] == ["ses-1"]
 
@@ -605,20 +596,17 @@ async def test_the_remote_tab_is_reachable_with_the_keyboard(world: Path) -> Non
         assert screen._active_remote is None
 
         await pilot.press("ctrl+right")
-        for _ in range(30):
-            await pilot.pause()
+        await settle(pilot)
         assert screen._active_remote == 0
 
         # One more wraps back to the local listing (one remote → two tabs).
         await pilot.press("ctrl+right")
-        for _ in range(20):
-            await pilot.pause()
+        await settle(pilot)
         assert screen._active_remote is None
 
         # And backwards from local lands on the last remote.
         await pilot.press("ctrl+left")
-        for _ in range(30):
-            await pilot.pause()
+        await settle(pilot)
         assert screen._active_remote == 0
 
 
@@ -640,8 +628,7 @@ async def test_tab_switching_is_inert_without_linked_remotes(
         assert screen._remote_links == ()
         await pilot.press("ctrl+right")
         await pilot.press("ctrl+left")
-        for _ in range(10):
-            await pilot.pause()
+        await settle(pilot)
         assert screen._active_remote is None
 
 
@@ -717,15 +704,13 @@ async def test_author_finds_a_session_you_hydrated_from_a_colleague(world: Path)
         await pilot.press("slash")
         await pilot.pause()
         screen.query_one("#filter", Input).value = "author:carlos"
-        for _ in range(10):
-            await pilot.pause()
+        await settle(pilot)
 
         shown = [screen._sessions[i].id for is_remote, i in screen._rows if not is_remote]
         assert shown == ["ses-de-carlos"]
 
         screen.query_one("#filter", Input).value = "author:ana"
-        for _ in range(10):
-            await pilot.pause()
+        await settle(pilot)
         assert screen._rows == []
 
 
@@ -767,8 +752,7 @@ async def test_publishing_over_someone_elses_version_is_blocked(world: Path) -> 
 
         # Cancelling leaves Ana's version exactly as it was.
         await pilot.press("escape")
-        for _ in range(20):
-            await pilot.pause()
+        await settle(pilot)
         (still,) = store.list_sessions()
         assert still.published_by == "ana@example.com"
         assert still.message_count == 455
@@ -805,8 +789,7 @@ async def test_overwriting_a_conflict_is_possible_on_purpose(world: Path) -> Non
         modal = pilot.app.screen
         assert isinstance(modal, PublishConflictModal)
         modal.query_one("#overwrite").press()
-        for _ in range(40):
-            await pilot.pause()
+        await settle(pilot)
 
         (now,) = store.list_sessions()
         assert now.published_by != "ana@example.com"  # ours replaced hers, deliberately
@@ -821,8 +804,7 @@ async def test_a_fast_forward_publishes_without_asking(world: Path) -> None:
     async with app.run_test() as pilot:
         screen = await _open_sessions(pilot)
         await _publish(pilot)  # first publish records the base
-        for _ in range(30):
-            await pilot.pause()
+        await settle(pilot)
         store = await _remote_store(app)
         (published,) = store.list_sessions()
         remote_key = screen._remote_links[0].identity_key()
@@ -830,8 +812,7 @@ async def test_a_fast_forward_publishes_without_asking(world: Path) -> None:
 
         # Publish the same session again: same stamp on the remote, so no dialogue.
         await _publish(pilot)
-        for _ in range(30):
-            await pilot.pause()
+        await settle(pilot)
         assert not isinstance(pilot.app.screen, PublishConflictModal)
         assert len(store.list_sessions()) == 1
 
@@ -865,8 +846,7 @@ async def test_fetching_records_the_base_so_a_later_publish_is_safe(world: Path)
         table.move_cursor(row=0)
         with patch("multi_claude.screens.sessions.launch_claude", side_effect=fake_launch):
             table.action_select_cursor()
-            for _ in range(40):
-                await pilot.pause()
+            await settle(pilot)
 
         remote_key = screen._remote_links[0].identity_key()
         assert default_index().publish_base(remote_key, "ses-de-ana") == "2026-08-02T09:00:00+00:00"
@@ -978,8 +958,7 @@ async def test_the_search_text_is_not_downloaded_twice(world: Path) -> None:
         store.fetch_search_text = counting  # type: ignore[method-assign]
         with patch.object(app, "store_for_link", return_value=store):
             screen._load_remote_worker(0)
-            for _ in range(40):
-                await pilot.pause()
+            await settle(pilot)
 
         assert calls == []  # already indexed, so nothing was asked for again
         assert default_index().count_remote_with_text() == 1
@@ -991,16 +970,14 @@ async def test_unpublishing_drops_the_session_from_search(world: Path) -> None:
     async with app.run_test() as pilot:
         screen = await _open_sessions(pilot)
         await _publish(pilot)
-        for _ in range(20):
-            await pilot.pause()
+        await settle(pilot)
         await _open_remote_tab(pilot, screen)
         assert default_index().fts_search_remote("exporter")
 
         store = await _remote_store(app)
         store.unpublish("ses-1")
         screen._load_remote_worker(0)
-        for _ in range(30):
-            await pilot.pause()
+        await settle(pilot)
 
         assert default_index().fts_search_remote("exporter") == []
 
@@ -1012,8 +989,7 @@ async def test_a_published_session_shows_up_in_its_tab(world: Path) -> None:
         screen = await _open_sessions(pilot)
 
         await _publish(pilot)
-        for _ in range(20):
-            await pilot.pause()
+        await settle(pilot)
 
         await _open_remote_tab(pilot, screen)
 
@@ -1030,8 +1006,7 @@ async def test_a_session_you_already_have_is_marked_not_hidden(world: Path) -> N
         screen = await _open_sessions(pilot)
 
         await _publish(pilot)
-        for _ in range(20):
-            await pilot.pause()
+        await settle(pilot)
         await _open_remote_tab(pilot, screen)
 
         table = screen.query_one("#sessions", DataTable)
@@ -1086,8 +1061,7 @@ async def test_the_row_says_when_you_have_unpublished_turns(world: Path) -> None
     async with app.run_test() as pilot:
         screen = await _open_sessions(pilot)
         await _publish(pilot)
-        for _ in range(20):
-            await pilot.pause()
+        await settle(pilot)
         await _open_remote_tab(pilot, screen)
         assert screen._local_state(screen._remote_sessions[0]) == "current"
 
@@ -1116,8 +1090,7 @@ async def test_enter_on_a_session_you_already_have_resumes_it_locally(world: Pat
     async with app.run_test() as pilot:
         screen = await _open_sessions(pilot)
         await _publish(pilot)
-        for _ in range(20):
-            await pilot.pause()
+        await settle(pilot)
         await _open_remote_tab(pilot, screen)
 
         from textual.widgets import DataTable
@@ -1150,8 +1123,7 @@ async def test_going_back_to_the_local_tab_clears_the_remote_rows(world: Path) -
         from textual.widgets import Tabs
 
         screen.query_one("#session-tabs", Tabs).active = "tab-local"
-        for _ in range(10):
-            await pilot.pause()
+        await settle(pilot)
         assert screen._remote_sessions == []
         assert all(not is_remote for is_remote, _ in screen._rows)
 
@@ -1184,8 +1156,7 @@ async def test_linking_a_repo_only_asks_what_is_repo_specific(world: Path) -> No
         await pilot.pause()
         modal = RepoLinkModal(RemoteLink(), servers=servers)
         app.push_screen(modal)
-        for _ in range(6):
-            await pilot.pause()
+        await settle(pilot)
 
         modal.query_one("#target-0", RadioButton).value = True
         modal.query_one("#link-repo", Input).value = "/grupo/sesiones/"
@@ -1224,13 +1195,11 @@ async def test_a_configured_server_appears_when_linking_a_repo(world: Path) -> N
         )
 
         await pilot.press("L")
-        for _ in range(8):
-            await pilot.pause()
+        await settle(pilot)
         manage = app.screen
         assert isinstance(manage, ProjectRemotesModal)
         manage.query_one("#add", Button).press()
-        for _ in range(8):
-            await pilot.pause()
+        await settle(pilot)
 
         link_modal = app.screen
         assert isinstance(link_modal, RepoLinkModal)
@@ -1259,8 +1228,7 @@ async def test_the_token_never_reaches_the_config_file(
         await pilot.pause()
         modal = ServerEditModal(RemoteServer(name="FactorLibre"))
         app.push_screen(modal)
-        for _ in range(6):
-            await pilot.pause()
+        await settle(pilot)
         modal.query_one("#server-token", Input).value = "glpat-muy-secreto"
         await pilot.pause()
 
@@ -1292,8 +1260,7 @@ async def test_an_empty_token_field_keeps_the_stored_one(world: Path) -> None:
         await pilot.pause()
         modal = ServerEditModal(RemoteServer(name="FactorLibre"), has_token=True)
         app.push_screen(modal)
-        for _ in range(6):
-            await pilot.pause()
+        await settle(pilot)
         assert modal.typed_token() is None  # None means "leave it alone"
 
 
@@ -1307,23 +1274,19 @@ async def test_settings_opens_the_server_list_and_the_global_remote(world: Path)
         await pilot.pause()
         settings = SettingsModal(app.prefs)
         app.push_screen(settings)
-        for _ in range(6):
-            await pilot.pause()
+        await settle(pilot)
 
         assert "desactivado" in str(settings.query_one("#remote-summary", Label).content)
         assert "ninguno" in str(settings.query_one("#servers-summary", Label).content)
 
         settings.query_one("#configure-servers", Button).press()
-        for _ in range(6):
-            await pilot.pause()
+        await settle(pilot)
         assert isinstance(app.screen, ServersModal)
         app.pop_screen()
-        for _ in range(6):
-            await pilot.pause()
+        await settle(pilot)
 
         settings.query_one("#configure-remote", Button).press()
-        for _ in range(6):
-            await pilot.pause()
+        await settle(pilot)
         assert isinstance(app.screen, RepoLinkModal)
 
 
@@ -1403,8 +1366,7 @@ async def test_the_publish_dialogue_lets_you_choose_between_repos(
         # From the local tab the dialogue offers both and starts on the first.
         assert screen._default_destination() == 0
         await _publish(pilot, dest_index=1)
-        for _ in range(20):
-            await pilot.pause()
+        await settle(pilot)
         assert [s.session_id for s in DirectoryRemote(world / "b").list_sessions()] == ["ses-1"]
         assert DirectoryRemote(world / "a").list_sessions() == ()
 
@@ -1430,8 +1392,7 @@ async def test_a_single_linked_repo_needs_no_choosing(
 
         # A single destination needs no choosing: the dialogue just states it.
         await _publish(pilot)
-        for _ in range(20):
-            await pilot.pause()
+        await settle(pilot)
         assert [s.session_id for s in DirectoryRemote(world / "solo").list_sessions()] == ["ses-1"]
 
 
@@ -1778,8 +1739,7 @@ async def test_the_publish_dialogue_offers_publish_not_delete(world: Path) -> No
     async with app.run_test() as pilot:
         await _open_sessions(pilot)
         await pilot.press("u")
-        for _ in range(6):
-            await pilot.pause()
+        await settle(pilot)
 
         modal = app.screen
         assert isinstance(modal, PublishModal)
@@ -1796,16 +1756,14 @@ async def test_the_publish_dialogue_lists_the_files_and_the_warning(world: Path)
     async with app.run_test(size=(100, 30)) as pilot:
         await _open_sessions(pilot)
         await pilot.press("u")
-        for _ in range(6):
-            await pilot.pause()
+        await settle(pilot)
 
         modal = app.screen
         assert isinstance(modal, PublishModal)
         assert modal.files == ["· ses-1.jsonl"]
 
         # Read what is actually painted, once the modal has had frames to draw itself.
-        for _ in range(10):
-            await pilot.pause()
+        await settle(pilot)
         rendered = "\n".join(
             "".join(s.text for s in strip) for strip in app.screen._compositor.render_strips()
         )
@@ -1845,8 +1803,7 @@ async def test_the_dialogue_starts_on_the_active_tabs_repo(
         await _open_remote_tab(pilot, screen, index=1)
 
         await pilot.press("u")
-        for _ in range(6):
-            await pilot.pause()
+        await settle(pilot)
         modal = app.screen
         assert isinstance(modal, PublishModal)
         assert modal.preselected == 1
@@ -1862,8 +1819,7 @@ async def test_a_single_destination_shows_no_chooser(world: Path) -> None:
     async with app.run_test() as pilot:
         await _open_sessions(pilot)
         await pilot.press("u")
-        for _ in range(6):
-            await pilot.pause()
+        await settle(pilot)
 
         modal = app.screen
         assert isinstance(modal, PublishModal)
@@ -1901,8 +1857,7 @@ async def test_testing_a_server_does_not_freeze_the_ui(
             RemoteServer(name="lento", host="https://git.example.com", auth="ssh")
         )
         app.push_screen(modal)
-        for _ in range(6):
-            await pilot.pause()
+        await settle(pilot)
         modal.query_one("#server-auth-ssh", RadioButton).value = True
         await pilot.pause()
 
@@ -1943,15 +1898,13 @@ async def test_a_server_can_be_edited_and_renamed(world: Path) -> None:
         TokenStore().set("glpat-viejo", "Antiguo")
         servers = ServersModal([RemoteServer(name="Antiguo", host="https://git.viejo.com")])
         app.push_screen(servers)
-        for _ in range(6):
-            await pilot.pause()
+        await settle(pilot)
 
         # There is a visible button, not just a keybinding.
         servers.query_one("#server-0", RadioButton).value = True
         await pilot.pause()
         servers.query_one("#edit", Button).press()
-        for _ in range(8):
-            await pilot.pause()
+        await settle(pilot)
 
         editor = app.screen
         assert isinstance(editor, ServerEditModal)
@@ -1962,8 +1915,7 @@ async def test_a_server_can_be_edited_and_renamed(world: Path) -> None:
         editor.query_one("#server-name", Input).value = "Nuevo nombre"
         await pilot.pause()
         editor.query_one("#save", Button).press()
-        for _ in range(10):
-            await pilot.pause()
+        await settle(pilot)
 
         # Replaced, not duplicated.
         assert [s.name for s in servers._servers] == ["Nuevo nombre"]
@@ -1982,8 +1934,7 @@ async def test_editing_without_a_selection_says_so(world: Path) -> None:
         await pilot.pause()
         servers = ServersModal([])
         app.push_screen(servers)
-        for _ in range(6):
-            await pilot.pause()
+        await settle(pilot)
 
         servers.query_one("#edit", Button).press()
         await pilot.pause()
@@ -2002,8 +1953,7 @@ async def test_d_on_a_published_row_unpublishes_it(world: Path) -> None:
         screen = await _open_sessions(pilot)
         store = await _remote_store(app)
         await _publish(pilot)
-        for _ in range(20):
-            await pilot.pause()
+        await settle(pilot)
         await _open_remote_tab(pilot, screen)
         assert len(store.list_sessions()) == 1
 
@@ -2013,8 +1963,7 @@ async def test_d_on_a_published_row_unpublishes_it(world: Path) -> None:
         table.move_cursor(row=0)
         await pilot.pause()
         await pilot.press("d")
-        for _ in range(6):
-            await pilot.pause()
+        await settle(pilot)
         await pilot.press("y")  # confirm
         await _until(pilot, lambda: store.list_sessions() == ())
 
@@ -2029,8 +1978,7 @@ async def test_unpublishing_can_be_cancelled(world: Path) -> None:
         screen = await _open_sessions(pilot)
         store = await _remote_store(app)
         await _publish(pilot)
-        for _ in range(20):
-            await pilot.pause()
+        await settle(pilot)
         await _open_remote_tab(pilot, screen)
 
         from textual.widgets import DataTable
@@ -2038,11 +1986,9 @@ async def test_unpublishing_can_be_cancelled(world: Path) -> None:
         screen.query_one("#sessions", DataTable).move_cursor(row=0)
         await pilot.pause()
         await pilot.press("d")
-        for _ in range(6):
-            await pilot.pause()
+        await settle(pilot)
         await pilot.press("n")  # decline
-        for _ in range(10):
-            await pilot.pause()
+        await settle(pilot)
 
         assert len(store.list_sessions()) == 1
 
@@ -2055,8 +2001,7 @@ async def test_the_unpublish_dialogue_says_the_local_copy_survives(world: Path) 
     async with app.run_test(size=(100, 30)) as pilot:
         screen = await _open_sessions(pilot)
         await _publish(pilot)
-        for _ in range(20):
-            await pilot.pause()
+        await settle(pilot)
         await _open_remote_tab(pilot, screen)
 
         from textual.widgets import DataTable
@@ -2064,8 +2009,7 @@ async def test_the_unpublish_dialogue_says_the_local_copy_survives(world: Path) 
         screen.query_one("#sessions", DataTable).move_cursor(row=0)
         await pilot.pause()
         await pilot.press("d")
-        for _ in range(10):
-            await pilot.pause()
+        await settle(pilot)
 
         painted = "\n".join(
             "".join(s.text for s in strip) for strip in app.screen._compositor.render_strips()
@@ -2089,14 +2033,12 @@ async def test_the_global_remote_can_be_switched_off(world: Path) -> None:
         configured = replace(app.prefs, remote_kind="directory", remote_path=str(world / "global"))
         modal = RepoLinkModal(configured.remote_link(), servers=[], allow_none=True)
         app.push_screen(modal)
-        for _ in range(8):
-            await pilot.pause()
+        await settle(pilot)
 
         modal.query_one("#target-none", RadioButton).value = True
         await pilot.pause()
         modal._try_save()
-        for _ in range(6):
-            await pilot.pause()
+        await settle(pilot)
 
         # What it returns switches sharing off in the config.
         from multi_claude.project_remotes import RemoteLink
@@ -2116,6 +2058,5 @@ async def test_a_project_link_dialogue_offers_no_off_switch(world: Path) -> None
         await pilot.pause()
         modal = RepoLinkModal(RemoteLink(), servers=[])
         app.push_screen(modal)
-        for _ in range(8):
-            await pilot.pause()
+        await settle(pilot)
         assert not modal.query("#target-none")

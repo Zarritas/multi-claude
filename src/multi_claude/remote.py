@@ -315,7 +315,12 @@ def search_payload_for(project_dir: Path, session_id: str) -> bytes | None:
         return None
     if not text.strip() or len(text.encode("utf-8")) > MAX_SEARCH_BYTES:
         return None
-    return gzip.compress(text.encode("utf-8"))
+    # mtime=0 on purpose: gzip stamps the current time into its header, so compressing the
+    # same text twice produces different bytes a second apart. That difference is invisible
+    # to everyone and yet it is a change to git, so republishing a session nobody touched
+    # would add a commit to the team's repo every time. Deterministic output is what makes
+    # "nothing changed" mean nothing was written.
+    return gzip.compress(text.encode("utf-8"), mtime=0)
 
 
 def decode_search_payload(payload: bytes) -> str | None:
@@ -475,7 +480,11 @@ class DirectoryRemote:
             target = blob_dir / name
             target.parent.mkdir(parents=True, exist_ok=True)
             payload = path.read_bytes()
-            _atomic_write(target, gzip.compress(payload) if is_compressed_blob(name) else payload)
+            _atomic_write(
+                target,
+                # mtime=0: byte-identical across publishes. See search_payload_for.
+                gzip.compress(payload, mtime=0) if is_compressed_blob(name) else payload,
+            )
 
         # The search payload, so colleagues can search this by content without fetching it.
         search = search_payload_for(project_dir, session.session_id)

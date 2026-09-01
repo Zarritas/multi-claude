@@ -197,7 +197,8 @@ class HttpRepoRemote:
             payload = path.read_bytes()
             self._write_file(
                 f"{BLOB_ROOT}/{session.session_id}/{name}",
-                gzip.compress(payload) if is_compressed_blob(name) else payload,
+                # mtime=0 keeps it byte-identical across publishes; see remote.py.
+                gzip.compress(payload, mtime=0) if is_compressed_blob(name) else payload,
             )
         # The search payload: one small blob that lets colleagues search this session's
         # content without downloading it.

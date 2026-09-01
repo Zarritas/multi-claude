@@ -13,7 +13,7 @@ from multi_claude.app import ClaudeBrowserApp
 from multi_claude.launcher import LaunchOutcome
 from multi_claude.names import NamesStore
 from multi_claude.screens.projects import ProjectsScreen
-from tests.conftest import write_session
+from tests.conftest import settle, write_session
 
 
 @pytest.fixture
@@ -76,7 +76,7 @@ async def _enter_project(pilot: object) -> None:
     app = pilot.app  # type: ignore[attr-defined]
     app.screen.query_one("#projects", DataTable).action_select_cursor()
     for _ in range(40):
-        await pilot.pause()  # type: ignore[attr-defined]
+        await settle(pilot, rounds=1)
         if isinstance(app.screen, SessionsScreen) and app.screen._sessions:
             return
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -126,6 +127,25 @@ def test_a_second_clone_sees_what_the_first_published(bare_repo: Path, tmp_path:
 
 def test_an_empty_repo_lists_nothing(bare_repo: Path, tmp_path: Path) -> None:
     assert _remote(bare_repo, tmp_path).list_sessions() == ()
+
+
+def test_the_search_payload_is_byte_identical_across_publishes(tmp_path: Path) -> None:
+    """gzip stamps the clock into its header, and that alone would defeat the check above.
+
+    Two compressions of the same text a second apart differ in bytes while being identical
+    in content — invisible to a person, a change to git. Without pinning it, republishing a
+    session nobody touched adds a commit to the team's repo, and the "no empty commit"
+    guarantee only holds while both publishes land in the same second, which is exactly the
+    kind of test that passes on a fast machine and fails in CI.
+    """
+    from multi_claude.remote import search_payload_for
+
+    project = tmp_path / "project"
+    write_session(project, session_id="sid-1", first_prompt="algo que decir")
+    first = search_payload_for(project, "sid-1")
+    assert first is not None
+    time.sleep(1.1)  # long enough for gzip's second-resolution stamp to move
+    assert search_payload_for(project, "sid-1") == first
 
 
 def test_republishing_the_same_bytes_makes_no_commit(bare_repo: Path, tmp_path: Path) -> None:

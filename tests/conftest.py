@@ -100,3 +100,22 @@ def write_session(
     if mtime is not None:
         os.utime(jsonl, (mtime, mtime))
     return jsonl
+
+
+async def settle(pilot: object, rounds: int = 4) -> None:
+    """Let every pending worker finish and the UI catch up.
+
+    Most waits in the UI tests are a fixed number of ``pause()`` calls, which is a bet on how
+    fast the machine is: they were written on a developer laptop and held there, while CI —
+    fewer cores, slower ones, shared — kept losing whichever was closest to the edge. Which
+    one that is varies per run, so the same commit failed on 3.10 and 3.12 while 3.11 passed.
+    That is not a Python version difference, it is a coin toss.
+
+    Textual can be asked directly, so this waits for the workers instead of guessing at them.
+    Several rounds because they chain: scanning a project starts the credential scan, which
+    starts the published-sessions lookup, and each new worker only exists once the previous
+    one has handed back.
+    """
+    for _ in range(rounds):
+        await pilot.app.workers.wait_for_complete()  # type: ignore[attr-defined]
+        await pilot.pause()  # type: ignore[attr-defined]
