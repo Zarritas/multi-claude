@@ -58,6 +58,29 @@ def synthetic_world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return projects_root
 
 
+async def _enter_project(pilot: object) -> None:
+    """Open the project under the cursor and wait until its sessions have arrived.
+
+    The scan runs in a worker, so the screen exists before its rows do: asserting on
+    ``_sessions`` after a single ``pause()`` is a race that passes or fails on how fast the
+    machine is. It went unnoticed until the worker grew one more index read and CI, on a
+    different Python than the one used locally, started losing it.
+
+    Waiting for the rows instead of counting pauses is what makes these deterministic. The
+    cap is there so a genuine regression fails the assertion below rather than hanging.
+    """
+    from textual.widgets import DataTable
+
+    from multi_claude.screens.sessions import SessionsScreen
+
+    app = pilot.app  # type: ignore[attr-defined]
+    app.screen.query_one("#projects", DataTable).action_select_cursor()
+    for _ in range(40):
+        await pilot.pause()  # type: ignore[attr-defined]
+        if isinstance(app.screen, SessionsScreen) and app.screen._sessions:
+            return
+
+
 async def test_app_lists_projects_and_navigates(synthetic_world: Path) -> None:
     app = ClaudeBrowserApp()
     async with app.run_test() as pilot:
@@ -72,11 +95,7 @@ async def test_app_lists_projects_and_navigates(synthetic_world: Path) -> None:
         assert projects_screen._projects[0].name == "beta"
 
         # Select first row → SessionsScreen pushed
-        from textual.widgets import DataTable
-
-        table = projects_screen.query_one("#projects", DataTable)
-        table.action_select_cursor()
-        await pilot.pause()
+        await _enter_project(pilot)
 
         from multi_claude.screens.sessions import SessionsScreen
 
@@ -303,12 +322,10 @@ async def test_filter_in_sessions_screen(synthetic_world: Path) -> None:
     app = ClaudeBrowserApp()
     async with app.run_test() as pilot:
         await pilot.pause()
-        from textual.widgets import DataTable, Input
+        from textual.widgets import Input
 
         # Navigate into beta
-        table = app.screen.query_one("#projects", DataTable)
-        table.action_select_cursor()
-        await pilot.pause()
+        await _enter_project(pilot)
 
         from multi_claude.screens.sessions import SessionsScreen
 
@@ -331,11 +348,10 @@ async def test_rename_session_via_modal(synthetic_world: Path, tmp_path: Path) -
     app = ClaudeBrowserApp()
     async with app.run_test() as pilot:
         await pilot.pause()
-        from textual.widgets import DataTable, Input
+        from textual.widgets import Input
 
         # Navigate into beta
-        app.screen.query_one("#projects", DataTable).action_select_cursor()
-        await pilot.pause()
+        await _enter_project(pilot)
 
         from multi_claude.screens.sessions import SessionsScreen
 
@@ -369,10 +385,9 @@ async def test_rename_session_empty_input_deletes_name(synthetic_world: Path) ->
     app = ClaudeBrowserApp()
     async with app.run_test() as pilot:
         await pilot.pause()
-        from textual.widgets import DataTable, Input
+        from textual.widgets import Input
 
-        app.screen.query_one("#projects", DataTable).action_select_cursor()
-        await pilot.pause()
+        await _enter_project(pilot)
         await pilot.press("e")
         await pilot.pause()
         modal_input = app.screen.query_one("#name-input", Input)
@@ -387,10 +402,8 @@ async def test_delete_session_with_confirmation(synthetic_world: Path) -> None:
     app = ClaudeBrowserApp()
     async with app.run_test() as pilot:
         await pilot.pause()
-        from textual.widgets import DataTable
 
-        app.screen.query_one("#projects", DataTable).action_select_cursor()
-        await pilot.pause()
+        await _enter_project(pilot)
 
         from multi_claude.screens.sessions import SessionsScreen
 
@@ -418,10 +431,8 @@ async def test_delete_session_cancel_keeps_session(synthetic_world: Path) -> Non
     app = ClaudeBrowserApp()
     async with app.run_test() as pilot:
         await pilot.pause()
-        from textual.widgets import DataTable
 
-        app.screen.query_one("#projects", DataTable).action_select_cursor()
-        await pilot.pause()
+        await _enter_project(pilot)
 
         from multi_claude.screens.sessions import SessionsScreen
 
@@ -556,8 +567,7 @@ async def test_enter_uses_default_mode_and_shift_enter_uses_opposite(
             from multi_claude.screens.sessions import SessionsScreen
 
             assert isinstance(app.screen, ProjectsScreen)
-            app.screen.query_one("#projects", DataTable).action_select_cursor()
-            await pilot.pause()
+            await _enter_project(pilot)
             assert isinstance(app.screen, SessionsScreen)
             # Wait for scan worker to populate sessions before activating a row.
             await app.workers.wait_for_complete()
@@ -744,8 +754,7 @@ async def test_launch_passes_claude_args(synthetic_world: Path) -> None:
 
             from multi_claude.screens.sessions import SessionsScreen
 
-            app.screen.query_one("#projects", DataTable).action_select_cursor()
-            await pilot.pause()
+            await _enter_project(pilot)
             assert isinstance(app.screen, SessionsScreen)
             await app.workers.wait_for_complete()
             await pilot.pause()
@@ -771,8 +780,7 @@ async def test_sessions_screen_shows_live_status(synthetic_world: Path) -> None:
 
             from multi_claude.screens.sessions import SessionsScreen
 
-            app.screen.query_one("#projects", DataTable).action_select_cursor()
-            await pilot.pause()
+            await _enter_project(pilot)
             assert isinstance(app.screen, SessionsScreen)
             await app.workers.wait_for_complete()
             await pilot.pause()
@@ -799,8 +807,7 @@ async def test_sessions_screen_labels_an_unknown_status_generically(
             await pilot.pause()
             from textual.widgets import DataTable
 
-            app.screen.query_one("#projects", DataTable).action_select_cursor()
-            await pilot.pause()
+            await _enter_project(pilot)
             await app.workers.wait_for_complete()
             await pilot.pause()
             table = app.screen.query_one("#sessions", DataTable)
@@ -818,8 +825,7 @@ async def test_sessions_screen_marks_unregistered_sessions_as_not_running(
             await pilot.pause()
             from textual.widgets import DataTable
 
-            app.screen.query_one("#projects", DataTable).action_select_cursor()
-            await pilot.pause()
+            await _enter_project(pilot)
             await app.workers.wait_for_complete()
             await pilot.pause()
             table = app.screen.query_one("#sessions", DataTable)
@@ -841,8 +847,7 @@ async def test_live_status_refresh_updates_the_cell_in_place(synthetic_world: Pa
 
             from multi_claude.screens.sessions import SessionsScreen
 
-            app.screen.query_one("#projects", DataTable).action_select_cursor()
-            await pilot.pause()
+            await _enter_project(pilot)
             screen = app.screen
             assert isinstance(screen, SessionsScreen)
             await app.workers.wait_for_complete()
@@ -876,12 +881,10 @@ async def test_sort_by_status_puts_waiting_sessions_first(synthetic_world: Path)
         app = ClaudeBrowserApp()
         async with app.run_test() as pilot:
             await pilot.pause()
-            from textual.widgets import DataTable
 
             from multi_claude.screens.sessions import SessionsScreen
 
-            app.screen.query_one("#projects", DataTable).action_select_cursor()
-            await pilot.pause()
+            await _enter_project(pilot)
             screen = app.screen
             assert isinstance(screen, SessionsScreen)
             await app.workers.wait_for_complete()
