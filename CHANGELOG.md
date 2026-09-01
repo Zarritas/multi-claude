@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-09-01
+
 ### Added
 
 - **`v` lee la conversación entera sin reanudarla, y se la puede llevar.** El panel de preview (`p`) responde en tres líneas a «¿es esta la sesión que digo?»; faltaba la otra pregunta, la que da sentido al archivo compartido: **qué hicieron ahí**. Hasta ahora la única forma de saberlo era `Enter`, que arranca un proceso de Claude, mete la transcripción en un contexto que no es el tuyo y te deja dentro de una conversación que solo querías leer — un intercambio malo cuando la sesión es de otra persona, que es justo el caso. Ahora `v` abre un lector con todos los turnos, `/` busca dentro y `x` / `y` la exportan a Markdown o la copian.
@@ -184,7 +186,8 @@ Initial MVP release.
 - Project add via `a` (launches Claude in a new cwd).
 - Settings modal (`s`) to choose default / alternate launch mode (Shift+Enter = opposite of default).
 
-[Unreleased]: https://github.com/Zarritas/multi-claude/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/Zarritas/multi-claude/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/Zarritas/multi-claude/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/Zarritas/multi-claude/releases/tag/v1.0.0
 <!-- 0.1.0 apunta a su último commit, no a un tag: se describió como release en su día pero nunca se etiquetó. -->
 [0.1.0]: https://github.com/Zarritas/multi-claude/commit/8be8ce5
