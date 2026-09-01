@@ -103,6 +103,25 @@ async def _remote_store(app: ClaudeBrowserApp, project_index: int = 0) -> Direct
     return store
 
 
+async def _until(pilot: object, condition: object, tries: int = 200) -> bool:
+    """Pause until ``condition()`` holds, and say whether it did.
+
+    Most waits in this file are a fixed count of ``pause()`` calls, which is really a bet on
+    how fast the machine is. They were calibrated on a developer laptop and held until the
+    scan worker grew slightly heavier — then CI, on fewer and slower cores, started losing
+    the ones closest to the edge, and only on the Python version the release workflow uses.
+
+    A test that waits for what it is actually waiting for cannot lose that bet. The cap is
+    generous and returning False (rather than raising here) keeps the failure where it
+    belongs: on the assertion that says what was expected.
+    """
+    for _ in range(tries):
+        if condition():  # type: ignore[operator]
+            return True
+        await pilot.pause()  # type: ignore[attr-defined]
+    return bool(condition())  # type: ignore[operator]
+
+
 async def _publish(pilot: object, *, dest_index: int | None = None) -> None:
     """Press u, optionally pick a destination, and confirm."""
     from textual.widgets import RadioButton
@@ -166,19 +185,29 @@ async def test_publish_can_be_cancelled(world: Path) -> None:
 
 
 async def test_publishing_marked_sessions_publishes_all_of_them(world: Path) -> None:
+    from textual.widgets import DataTable
+
     app = ClaudeBrowserApp()
     async with app.run_test() as pilot:
-        await _open_sessions(pilot)
+        screen = await _open_sessions(pilot)
         store = await _remote_store(app)
+        table = screen.query_one("#sessions", DataTable)
 
+        # `space` toggles, so moving and marking cannot be fired blind: if the `down` has
+        # not been applied yet, the second `space` *unmarks* row 1 and the publish falls
+        # back to the row under the cursor — one session instead of two, and an assertion
+        # that reads like the publish lost a session when nothing was ever marked. Waiting
+        # for the cursor to actually move is what makes this mean what it says.
         await pilot.press("space")  # mark row 1
-        await pilot.pause()
+        await _until(pilot, lambda: len(screen._marked) == 1)
         await pilot.press("down")
+        await _until(pilot, lambda: table.cursor_row == 1)
         await pilot.press("space")  # mark row 2
-        await pilot.pause()
+        await _until(pilot, lambda: len(screen._marked) == 2)
+        assert len(screen._marked) == 2, "las dos filas tienen que quedar marcadas"
+
         await _publish(pilot)
-        for _ in range(20):
-            await pilot.pause()
+        await _until(pilot, lambda: len(store.list_sessions()) == 2)
 
         assert sorted(s.session_id for s in store.list_sessions()) == ["ses-1", "ses-2"]
 
@@ -426,12 +455,12 @@ async def test_hydrating_a_session_with_a_credential_warns_you(world: Path) -> N
 
         table = screen.query_one("#sessions", DataTable)
         table.move_cursor(row=0)
+        fetched = world / "projects" / "-repo" / "ses-ajena.jsonl"
         with patch("multi_claude.screens.sessions.launch_claude", side_effect=fake_launch):
             table.action_select_cursor()
-            for _ in range(40):
-                await pilot.pause()
+            await _until(pilot, fetched.is_file)
 
-        assert (world / "projects" / "-repo" / "ses-ajena.jsonl").is_file()  # fetched
+        assert fetched.is_file()  # fetched
         assert any("credencial" in w for w in warnings), warnings
         # And it is already marked, without waiting for the next full scan.
         assert screen._secret_counts.get("ses-ajena") == 1
@@ -646,8 +675,7 @@ async def test_author_filters_a_remote_tab_by_who_published(world: Path) -> None
         await pilot.press("slash")
         await pilot.pause()
         screen.query_one("#filter", Input).value = "author:ana"
-        for _ in range(10):
-            await pilot.pause()
+        await _until(pilot, lambda: len(screen._rows) == 1)
 
         assert [screen._remote_sessions[i].session_id for _, i in screen._rows] == ["ses-de-ana"]
 
@@ -1099,8 +1127,7 @@ async def test_enter_on_a_session_you_already_have_resumes_it_locally(world: Pat
         await pilot.pause()
         with patch("multi_claude.screens.sessions.launch_claude", side_effect=fake_launch):
             table.action_select_cursor()
-            for _ in range(20):
-                await pilot.pause()
+            await _until(pilot, lambda: bool(launched))
 
         assert launched == ["ses-1"]
 
@@ -1989,8 +2016,7 @@ async def test_d_on_a_published_row_unpublishes_it(world: Path) -> None:
         for _ in range(6):
             await pilot.pause()
         await pilot.press("y")  # confirm
-        for _ in range(25):
-            await pilot.pause()
+        await _until(pilot, lambda: store.list_sessions() == ())
 
         assert store.list_sessions() == ()
         # The local transcript is untouched.

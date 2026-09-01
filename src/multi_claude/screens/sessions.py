@@ -450,6 +450,7 @@ class SessionsScreen(Screen[None]):
             self._repaint_remote()
             return
         table = self.query_one("#sessions", DataTable)
+        keep = self._cursor_session_id(table)
         table.clear()
         raw_query = self.query_one("#filter", Input).value
         query = parse_query(raw_query)
@@ -493,9 +494,51 @@ class SessionsScreen(Screen[None]):
             )
             table.add_row(*row, key=str(idx))
             self._rows.append((False, idx))
+        self._restore_cursor(table, keep)
         filter_input = self.query_one("#filter", Input)
         if self._rows and not filter_input.has_focus:
             table.focus()
+
+    def _cursor_session_id(self, table: DataTable[Any]) -> str | None:
+        """The id of the session under the cursor, before a repaint throws the table away.
+
+        By id and not by row number: a repaint can be the result of a filter or a rescan, and
+        then row 3 is a different session than it was. The id is the only thing that still
+        means the same afterwards.
+        """
+        row = table.cursor_row
+        if row is None or not (0 <= row < len(self._rows)):
+            return None
+        is_remote, idx = self._rows[row]
+        if is_remote:
+            if idx < len(self._remote_sessions):
+                return self._remote_sessions[idx].session_id
+            return None
+        return self._sessions[idx].id if idx < len(self._sessions) else None
+
+    def _restore_cursor(self, table: DataTable[Any], session_id: str | None) -> None:
+        """Put the cursor back on ``session_id`` after a repaint, if it is still listed.
+
+        ``DataTable.clear()`` sends the cursor back to row 0, and repaints are not only the
+        user's doing: the credential scan and the published-sessions lookup both finish in
+        the background and repaint when they land. Without this, a scan completing while
+        someone is working the list moves their selection under them — which is a nuisance
+        for `Enter` and a hazard for `d`, since the row that gets deleted is not the row they
+        were looking at. A session that the repaint filtered out leaves the cursor where the
+        table put it; there is nothing better to aim at.
+        """
+        if session_id is None:
+            return
+        for row, (is_remote, idx) in enumerate(self._rows):
+            if is_remote:
+                found = idx < len(self._remote_sessions) and (
+                    self._remote_sessions[idx].session_id == session_id
+                )
+            else:
+                found = idx < len(self._sessions) and self._sessions[idx].id == session_id
+            if found:
+                table.move_cursor(row=row)
+                return
 
     async def _refresh_remote_tabs(self) -> None:
         """Rebuild the tab bar after the user changes which repos are linked.
@@ -520,10 +563,12 @@ class SessionsScreen(Screen[None]):
     def _repaint_remote(self) -> None:
         """Paint the selected remote's sessions in place of the local ones."""
         table = self.query_one("#sessions", DataTable)
+        keep = self._cursor_session_id(table)
         table.clear()
         query = parse_query(self.query_one("#filter", Input).value)
         self._rows = []
         self._paint_remote_rows(table, query)
+        self._restore_cursor(table, keep)
         filter_input = self.query_one("#filter", Input)
         if self._rows and not filter_input.has_focus:
             table.focus()
@@ -740,15 +785,13 @@ class SessionsScreen(Screen[None]):
         session = self._selected_session()
         if session is None:
             return
-        table = self.query_one("#sessions", DataTable)
-        row = table.cursor_row
         if session.id in self._marked:
             self._marked.discard(session.id)
         else:
             self._marked.add(session.id)
+        # No cursor bookkeeping here any more: _repaint keeps it on the same session, which
+        # is what this used to patch up locally for one action out of the ten that repaint.
         self._repaint()
-        if row is not None and 0 <= row < len(self._rows):
-            table.move_cursor(row=row)
 
     def _selected_sessions(self) -> list[Session]:
         """Bulk-action targets: the marked set, or the current row if none marked."""

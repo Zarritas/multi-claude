@@ -295,6 +295,56 @@ async def test_file_filter_finds_the_session_that_edited_it(synthetic_world: Pat
         assert shown() == []
 
 
+async def test_a_background_repaint_does_not_move_the_cursor(synthetic_world: Path) -> None:
+    """A scan finishing must not move the selection under the person using the list.
+
+    Repaints are not only the user's doing: the credential scan and the published-sessions
+    lookup land in the background and repaint when they do. ``DataTable.clear()`` sends the
+    cursor to row 0, so without keeping it deliberately, a scan completing while someone is
+    working the list moves their selection — a nuisance for ``Enter`` and a hazard for ``d``,
+    which would then delete a session they were not looking at.
+    """
+    from textual.widgets import DataTable
+
+    app = ClaudeBrowserApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _enter_project(pilot)
+        screen = app.screen
+        table = screen.query_one("#sessions", DataTable)
+
+        table.move_cursor(row=1)
+        await pilot.pause()
+        selected = screen._sessions[screen._rows[1][1]].id
+
+        # What a worker does when it lands.
+        screen._repaint()
+        await pilot.pause()
+
+        assert table.cursor_row == 1
+        assert screen._sessions[screen._rows[table.cursor_row][1]].id == selected
+
+
+async def test_marking_a_row_leaves_the_cursor_on_it(synthetic_world: Path) -> None:
+    """`space` toggles, so a cursor that jumped would make the next one unmark the wrong row."""
+    from textual.widgets import DataTable
+
+    app = ClaudeBrowserApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _enter_project(pilot)
+        screen = app.screen
+        table = screen.query_one("#sessions", DataTable)
+
+        table.move_cursor(row=1)
+        await pilot.pause()
+        await pilot.press("space")
+        await pilot.pause()
+
+        assert table.cursor_row == 1
+        assert len(screen._marked) == 1
+
+
 async def test_filter_keeps_focus_on_input_while_typing(synthetic_world: Path) -> None:
     """Regression: filtering on each keystroke must not steal focus from the input."""
     app = ClaudeBrowserApp()
