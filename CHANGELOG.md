@@ -23,6 +23,8 @@ Y hacía falta por una razón más simple: hasta ahora la única versión instal
 
 ### Fixed
 
+- **Un escaneo que terminaba te movía la fila seleccionada.** `_repaint` llama a `DataTable.clear()`, que manda el cursor a la fila 0, y repintar no es solo cosa tuya: el escáner de credenciales y la consulta de sesiones publicadas terminan en segundo plano y repintan al aterrizar. Así que si estabas recorriendo el listado y acababa un escaneo, la selección se te movía sola. Molesto con `Enter` y **peligroso con `d`**, que borra la fila que hay bajo el cursor y no la que estabas mirando. Ahora `_repaint` conserva el cursor **por id de sesión**, no por número de fila: un repintado puede venir de un filtro o de un rescan, y entonces la fila 3 es otra sesión, mientras que el id sigue queriendo decir lo mismo. Vale igual para la pestaña de un repositorio compartido. El código ya lo sabía sin llegar a nombrarlo —`action_toggle_mark` restauraba el cursor a mano después de repintar, y `_on_secret_counts` se salta su repintado «para no mover el cursor»—: eran dos parches locales a algo general, porque hay diez llamadas a `_repaint`. Lo destapó un test que publicaba dos sesiones marcadas y solo publicaba una: como `space` alterna, con el cursor de vuelta en la fila 0 la segunda pulsación **desmarcaba** la primera, no quedaba nada marcado, y publicar caía de nuevo en la fila del cursor.
+
 - **Tres afirmaciones del README habían caducado**, y traducirlo fue lo que las destapó: decía que «no hay escáner de secretos todavía» justo debajo de la sección que lo documenta, que con token «la segunda publicación pisa a la primera» (lo evita la comprobación de conflicto desde la Fase 6), y que la suite tiene 282 tests (son 876). Corregidas en las dos versiones.
 
 ### Added
